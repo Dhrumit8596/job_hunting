@@ -1,0 +1,1066 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Quality Systems Engineer – Luminar Semiconductor | Apply</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      background: #f5f5f5;
+      color: #1a1a1a;
+      padding: 32px 16px 80px;
+    }
+
+    .page-header {
+      max-width: 720px;
+      margin: 0 auto 24px;
+    }
+    .page-header h1 {
+      font-size: 22px;
+      font-weight: 700;
+      color: #1a1a1a;
+      margin-bottom: 4px;
+    }
+    .page-header .company-meta {
+      font-size: 14px;
+      color: #555;
+    }
+
+    .card {
+      background: #fff;
+      border: 1px solid #e0e0e0;
+      border-radius: 4px;
+      max-width: 720px;
+      margin: 0 auto 20px;
+      padding: 28px 32px;
+    }
+
+    .section-title {
+      font-size: 16px;
+      font-weight: 700;
+      color: #1a1a1a;
+      padding-bottom: 12px;
+      border-bottom: 1px solid #e8e8e8;
+      margin-bottom: 20px;
+    }
+
+    .field {
+      margin-bottom: 18px;
+    }
+
+    label {
+      display: block;
+      font-size: 13px;
+      font-weight: 600;
+      color: #333;
+      margin-bottom: 5px;
+    }
+
+    label .req {
+      color: #e02020;
+      margin-left: 2px;
+    }
+
+    input[type="text"],
+    input[type="email"],
+    input[type="tel"],
+    input[type="url"],
+    textarea {
+      width: 100%;
+      padding: 9px 11px;
+      border: 1px solid #ccc;
+      border-radius: 3px;
+      font-size: 14px;
+      font-family: inherit;
+      color: #1a1a1a;
+      background: #fff;
+      transition: border-color 0.15s;
+    }
+    input[type="text"]:focus,
+    input[type="email"]:focus,
+    input[type="tel"]:focus,
+    input[type="url"]:focus,
+    textarea:focus {
+      outline: none;
+      border-color: #24a148;
+      box-shadow: 0 0 0 2px rgba(36,161,72,0.15);
+    }
+
+    textarea {
+      resize: vertical;
+      min-height: 80px;
+    }
+
+    .char-count {
+      font-size: 11px;
+      color: #888;
+      text-align: right;
+      margin-top: 3px;
+    }
+
+    .row-2 {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 16px;
+    }
+    .row-3 {
+      display: grid;
+      grid-template-columns: 1fr 1fr 1fr;
+      gap: 16px;
+    }
+
+    /* ── select-shell (react-select style combobox) ── */
+    .select-shell {
+      position: relative;
+    }
+    .select__container {
+      position: relative;
+    }
+    .select__container input[role="combobox"] {
+      width: 100%;
+      padding: 9px 32px 9px 11px;
+      border: 1px solid #ccc;
+      border-radius: 3px;
+      font-size: 14px;
+      font-family: inherit;
+      color: #1a1a1a;
+      background: #fff url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='8' viewBox='0 0 12 8'%3E%3Cpath d='M1 1l5 5 5-5' stroke='%23666' stroke-width='1.5' fill='none' stroke-linecap='round'/%3E%3C/svg%3E") no-repeat right 10px center;
+      cursor: pointer;
+      transition: border-color 0.15s;
+    }
+    .select__container input[role="combobox"]:focus {
+      outline: none;
+      border-color: #24a148;
+      box-shadow: 0 0 0 2px rgba(36,161,72,0.15);
+    }
+    .select__container input[role="combobox"][aria-expanded="true"] {
+      border-color: #24a148;
+      border-bottom-left-radius: 0;
+      border-bottom-right-radius: 0;
+    }
+    .select__menu {
+      position: absolute;
+      top: 100%;
+      left: 0;
+      right: 0;
+      z-index: 1000;
+      background: #fff;
+      border: 1px solid #24a148;
+      border-top: none;
+      border-radius: 0 0 3px 3px;
+      max-height: 220px;
+      overflow-y: auto;
+      box-shadow: 0 4px 12px rgba(0,0,0,0.12);
+    }
+    .select__menu [role="option"] {
+      padding: 9px 12px;
+      font-size: 14px;
+      color: #1a1a1a;
+      cursor: pointer;
+      transition: background 0.1s;
+    }
+    .select__menu [role="option"]:hover,
+    .select__menu [role="option"][aria-selected="true"] {
+      background: #f0faf3;
+      color: #24a148;
+    }
+
+    /* ── File upload widget ── */
+    .file-upload {
+      border: 2px dashed #d0d0d0;
+      border-radius: 4px;
+      padding: 20px 16px;
+      background: #fafafa;
+      transition: border-color 0.15s;
+    }
+    .file-upload.has-file {
+      border-color: #24a148;
+      background: #f0faf3;
+    }
+    .upload-buttons {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+    .btn-s3 {
+      padding: 8px 20px;
+      background: #24a148;
+      color: #fff;
+      border: none;
+      border-radius: 3px;
+      font-size: 13px;
+      font-weight: 600;
+      font-family: inherit;
+      cursor: pointer;
+      transition: background 0.15s;
+    }
+    .btn-s3:hover { background: #1b8038; }
+    .btn-paste {
+      padding: 8px 20px;
+      background: #fff;
+      color: #333;
+      border: 1px solid #ccc;
+      border-radius: 3px;
+      font-size: 13px;
+      font-family: inherit;
+      cursor: pointer;
+    }
+    .btn-paste:hover { background: #f5f5f5; }
+    .filename {
+      display: block;
+      margin-top: 8px;
+      font-size: 13px;
+      color: #24a148;
+      font-weight: 500;
+      word-break: break-all;
+    }
+    .filename:empty { display: none; }
+    a.remove {
+      display: inline-block;
+      margin-top: 6px;
+      font-size: 12px;
+      color: #cc3300;
+      cursor: pointer;
+      text-decoration: underline;
+    }
+    .upload-hint {
+      margin-top: 8px;
+      font-size: 12px;
+      color: #888;
+    }
+
+    /* ── Radio groups ── */
+    fieldset {
+      border: none;
+      padding: 0;
+      margin: 0;
+    }
+    legend {
+      font-size: 13px;
+      font-weight: 600;
+      color: #333;
+      margin-bottom: 8px;
+      display: block;
+    }
+    legend .req { color: #e02020; margin-left: 2px; }
+    .radio-group {
+      display: flex;
+      gap: 20px;
+      align-items: center;
+      flex-wrap: wrap;
+    }
+    .radio-option {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 14px;
+      color: #333;
+      cursor: pointer;
+    }
+    .radio-option input[type="radio"] {
+      width: 16px;
+      height: 16px;
+      accent-color: #24a148;
+      cursor: pointer;
+    }
+
+    /* ── Validation errors ── */
+    .field-error {
+      display: none;
+      font-size: 12px;
+      color: #e02020;
+      margin-top: 4px;
+    }
+    .field-error.visible { display: block; }
+    input.error,
+    textarea.error {
+      border-color: #e02020;
+    }
+    input[role="combobox"].error {
+      border-color: #e02020;
+    }
+    .file-upload.error {
+      border-color: #e02020;
+    }
+    fieldset.error legend { color: #e02020; }
+
+    /* ── Required note ── */
+    .required-note {
+      font-size: 12px;
+      color: #666;
+      margin-bottom: 16px;
+    }
+    .required-note .req { color: #e02020; }
+
+    /* ── Submit ── */
+    .submit-btn {
+      padding: 12px 32px;
+      background: #24a148;
+      color: #fff;
+      border: none;
+      border-radius: 3px;
+      font-size: 15px;
+      font-weight: 700;
+      font-family: inherit;
+      cursor: pointer;
+      transition: background 0.15s;
+    }
+    .submit-btn:hover { background: #1b8038; }
+    .submit-btn:active { background: #166030; }
+
+    /* ── Test log panel ── */
+    #test-log {
+      max-width: 720px;
+      margin: 24px auto 0;
+      background: #1a1a2e;
+      border-radius: 6px;
+      padding: 16px;
+      font-family: 'SF Mono', 'Fira Mono', 'Courier New', monospace;
+      font-size: 12px;
+      color: #a8d8a8;
+      max-height: 300px;
+      overflow-y: auto;
+    }
+    #test-log .log-title {
+      color: #7ecfff;
+      font-weight: bold;
+      margin-bottom: 8px;
+      font-size: 13px;
+    }
+    #test-log .log-entry {
+      padding: 2px 0;
+      border-bottom: 1px solid rgba(255,255,255,0.05);
+      white-space: pre-wrap;
+      word-break: break-all;
+    }
+    #test-log .log-entry.warn { color: #ffd080; }
+    #test-log .log-entry.error { color: #ff8080; }
+    #test-log .log-entry.info { color: #80d4ff; }
+  </style>
+</head>
+<body>
+
+<div class="page-header">
+  <h1>Quality Systems Engineer</h1>
+  <div class="company-meta">Luminar Semiconductor &middot; Santa Clara, CA &middot; Full-time</div>
+</div>
+
+<form id="application-form" novalidate>
+
+  <!-- ── Resume Upload ─────────────────────────────── -->
+  <div class="card">
+    <div class="section-title">Resume / CV</div>
+    <p class="required-note"><span class="req">*</span> Required</p>
+
+    <div class="field">
+      <label>Resume/CV <span class="req">*</span></label>
+      <div class="file-upload" data-resumetoken="" id="resume-widget">
+        <div class="upload-buttons">
+          <button type="button" class="btn-s3" id="resume-attach-btn">Attach</button>
+          <button type="button" class="btn-paste">Paste</button>
+        </div>
+        <span class="filename" id="resume-filename"></span>
+        <a class="remove" id="resume-remove" style="display:none">Remove</a>
+        <p class="upload-hint">PDF, DOC, or DOCX &middot; Max 5 MB</p>
+      </div>
+      <!-- Hidden field simulates server-side validation token -->
+      <input type="hidden" name="resume" id="resume-hidden" required>
+      <div class="field-error" id="resume-error">Resume/CV is required.</div>
+    </div>
+  </div>
+
+  <!-- ── Contact Information ───────────────────────── -->
+  <div class="card">
+    <div class="section-title">Contact Information</div>
+    <p class="required-note"><span class="req">*</span> Required</p>
+
+    <div class="row-2">
+      <div class="field">
+        <label for="first-name">First Name <span class="req">*</span></label>
+        <input type="text" id="first-name" name="first_name" required
+               placeholder="First name" autocomplete="given-name">
+        <div class="field-error" id="first-name-error">First name is required.</div>
+      </div>
+      <div class="field">
+        <label for="last-name">Last Name <span class="req">*</span></label>
+        <input type="text" id="last-name" name="last_name" required
+               placeholder="Last name" autocomplete="family-name">
+        <div class="field-error" id="last-name-error">Last name is required.</div>
+      </div>
+    </div>
+
+    <div class="field">
+      <label for="email">Email <span class="req">*</span></label>
+      <input type="email" id="email" name="email" required
+             placeholder="you@example.com" autocomplete="email">
+      <div class="field-error" id="email-error">Valid email is required.</div>
+    </div>
+
+    <div class="field">
+      <label for="phone">Phone <span class="req">*</span></label>
+      <input type="tel" id="phone" name="phone" required
+             placeholder="+1 (555) 000-0000" autocomplete="tel">
+      <div class="field-error" id="phone-error">Phone number is required.</div>
+    </div>
+
+    <div class="field">
+      <label for="linkedin">LinkedIn Profile</label>
+      <input type="url" id="linkedin" name="linkedin_url"
+             placeholder="https://linkedin.com/in/yourprofile">
+    </div>
+
+    <div class="field">
+      <label for="address">Address</label>
+      <input type="text" id="address" name="address"
+             placeholder="Street address" autocomplete="street-address">
+    </div>
+
+    <div class="row-3">
+      <div class="field">
+        <label for="city">City <span class="req">*</span></label>
+        <input type="text" id="city" name="city" required
+               placeholder="City" autocomplete="address-level2">
+        <div class="field-error" id="city-error">City is required.</div>
+      </div>
+      <div class="field">
+        <label>State</label>
+        <div class="select-shell">
+          <div class="select__container" id="state-container">
+            <input type="text" role="combobox" aria-haspopup="listbox" aria-expanded="false"
+                   aria-controls="state-listbox"
+                   aria-required="false" name="state" id="state-combobox"
+                   placeholder="Select state..." readonly>
+            <input type="hidden" name="state_hidden" id="state-hidden">
+            <div class="select__menu" id="state-menu" style="display:none">
+              <div role="listbox" id="state-listbox">
+                <div role="option" data-value="CA">California</div>
+                <div role="option" data-value="TX">Texas</div>
+                <div role="option" data-value="NY">New York</div>
+                <div role="option" data-value="WA">Washington</div>
+                <div role="option" data-value="CO">Colorado</div>
+                <div role="option" data-value="IL">Illinois</div>
+                <div role="option" data-value="OR">Oregon</div>
+                <div role="option" data-value="AZ">Arizona</div>
+                <div role="option" data-value="MA">Massachusetts</div>
+                <div role="option" data-value="GA">Georgia</div>
+                <div role="option" data-value="FL">Florida</div>
+                <div role="option" data-value="NC">North Carolina</div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div class="field">
+        <label for="zip">Zip Code</label>
+        <input type="text" id="zip" name="zip"
+               placeholder="Zip code" autocomplete="postal-code">
+      </div>
+    </div>
+
+    <div class="field">
+      <label>Country <span class="req">*</span></label>
+      <div class="select-shell">
+        <div class="select__container" id="country-container">
+          <input type="text" role="combobox" aria-haspopup="listbox" aria-expanded="false"
+                 aria-controls="country-listbox"
+                 aria-required="true" name="country" id="country-combobox"
+                 placeholder="Select country..." readonly>
+          <input type="hidden" name="country_hidden" id="country-hidden" required>
+          <div class="select__menu" id="country-menu" style="display:none">
+            <div role="listbox" id="country-listbox">
+              <div role="option" data-value="United States">United States</div>
+              <div role="option" data-value="Canada">Canada</div>
+              <div role="option" data-value="United Kingdom">United Kingdom</div>
+              <div role="option" data-value="Australia">Australia</div>
+              <div role="option" data-value="Germany">Germany</div>
+              <div role="option" data-value="France">France</div>
+              <div role="option" data-value="India">India</div>
+              <div role="option" data-value="Mexico">Mexico</div>
+              <div role="option" data-value="Brazil">Brazil</div>
+              <div role="option" data-value="Japan">Japan</div>
+              <div role="option" data-value="China">China</div>
+              <div role="option" data-value="Singapore">Singapore</div>
+              <div role="option" data-value="Ireland">Ireland</div>
+              <div role="option" data-value="Netherlands">Netherlands</div>
+              <div role="option" data-value="Sweden">Sweden</div>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div class="field-error" id="country-error">Country is required.</div>
+    </div>
+  </div>
+
+  <!-- ── Work Authorization ─────────────────────────── -->
+  <div class="card">
+    <div class="section-title">Work Authorization</div>
+
+    <div class="field">
+      <fieldset id="workauth-fieldset">
+        <legend>Are you legally authorized to work in the United States? <span class="req">*</span></legend>
+        <div class="radio-group">
+          <label class="radio-option">
+            <input type="radio" name="work_authorization" value="Yes" required>
+            Yes
+          </label>
+          <label class="radio-option">
+            <input type="radio" name="work_authorization" value="No">
+            No
+          </label>
+        </div>
+        <div class="field-error" id="workauth-error">This field is required.</div>
+      </fieldset>
+    </div>
+
+    <div class="field">
+      <fieldset id="sponsorship-fieldset">
+        <legend>Will you now or in the future require sponsorship for employment visa status? <span class="req">*</span></legend>
+        <div class="radio-group">
+          <label class="radio-option">
+            <input type="radio" name="require_sponsorship" value="Yes" required>
+            Yes
+          </label>
+          <label class="radio-option">
+            <input type="radio" name="require_sponsorship" value="No">
+            No
+          </label>
+        </div>
+        <div class="field-error" id="sponsorship-error">This field is required.</div>
+      </fieldset>
+    </div>
+
+    <div class="field">
+      <label>Have you signed a non-compete agreement with your current employer?</label>
+      <div class="select-shell">
+        <div class="select__container" id="noncompete-container">
+          <input type="text" role="combobox" aria-haspopup="listbox" aria-expanded="false"
+                 aria-controls="noncompete-listbox"
+                 aria-required="false" name="non_compete" id="noncompete-combobox"
+                 placeholder="Select..." readonly>
+          <input type="hidden" name="non_compete_hidden" id="noncompete-hidden">
+          <div class="select__menu" id="noncompete-menu" style="display:none">
+            <div role="listbox" id="noncompete-listbox">
+              <div role="option" data-value="Yes">Yes</div>
+              <div role="option" data-value="No">No</div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── Education ─────────────────────────────────── -->
+  <div class="card">
+    <div class="section-title">Education</div>
+
+    <div class="field">
+      <label for="university">University / School</label>
+      <input type="text" id="university" name="university"
+             placeholder="e.g. University of California, Berkeley">
+    </div>
+
+    <div class="row-2">
+      <div class="field">
+        <label for="degree">Degree</label>
+        <input type="text" id="degree" name="degree"
+               placeholder="e.g. Bachelor of Science">
+      </div>
+      <div class="field">
+        <label for="major">Major / Field of Study</label>
+        <input type="text" id="major" name="major"
+               placeholder="e.g. Electrical Engineering">
+      </div>
+    </div>
+
+    <div class="row-2">
+      <div class="field">
+        <label>Start Date Month</label>
+        <div class="select-shell">
+          <div class="select__container" id="start-month-container">
+            <input type="text" role="combobox" aria-haspopup="listbox" aria-expanded="false"
+                   aria-controls="start-month-listbox"
+                   aria-required="false" name="start_date_month" id="start-month-combobox"
+                   placeholder="Select month..." readonly>
+            <input type="hidden" name="start_date_month_hidden" id="start-month-hidden">
+            <div class="select__menu" id="start-month-menu" style="display:none">
+              <div role="listbox" id="start-month-listbox">
+                <div role="option" data-value="January">January</div>
+                <div role="option" data-value="February">February</div>
+                <div role="option" data-value="March">March</div>
+                <div role="option" data-value="April">April</div>
+                <div role="option" data-value="May">May</div>
+                <div role="option" data-value="June">June</div>
+                <div role="option" data-value="July">July</div>
+                <div role="option" data-value="August">August</div>
+                <div role="option" data-value="September">September</div>
+                <div role="option" data-value="October">October</div>
+                <div role="option" data-value="November">November</div>
+                <div role="option" data-value="December">December</div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div class="field">
+        <label for="start-year">Start Date Year</label>
+        <input type="text" id="start-year" name="start_date_year" required
+               placeholder="e.g. 2016" maxlength="4">
+        <div class="field-error" id="start-year-error">Start year is required.</div>
+      </div>
+    </div>
+
+    <div class="row-2">
+      <div class="field">
+        <label>End Date Month</label>
+        <div class="select-shell">
+          <div class="select__container" id="end-month-container">
+            <input type="text" role="combobox" aria-haspopup="listbox" aria-expanded="false"
+                   aria-controls="end-month-listbox"
+                   aria-required="false" name="end_date_month" id="end-month-combobox"
+                   placeholder="Select month..." readonly>
+            <input type="hidden" name="end_date_month_hidden" id="end-month-hidden">
+            <div class="select__menu" id="end-month-menu" style="display:none">
+              <div role="listbox" id="end-month-listbox">
+                <div role="option" data-value="January">January</div>
+                <div role="option" data-value="February">February</div>
+                <div role="option" data-value="March">March</div>
+                <div role="option" data-value="April">April</div>
+                <div role="option" data-value="May">May</div>
+                <div role="option" data-value="June">June</div>
+                <div role="option" data-value="July">July</div>
+                <div role="option" data-value="August">August</div>
+                <div role="option" data-value="September">September</div>
+                <div role="option" data-value="October">October</div>
+                <div role="option" data-value="November">November</div>
+                <div role="option" data-value="December">December</div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div class="field">
+        <label for="end-year">End Date Year</label>
+        <input type="text" id="end-year" name="end_date_year" required
+               placeholder="e.g. 2020" maxlength="4">
+        <div class="field-error" id="end-year-error">End year is required.</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── Open-ended Questions ────────────────────── -->
+  <div class="card">
+    <div class="section-title">Additional Questions</div>
+
+    <div class="field">
+      <label for="qc-experience">Describe your experience with quality control systems <span class="req">*</span></label>
+      <textarea id="qc-experience" name="question_qc_experience"
+                required aria-required="true" maxlength="500"
+                placeholder="Please describe your experience..."></textarea>
+      <div class="char-count"><span id="qc-chars">0</span> / 500</div>
+      <div class="field-error" id="qc-error">This field is required.</div>
+    </div>
+
+    <div class="field">
+      <label for="years-semi">How many years of semiconductor or medical device manufacturing experience do you have? <span class="req">*</span></label>
+      <textarea id="years-semi" name="question_years_semi"
+                required aria-required="true" maxlength="100"
+                placeholder="Please describe..."></textarea>
+      <div class="char-count"><span id="semi-chars">0</span> / 100</div>
+      <div class="field-error" id="years-semi-error">This field is required.</div>
+    </div>
+  </div>
+
+  <!-- ── Submit ──────────────────────────────────── -->
+  <div class="card" style="padding: 20px 32px;">
+    <div id="submit-errors" style="display:none; margin-bottom:14px; padding:12px 14px; background:#fff3f3; border:1px solid #fca5a5; border-radius:3px; font-size:13px; color:#b91c1c;"></div>
+    <button type="button" class="submit-btn" id="submit-btn">Submit Application</button>
+  </div>
+
+</form>
+
+<!-- ── Test Log Panel ────────────────────────────── -->
+<div id="test-log">
+  <div class="log-title">Test Log (autofill progress)</div>
+</div>
+
+<script>
+(function () {
+  'use strict';
+
+  // ── Make pjaIsApplicationPage() return true ──────────────────────────────
+  // pjaIsApplicationPage() tests location.href.includes('/apply').
+  // When opened from a file:// URL or a localhost server, the content scripts
+  // already inject (manifest matches both), but the autofill App Tools panel
+  // only shows if pjaIsApplicationPage() returns true OR appMode is set in
+  // storage. We use replaceState so the URL contains '/apply' without a reload.
+  // The content script runs at document_idle — after this sync script — so it
+  // will always see the updated href.
+  if (!location.href.includes('/apply') && !location.href.includes('greenhouse.io')) {
+    try {
+      history.replaceState(null, '', '/apply/greenhouse-test' + location.search + location.hash);
+    } catch(e) {}
+  }
+
+  // ── Console log capture ──────────────────────────────────────────────────
+  const logPanel = document.getElementById('test-log');
+
+  function appendLog(msg, level) {
+    const entry = document.createElement('div');
+    entry.className = 'log-entry' + (level ? ' ' + level : '');
+    const ts = new Date().toLocaleTimeString('en-US', { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' });
+    entry.textContent = '[' + ts + '] ' + msg;
+    logPanel.appendChild(entry);
+    logPanel.scrollTop = logPanel.scrollHeight;
+  }
+
+  (function patchConsole() {
+    const orig = {
+      log:   console.log.bind(console),
+      warn:  console.warn.bind(console),
+      error: console.error.bind(console),
+      info:  console.info.bind(console),
+    };
+    console.log = function (...args) {
+      orig.log(...args);
+      const msg = args.map(a => (typeof a === 'object' ? JSON.stringify(a) : String(a))).join(' ');
+      if (msg.startsWith('PJA') || msg.startsWith('[PJA')) appendLog(msg);
+    };
+    console.warn = function (...args) {
+      orig.warn(...args);
+      const msg = args.map(a => (typeof a === 'object' ? JSON.stringify(a) : String(a))).join(' ');
+      appendLog('WARN: ' + msg, 'warn');
+    };
+    console.error = function (...args) {
+      orig.error(...args);
+      const msg = args.map(a => (typeof a === 'object' ? JSON.stringify(a) : String(a))).join(' ');
+      appendLog('ERROR: ' + msg, 'error');
+    };
+    console.info = function (...args) {
+      orig.info(...args);
+      const msg = args.map(a => (typeof a === 'object' ? JSON.stringify(a) : String(a))).join(' ');
+      appendLog('INFO: ' + msg, 'info');
+    };
+  })();
+
+  appendLog('Greenhouse test page loaded — extension autofill target ready.', 'info');
+
+  // ── Combobox helper ──────────────────────────────────────────────────────
+  // Wires a select-shell combobox: clicking opens menu, clicking option fills both
+  // the visible input and the hidden required input.
+  function wireCombobox(opts) {
+    var comboInput  = document.getElementById(opts.comboId);
+    var hiddenInput = document.getElementById(opts.hiddenId);
+    var menu        = document.getElementById(opts.menuId);
+    var listbox     = document.getElementById(opts.listboxId);
+
+    if (!comboInput || !menu || !listbox) return;
+
+    function openMenu() {
+      menu.style.display = 'block';
+      comboInput.setAttribute('aria-expanded', 'true');
+    }
+
+    function closeMenu() {
+      menu.style.display = 'none';
+      comboInput.setAttribute('aria-expanded', 'false');
+    }
+
+    function selectOption(optEl) {
+      var value   = optEl.getAttribute('data-value');
+      var label   = optEl.textContent.trim();
+
+      // Update visible combobox text
+      comboInput.value = label;
+      comboInput.dispatchEvent(new Event('input',  { bubbles: true }));
+      comboInput.dispatchEvent(new Event('change', { bubbles: true }));
+
+      // Update hidden required field — remove required when filled so
+      // findMissingRequired sees this as satisfied (Greenhouse pattern).
+      if (hiddenInput) {
+        hiddenInput.value = value;
+        hiddenInput.removeAttribute('required');
+        hiddenInput.dispatchEvent(new Event('change', { bubbles: true }));
+      }
+
+      // Mark selected state on options
+      Array.from(listbox.querySelectorAll('[role="option"]')).forEach(function(o) {
+        o.setAttribute('aria-selected', o === optEl ? 'true' : 'false');
+      });
+
+      closeMenu();
+      appendLog('Combobox "' + (opts.comboId) + '" selected: ' + label + ' (' + value + ')');
+    }
+
+    // Open on click / mousedown
+    comboInput.addEventListener('mousedown', function(e) {
+      e.preventDefault();
+      if (menu.style.display === 'none') openMenu(); else closeMenu();
+    });
+
+    // Also open on click (for extension-dispatched click events)
+    comboInput.addEventListener('click', function() {
+      if (menu.style.display === 'none') openMenu();
+    });
+
+    // Option click
+    listbox.addEventListener('mousedown', function(e) {
+      var opt = e.target.closest('[role="option"]');
+      if (opt) { e.preventDefault(); selectOption(opt); }
+    });
+    listbox.addEventListener('click', function(e) {
+      var opt = e.target.closest('[role="option"]');
+      if (opt) selectOption(opt);
+    });
+
+    // Keyboard navigation
+    comboInput.addEventListener('keydown', function(e) {
+      if (e.key === 'Escape') { closeMenu(); return; }
+      if (e.key === 'ArrowDown' || e.key === 'Enter') {
+        if (menu.style.display === 'none') { openMenu(); return; }
+      }
+    });
+
+    // Close when clicking outside
+    document.addEventListener('mousedown', function(e) {
+      if (!comboInput.closest('.select__container').contains(e.target)) closeMenu();
+    });
+
+    // Extension fires mouseover+mousedown+mouseup+click on option — handle all paths above.
+    // Also expose a programmatic setter for testing:
+    comboInput._selectValue = function(val) {
+      var opts2 = Array.from(listbox.querySelectorAll('[role="option"]'));
+      var match = opts2.find(function(o) {
+        return o.getAttribute('data-value').toLowerCase() === val.toLowerCase() ||
+               o.textContent.trim().toLowerCase() === val.toLowerCase();
+      });
+      if (match) { openMenu(); selectOption(match); return true; }
+      return false;
+    };
+  }
+
+  // Wire all comboboxes
+  wireCombobox({ comboId: 'state-combobox',      hiddenId: 'state-hidden',      menuId: 'state-menu',      listboxId: 'state-listbox' });
+  wireCombobox({ comboId: 'country-combobox',    hiddenId: 'country-hidden',    menuId: 'country-menu',    listboxId: 'country-listbox' });
+  wireCombobox({ comboId: 'noncompete-combobox', hiddenId: 'noncompete-hidden', menuId: 'noncompete-menu', listboxId: 'noncompete-listbox' });
+  wireCombobox({ comboId: 'start-month-combobox',hiddenId: 'start-month-hidden',menuId: 'start-month-menu',listboxId: 'start-month-listbox' });
+  wireCombobox({ comboId: 'end-month-combobox',  hiddenId: 'end-month-hidden',  menuId: 'end-month-menu',  listboxId: 'end-month-listbox' });
+
+  // ── Dynamic file upload widget ───────────────────────────────────────────
+  // Greenhouse creates a hidden <input type="file"> on-demand when the Attach
+  // button is clicked. The extension's MAIN-world override intercepts input.click().
+  var widget      = document.getElementById('resume-widget');
+  var attachBtn   = document.getElementById('resume-attach-btn');
+  var pasteBtn    = document.querySelector('.btn-paste');
+  var filenameEl  = document.getElementById('resume-filename');
+  var removeLink  = document.getElementById('resume-remove');
+  var hiddenField = document.getElementById('resume-hidden');
+
+  attachBtn.addEventListener('click', function () {
+    // Create the file input dynamically (Greenhouse's actual pattern)
+    var fileInput = document.createElement('input');
+    fileInput.type   = 'file';
+    fileInput.accept = '.pdf,.doc,.docx';
+    fileInput.style.cssText = 'position:absolute;top:-9999px;left:-9999px;opacity:0;';
+    document.body.appendChild(fileInput);
+
+    appendLog('Dynamic <input type="file"> created and click() called — extension intercept point.');
+
+    // This is the call the extension's MAIN-world content script override intercepts
+    fileInput.click();
+
+    fileInput.addEventListener('change', function () {
+      var file = fileInput.files && fileInput.files[0];
+      if (file) {
+        // Show filename
+        filenameEl.textContent = file.name;
+        removeLink.style.display = 'inline-block';
+        widget.classList.add('has-file');
+        widget.classList.remove('error');
+
+        // Simulate server-side resume token being set
+        hiddenField.value = 'resume_token_' + Date.now();
+        hiddenField.removeAttribute('required');
+
+        appendLog('File selected: ' + file.name + ' (' + Math.round(file.size / 1024) + ' KB)', 'info');
+        document.getElementById('resume-error').classList.remove('visible');
+      }
+      document.body.removeChild(fileInput);
+    });
+  });
+
+  pasteBtn.addEventListener('click', function () {
+    appendLog('Paste Resume clicked (stub — not implemented in test page)', 'warn');
+    alert('Paste mode: not implemented in this test page.\nIn production, Greenhouse shows a text editor here.');
+  });
+
+  removeLink.addEventListener('click', function () {
+    filenameEl.textContent = '';
+    removeLink.style.display = 'none';
+    widget.classList.remove('has-file');
+    hiddenField.value = '';
+    hiddenField.setAttribute('required', '');
+    appendLog('Resume removed.');
+  });
+
+  // ── Textarea character counters ──────────────────────────────────────────
+  function wireCharCount(textareaId, countSpanId) {
+    var ta   = document.getElementById(textareaId);
+    var span = document.getElementById(countSpanId);
+    if (!ta || !span) return;
+    function update() { span.textContent = ta.value.length; }
+    ta.addEventListener('input', update);
+    ta.addEventListener('change', update);
+    // Update when extension fills the field via pjaSetNative (fires input+change events)
+    update();
+  }
+  wireCharCount('qc-experience', 'qc-chars');
+  wireCharCount('years-semi',    'semi-chars');
+
+  // ── Form validation on Submit ────────────────────────────────────────────
+  document.getElementById('submit-btn').addEventListener('click', function () {
+    var errors = [];
+
+    function checkRequired(id, errorId, label) {
+      var el = document.getElementById(id);
+      var errEl = document.getElementById(errorId);
+      if (!el) return;
+      var empty = !el.value || !el.value.trim();
+      if (empty) {
+        el.classList.add('error');
+        if (errEl) errEl.classList.add('visible');
+        errors.push(label);
+      } else {
+        el.classList.remove('error');
+        if (errEl) errEl.classList.remove('visible');
+      }
+    }
+
+    function checkRadioGroup(name, fieldsetId, errorId, label) {
+      var checked = document.querySelector('input[name="' + name + '"]:checked');
+      var errEl   = document.getElementById(errorId);
+      var fs      = document.getElementById(fieldsetId);
+      if (!checked) {
+        if (fs)    fs.classList.add('error');
+        if (errEl) errEl.classList.add('visible');
+        errors.push(label);
+      } else {
+        if (fs)    fs.classList.remove('error');
+        if (errEl) errEl.classList.remove('visible');
+      }
+    }
+
+    function checkHidden(hiddenId, errorId, widgetId, label) {
+      var hid  = document.getElementById(hiddenId);
+      var errEl = document.getElementById(errorId);
+      var w    = widgetId ? document.getElementById(widgetId) : null;
+      var empty = !hid || !hid.value || !hid.value.trim();
+      if (empty) {
+        if (w)    w.classList.add('error');
+        if (errEl) errEl.classList.add('visible');
+        errors.push(label);
+      } else {
+        if (w)    w.classList.remove('error');
+        if (errEl) errEl.classList.remove('visible');
+      }
+    }
+
+    function checkCombobox(comboId, hiddenId, errorId, label) {
+      var combo   = document.getElementById(comboId);
+      var hidden  = document.getElementById(hiddenId);
+      var errEl   = document.getElementById(errorId);
+      // Combobox counts as filled if visible input has text OR hidden has a value
+      var filled  = (combo && combo.value && combo.value.trim()) ||
+                    (hidden && hidden.value && hidden.value.trim());
+      var isReq   = combo && combo.getAttribute('aria-required') === 'true';
+      if (isReq && !filled) {
+        if (combo)  combo.classList.add('error');
+        if (errEl)  errEl.classList.add('visible');
+        errors.push(label);
+      } else {
+        if (combo)  combo.classList.remove('error');
+        if (errEl)  errEl.classList.remove('visible');
+      }
+    }
+
+    // Resume
+    checkHidden('resume-hidden', 'resume-error', 'resume-widget', 'Resume/CV');
+
+    // Contact
+    checkRequired('first-name',  'first-name-error', 'First Name');
+    checkRequired('last-name',   'last-name-error',  'Last Name');
+    checkRequired('email',       'email-error',      'Email');
+    checkRequired('phone',       'phone-error',      'Phone');
+    checkRequired('city',        'city-error',       'City');
+    checkCombobox('country-combobox', 'country-hidden', 'country-error', 'Country');
+
+    // Work auth radios
+    checkRadioGroup('work_authorization', 'workauth-fieldset',   'workauth-error',   'Work Authorization');
+    checkRadioGroup('require_sponsorship','sponsorship-fieldset', 'sponsorship-error','Sponsorship Required');
+
+    // Education years (required per spec)
+    checkRequired('start-year', 'start-year-error', 'Education Start Year');
+    checkRequired('end-year',   'end-year-error',   'Education End Year');
+
+    // Open-ended questions
+    checkRequired('qc-experience', 'qc-error',         'QC Systems Experience');
+    checkRequired('years-semi',    'years-semi-error',  'Years of Manufacturing Experience');
+
+    var errBox = document.getElementById('submit-errors');
+    if (errors.length > 0) {
+      errBox.style.display = 'block';
+      errBox.innerHTML = '<strong>Please complete the required fields:</strong><br>' +
+        errors.map(function(e) { return '&bull; ' + e; }).join('<br>');
+      errBox.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+      appendLog('Validation failed: ' + errors.join(', '), 'warn');
+    } else {
+      errBox.style.display = 'none';
+      appendLog('Form validation passed — all required fields filled!', 'info');
+      // Show success state
+      var btn = document.getElementById('submit-btn');
+      btn.textContent = 'Application Submitted!';
+      btn.style.background = '#1b8038';
+      btn.disabled = true;
+      appendLog('Submit Application button clicked successfully.', 'info');
+    }
+  });
+
+  // ── Observe autofill changes via MutationObserver ────────────────────────
+  // Logs whenever the extension fills a field so we can see it without DevTools.
+  var form = document.getElementById('application-form');
+  var fillObserver = new MutationObserver(function(mutations) {
+    mutations.forEach(function(m) {
+      if (m.type === 'attributes' && (m.attributeName === 'value' || m.attributeName === 'aria-expanded')) {
+        var el = m.target;
+        if (el.getAttribute('aria-expanded') === 'true') {
+          appendLog('Combobox opened: #' + el.id);
+        }
+      }
+    });
+  });
+  fillObserver.observe(form, { subtree: true, attributes: true, attributeFilter: ['value','aria-expanded','aria-selected'] });
+
+  // Also log input events to track autofill activity
+  form.addEventListener('input', function(e) {
+    var el = e.target;
+    if (!el.id && !el.name) return;
+    var label = el.id || el.name;
+    var val   = el.value ? el.value.slice(0, 60) : '';
+    if (val) appendLog('Field filled: #' + label + ' = "' + val + '"');
+  }, true);
+
+  form.addEventListener('change', function(e) {
+    var el = e.target;
+    if (el.type === 'radio' && el.checked) {
+      appendLog('Radio selected: name=' + el.name + ' value=' + el.value);
+    }
+  }, true);
+
+  appendLog('Form event listeners attached. Load the extension and click Autofill.', 'info');
+
+})();
+</script>
+</body>
+</html>

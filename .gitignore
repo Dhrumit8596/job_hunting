@@ -1,0 +1,22 @@
+# Local / private data — never commit
+config.local.js
+candidate.local.txt
+*.local.js
+*.local.json
+*.local.md
+*.local.txt
+.env
+.env.*
+candidate*
+*storage*.json
+.githooks/*.local
+
+# Backups / dumps
+storage-backup.local.json
+storage-current.local.json
+test/.merged-profile.*.local.json
+
+# Editor / OS / deps
+.DS_Store
+node_modules/
+.claude/settings.local.json

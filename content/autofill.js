@@ -1,0 +1,1762 @@
+(function() {
+'use strict';
+if (window.__pjaAutofillLoaded) return;
+window.__pjaAutofillLoaded = true;
+
+// ── Field classification rules ─────────────────────────────────────────────
+// ORDER MATTERS: more-specific multi-word patterns must come before short
+// single-word ones that are substrings of longer labels (e.g. 'title' in
+// "job title" vs the salutation dropdown labeled just "Title").
+// Salutation is last because its patterns ('mr','ms','dr','title') are common
+// substrings that would otherwise shadow email, currentTitle, etc.
+const PJA_FIELD_RULES = [
+  { key: 'firstName',          patterns: ['first name','first_name','fname','given name','forename','legal first'] },
+  { key: 'middleName',         patterns: ['middle name','middle_name','middle initial','legal middle'] },
+  { key: 'lastName',           patterns: ['last name','last_name','lname','surname','family name','legal last'] },
+  { key: 'fullName',           patterns: ['full name','your name','legal name','full legal name','applicant name','candidate name','name'] },
+  { key: 'email',              patterns: ['email','e-mail','email address','work email'] },
+  { key: 'phoneType',          patterns: ['phone type','contact phone type','type of phone','phone number type'] },
+  { key: 'phone',              patterns: ['phone','mobile','cell','telephone','contact number','phone number'] },
+  { key: 'linkedin',           patterns: ['linkedin','linkedin url','linkedin profile'] },
+  { key: 'website',            patterns: ['website','portfolio','personal url','github url','personal site'] },
+  { key: 'address',            patterns: ['address line 1','street address','address 1','address line','mailing address'] },
+  { key: 'address2',           patterns: ['address line 2','address 2','apt','suite','unit','apartment','address2','floor'] },
+  // currentLocation MUST come before city: 'location (city)' contains 'city' as a substring,
+  // so if city is first it incorrectly maps to the bare 'city' rule instead of currentLocation.
+  { key: 'currentLocation',    patterns: ['location (city','currently based','city and state','city, state','current location','where are you located','where are you based','your location','city/state'] },
+  { key: 'city',               patterns: ['city','town'] },
+  { key: 'state',              patterns: ['state','province'] },
+  { key: 'zip',                patterns: ['zip','postal','postcode','zip code','postal code'] },
+  { key: 'country',            patterns: ['country'] },
+  // 'title' alone → job title in application context (salutation rule has no 'title' pattern now)
+  { key: 'currentTitle',       patterns: ['current title','current position','job title','your title','position title','most recent title','title'] },
+  { key: 'currentCompany',     patterns: ['current company','current employer','employer','company name','most recent employer','most recent company'] },
+  { key: 'yearsExperience',    patterns: ['years of experience','years experience','how many years','years of relevant','années d\'expérience','combien d\'années','depuis combien d\'années','ans d\'expérience','années dans'] },
+  { key: 'university',         patterns: ['university','college','school name','institution','school'] },
+  { key: 'degree',             patterns: ['degree','highest degree','level of education','highest level of education'] },
+  { key: 'major',              patterns: ['major','field of study','concentration','area of study','discipline','subject'] },
+  { key: 'graduationYear',     patterns: ['graduation year','grad year','year of graduation'] },
+  // Education date picker components (multi-part date fields in education section)
+  // These have identical labels to work-history date fields; work-history dates are typically
+  // optional so filling them with education defaults is acceptable.
+  { key: 'educationEndMonth',  patterns: ['end date month','end month'] },
+  { key: 'educationEndYear',   patterns: ['end date year','end year'] },
+  { key: 'educationStartMonth',patterns: ['start date month','start month'] },
+  { key: 'educationStartYear', patterns: ['start date year','start year'] },
+  { key: 'salaryExpectation',  patterns: ['salary','compensation','expected salary','desired salary','salary expectation','pay expectation','hourly pay','hourly rate','pay rate','expected pay','desired pay','expected compensation','w2 rate','bill rate'] },
+  { key: 'workAuth',           patterns: ['authorized to work','work authorization','eligible to work','right to work','legally authorized','work in the us','work in us'] },
+  { key: 'requireSponsorship', patterns: ['sponsorship','require sponsorship','visa sponsorship','need sponsorship','require visa sponsorship','require work authorization','immigration case','sponsor'] },
+  { key: 'visaStatus',         patterns: ['visa status','visa type','work visa','immigration status','citizenship','work authorization status'] },
+  { key: 'usPersonExportControl', patterns: ['u.s. person','us person (i.e.','export control','itar','ear compliance','technology control'] },
+  { key: 'willingToRelocate',  patterns: ['relocate','willing to relocate','relocation','open to relocation'] },
+  { key: 'referralSource',     patterns: ['how did you hear','hear about us','how did you find','referral source','source','referred by','how were you referred'] },
+  { key: 'gender',             patterns: ['gender','sex'] },
+  { key: 'ethnicity',          patterns: ['ethnicity','race','hispanic'] },
+  { key: 'veteran',            patterns: ['veteran','military service','protected veteran'] },
+  { key: 'disability',         patterns: ['disability','disabled'] },
+  // Salutation last: its patterns ('title','mr','ms','mrs') are short substrings
+  // that shadow more specific rules above if checked first.
+  // Also removed 'dr' — it matches "address" ("a**dr**ess") causing false positives.
+  { key: 'salutation',         patterns: ['salutation','prefix','honorific','mr.','mrs.','ms.','mr ','mrs ','ms '] },
+];
+
+// ── Default profile (generic empty template) ───────────────────────────────
+// The real profile lives in chrome.storage (pja_profile), set via the Settings page.
+// These defaults are only fallbacks for an unconfigured install — kept generic/empty
+// so no personal data ships in the repo. (Original values: config.local.js, gitignored.)
+const PJA_DEFAULT_PROFILE = {
+  currentLocation: '',
+  salutation: '',
+  firstName: '',
+  middleName: '',
+  lastName: '',
+  fullName: '',
+  email: '',
+  phone: '',
+  phoneType: 'Mobile',
+  linkedin: '',
+  website: '',
+  address: '',
+  address2: '',
+  city: '',
+  state: '',
+  zip: '',
+  country: 'United States',
+  currentTitle: '',
+  currentCompany: '',
+  yearsExperience: '',
+  university: '',
+  degree: '',
+  major: '',
+  graduationYear: '',
+  educationEndYear: '',
+  educationEndMonth: '',
+  educationStartYear: '',
+  educationStartMonth: '',
+  salaryExpectation: '',
+  workAuth: '',
+  requireSponsorship: '',
+  visaStatus: '',
+  willingToRelocate: '',
+  referralSource: '',
+  gender: '',
+  ethnicity: '',
+  veteran: '',
+  disability: '',
+};
+
+// ── Shadow-DOM-aware traversal ─────────────────────────────────────────────
+// document.querySelectorAll doesn't pierce shadow roots. These helpers collect
+// elements from all open shadow roots in the tree so autofill and learning
+// work inside LinkedIn's Easy Apply modal (rendered in #interop-outlet's root).
+
+function pjaGetAllRoots() {
+  const roots = [document];
+  const visit = root => {
+    root.querySelectorAll('*').forEach(el => {
+      if (el.shadowRoot) { roots.push(el.shadowRoot); visit(el.shadowRoot); }
+    });
+  };
+  visit(document);
+  return roots;
+}
+
+function pjaQueryAll(selector) {
+  const out = [];
+  for (const root of pjaGetAllRoots()) {
+    out.push(...Array.from(root.querySelectorAll(selector)));
+  }
+  return out;
+}
+
+// ShadowRoot.getElementById exists in Chrome but not all roots expose it;
+// fall back to a linear scan so complex URN-style IDs (LinkedIn) are found.
+function pjaGetById(root, id) {
+  if (root.getElementById) return root.getElementById(id);
+  for (const el of root.querySelectorAll('[id]')) {
+    if (el.id === id) return el;
+  }
+  return null;
+}
+
+// ── Application page detection ─────────────────────────────────────────────
+function pjaIsApplicationPage() {
+  const url = location.href.toLowerCase();
+  return [
+    'greenhouse.io', 'lever.co', 'workday.com', 'myworkdayjobs.com',
+    'jobvite.com', 'icims.com', 'taleo.net', 'bamboohr.com',
+    'smartrecruiters.com', 'ashbyhq.com', 'applytojob.com', 'jazz.co',
+    'recruitee.com', 'rippling.com', '/apply', '/application', '/job-application'
+  ].some(p => url.includes(p));
+}
+
+// ── Extract label text for a form element ─────────────────────────────────
+function pjaGetLabel(el) {
+  // Use the element's own root (shadow root or document) for all lookups so
+  // elements inside LinkedIn's Easy Apply shadow DOM find their labels.
+  const root = el.getRootNode() || document;
+
+  // Explicit <label for="id">
+  if (el.id) {
+    try {
+      const lbl = root.querySelector(`label[for="${CSS.escape(el.id)}"]`);
+      if (lbl) return lbl.textContent.trim().toLowerCase();
+    } catch (_) {}
+  }
+  // Wrapping label
+  const parentLbl = el.closest('label');
+  if (parentLbl) {
+    const clone = parentLbl.cloneNode(true);
+    clone.querySelectorAll('input,select,textarea').forEach(e => e.remove());
+    const t = clone.textContent.trim().toLowerCase();
+    if (t) return t;
+  }
+  // aria-label
+  const aria = el.getAttribute('aria-label');
+  if (aria) return aria.toLowerCase();
+  // aria-labelledby — IDs may be complex URNs (LinkedIn), use pjaGetById
+  const lblBy = el.getAttribute('aria-labelledby');
+  if (lblBy) {
+    const parts = lblBy.split(' ')
+      .map(id => pjaGetById(root, id)?.textContent.trim())
+      .filter(Boolean);
+    if (parts.length) return parts.join(' ').toLowerCase();
+  }
+  // LinkedIn fb-dash-form-element: walk up past __select-dropdown to the outer container
+  // where the question text lives as a sibling div with no class.
+  let fbEl = el.parentElement;
+  while (fbEl) {
+    const cls = (fbEl.className || '').toString();
+    if (/\bfb-dash-form-element\b/.test(cls) && !/select-dropdown|text-field|number-field|date-field/.test(cls)) {
+      const questionSibling = Array.from(fbEl.children).find(c => !c.contains(el) && c.textContent.trim());
+      if (questionSibling) return questionSibling.textContent.trim().toLowerCase();
+      break;
+    }
+    fbEl = fbEl.parentElement;
+  }
+  // Lever: .application-label is a sibling of .application-field (div or li container)
+  const leverContainer = el.closest('[class*="application"]');
+  if (leverContainer) {
+    // Look in parent for a sibling label div
+    const parentEl = leverContainer.parentElement;
+    if (parentEl) {
+      const lbl = parentEl.querySelector('[class*="application-label"]');
+      if (lbl && !lbl.contains(el)) return lbl.querySelector('.text, div')?.textContent.trim().toLowerCase() || lbl.textContent.trim().toLowerCase();
+    }
+    const lbl = leverContainer.querySelector('[class*="application-label"]');
+    if (lbl && !lbl.contains(el)) return lbl.textContent.trim().toLowerCase();
+  }
+  // Nearest label-like ancestor content; also check previous sibling (Lever div.application-label pattern)
+  const parent = el.closest('[class*="field"],[class*="Field"],[class*="form-group"],fieldset,li');
+  if (parent) {
+    const lbl = parent.querySelector('label,legend,[class*="label"],[class*="Label"]');
+    if (lbl && !lbl.contains(el)) return lbl.textContent.trim().toLowerCase();
+    // Previous sibling label (Lever: div.application-label precedes div.application-field)
+    const prevSib = parent.previousElementSibling;
+    if (prevSib && /label/i.test(prevSib.className || '')) {
+      const t = prevSib.textContent.trim().toLowerCase();
+      if (t) return t;
+    }
+  }
+  return (el.placeholder || el.name || el.id || '').toLowerCase().replace(/[_-]/g, ' ');
+}
+
+// ── Classify label text to a profile key ──────────────────────────────────
+function pjaClassify(label) {
+  // Interrogative questions ("Have you signed a non-compete with your current employer?")
+  // contain profile key phrases only incidentally — don't map them to profile keys that
+  // hold name/company/contact values, as those values are wrong answers for yes/no questions.
+  const isInterrogative = /^(have|did|were|do|does|are|is|will|can|would|could|should)\s+you\b.{10,}/i.test(label);
+  const CONTENT_KEYS = new Set(['currentCompany','currentTitle','university','firstName','lastName','fullName','email','phone','city','state','country','address','zip']);
+
+  for (const rule of PJA_FIELD_RULES) {
+    if (isInterrogative && CONTENT_KEYS.has(rule.key)) continue;
+    for (const pat of rule.patterns) {
+      if (pat.length <= 5) {
+        // Short patterns require word boundary: prevents 'unit' matching 'united', 'apt' matching 'aptitude', etc.
+        if (new RegExp('\\b' + pat.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '\\b').test(label)) return rule.key;
+      } else if (label.includes(pat)) {
+        return rule.key;
+      }
+    }
+  }
+  return null;
+}
+
+// ── React/Vue-compatible value setter ─────────────────────────────────────
+function pjaSetNative(el, value, skipBlur = false) {
+  try {
+    const proto = el.tagName === 'TEXTAREA'
+      ? window.HTMLTextAreaElement.prototype
+      : window.HTMLInputElement.prototype;
+    const desc = Object.getOwnPropertyDescriptor(proto, 'value');
+    if (desc?.set) desc.set.call(el, value);
+    else el.value = value;
+  } catch (_) {
+    el.value = value;
+  }
+  // Use InputEvent for 'input' so React/autocomplete components see insertText intent
+  try {
+    el.dispatchEvent(new InputEvent('input', { bubbles: true, data: String(value), inputType: 'insertText' }));
+  } catch (_) {
+    el.dispatchEvent(new Event('input', { bubbles: true }));
+  }
+  el.dispatchEvent(new Event('change', { bubbles: true }));
+  // skipBlur: phone/tel fields - blur triggers React onBlur validation that may clear the value
+  if (!skipBlur) el.dispatchEvent(new FocusEvent('blur', { bubbles: true }));
+}
+
+// Call React's onChange prop directly via fiber tree — bypasses the native event system.
+// Uses a CustomEvent bridge to fiber-main.js (MAIN world content script in manifest.json)
+// to avoid CSP restrictions that block inline script-tag injection.
+function pjaFillViaFiberOnChange(el, value) {
+  const fiberKey = Object.keys(el).find(k => k.startsWith('__reactFiber') || k.startsWith('__reactInternalInstance'));
+  if (!fiberKey) return false;
+
+  const uid = 'pja_' + Date.now() + '_' + Math.random().toString(36).slice(2, 7);
+  el.setAttribute('data-pja-fiber-id', uid);
+  el.removeAttribute('data-pja-fiber-done');
+
+  // dispatchEvent is synchronous: fiber-main.js handler runs within this call
+  try {
+    document.dispatchEvent(new CustomEvent('pja:fiberfill', {
+      detail: { uid, value: String(value) }
+    }));
+  } catch(_) {
+    el.removeAttribute('data-pja-fiber-id');
+    return false;
+  }
+
+  // fiber-main.js sets data-pja-fiber-done="ok" on success
+  const ok = el.getAttribute('data-pja-fiber-done') === 'ok';
+  el.removeAttribute('data-pja-fiber-done');
+  if (!ok) el.removeAttribute('data-pja-fiber-id');
+  return ok;
+}
+
+// Sets value on a text/tel input and notifies React state.
+// NOTE: execCommand('insertText') is NOT used here — from an isolated-world content
+// script it returns true but doesn't insert text (no real browser focus). Instead:
+// Primary: CustomEvent fiber bridge to fiber-main.js (MAIN world) via pja:fiberfill.
+// Fallback: native prototype setter + synthetic InputEvent/change/blur events.
+function pjaFillTextViaFiber(el, value, skipBlur = false) {
+  el.focus();
+
+  // Set value via native prototype setter (bypasses React's input tracking so we
+  // must also fire events, but ensures the DOM value is correct regardless of fiber)
+  try {
+    const proto = el.tagName === 'TEXTAREA' ? window.HTMLTextAreaElement.prototype : window.HTMLInputElement.prototype;
+    const desc = Object.getOwnPropertyDescriptor(proto, 'value');
+    if (desc?.set) desc.set.call(el, value); else el.value = value;
+  } catch(_) { el.value = value; }
+
+  // Try fiber bridge (pja:fiberfill CustomEvent → fiber-main.js in MAIN world)
+  // This calls Formik's onChange directly, keeping controlled-input state in sync.
+  const fiberOk = pjaFillViaFiberOnChange(el, value);
+  if (fiberOk && skipBlur) return true;
+
+  // Synthetic events — ITI phone fields and non-Formik inputs respond to these
+  try { el.dispatchEvent(new InputEvent('input', { bubbles: true, data: String(value), inputType: 'insertText' })); } catch(_) {}
+  el.dispatchEvent(new Event('change', { bubbles: true }));
+  if (!skipBlur) el.dispatchEvent(new FocusEvent('blur', { bubbles: true }));
+  return true;
+}
+
+// US state name ↔ abbreviation (module-level so both pjaFillSelect and pjaFillCombobox use it).
+const PJA_STATE_ABBR = {
+  'alabama':'AL','alaska':'AK','arizona':'AZ','arkansas':'AR','california':'CA',
+  'colorado':'CO','connecticut':'CT','delaware':'DE','florida':'FL','georgia':'GA',
+  'hawaii':'HI','idaho':'ID','illinois':'IL','indiana':'IN','iowa':'IA',
+  'kansas':'KS','kentucky':'KY','louisiana':'LA','maine':'ME','maryland':'MD',
+  'massachusetts':'MA','michigan':'MI','minnesota':'MN','mississippi':'MS',
+  'missouri':'MO','montana':'MT','nebraska':'NE','nevada':'NV','new hampshire':'NH',
+  'new jersey':'NJ','new mexico':'NM','new york':'NY','north carolina':'NC',
+  'north dakota':'ND','ohio':'OH','oklahoma':'OK','oregon':'OR','pennsylvania':'PA',
+  'rhode island':'RI','south carolina':'SC','south dakota':'SD','tennessee':'TN',
+  'texas':'TX','utah':'UT','vermont':'VT','virginia':'VA','washington':'WA',
+  'west virginia':'WV','wisconsin':'WI','wyoming':'WY','district of columbia':'DC'
+};
+
+// Normalize an <option> value for matching: some ATSes (e.g. Jobvite/AngularJS) prefix
+// values like "string:CA" — strip a leading "string:" so abbreviations still match.
+function pjaOptVal(opt) {
+  return opt.value.toLowerCase().replace(/^string:/, '').trim();
+}
+
+function pjaFillSelect(select, value, key) {
+  const lv = value.toString().toLowerCase().trim();
+  // Exact match on value attr (with string: prefix tolerance) or display text
+  for (const opt of select.options) {
+    if (pjaOptVal(opt) === lv || opt.value.toLowerCase() === lv || opt.text.toLowerCase().trim() === lv) {
+      return pjaCommitSelect(select, opt.value);
+    }
+  }
+  // State: convert between abbreviation and full name (profile holds "CA"; dropdowns
+  // often list "California" with value "string:CA"). Try both directions.
+  if (key === 'state' || /\bstate\b|province/i.test(key || '')) {
+    let targets = [];
+    if (lv.length === 2) {
+      const full = Object.entries(PJA_STATE_ABBR).find(([, ab]) => ab === lv.toUpperCase())?.[0];
+      if (full) targets = [full, lv]; // full name + abbr
+    } else if (PJA_STATE_ABBR[lv]) {
+      targets = [lv, PJA_STATE_ABBR[lv].toLowerCase()]; // full name + abbr
+    }
+    for (const opt of select.options) {
+      const ot = opt.text.toLowerCase().trim();
+      const ov = pjaOptVal(opt);
+      if (targets.some(t => ot === t || ov === t)) return pjaCommitSelect(select, opt.value);
+    }
+  }
+  const isYes = ['yes', 'true', '1'].includes(lv);
+  const isNo  = ['no', 'false', '0'].includes(lv);
+  for (const opt of select.options) {
+    const ot = opt.text.toLowerCase().trim();
+    if (!ot || ['select','please select','choose','--'].includes(ot)) continue;
+    // BUG1+BUG7 fix: moved inverted conditions; key-aware 'not authorized' guard.
+    // BUG4 fix: lv.length > 3 prevents 'no'/'yes' from substring-matching everything.
+    const yesMatch = isYes && (
+      ot === 'yes' || ot.startsWith('yes,') ||
+      (ot.includes('authorized') && !ot.includes('not authorized')) ||
+      ot.includes('eligible') || ot.includes('i am authorized') ||
+      ot.includes('will require sponsorship') || ot === 'yes, i will require'
+    );
+    const noMatch = isNo && (
+      ot === 'no' || ot.startsWith('no,') ||
+      ot === 'no, i will not require' ||
+      ot.includes('not required') || ot.includes('will not require') ||
+      (key === 'workAuth' && ot.includes('not authorized'))
+    );
+    const partial = lv.length > 3 && (ot.includes(lv) || (lv.length > 4 && lv.includes(ot.slice(0, 5))));
+    if (yesMatch || noMatch || partial) return pjaCommitSelect(select, opt.value);
+  }
+  // Numeric salary/rate: pick the range option whose low end is nearest but ≤ the value
+  if (key === 'salaryExpectation') {
+    const num = parseFloat(lv);
+    if (!isNaN(num)) {
+      let best = null, bestLow = -Infinity;
+      for (const opt of select.options) {
+        const ot = opt.text;
+        const nums = ot.match(/[\d,]+(?:\.\d+)?/g)?.map(n => parseFloat(n.replace(/,/g, ''))) || [];
+        if (!nums.length) continue;
+        const low = Math.min(...nums), high = Math.max(...nums);
+        if (num >= low && num <= high) return pjaCommitSelect(select, opt.value);
+        if (low <= num && low > bestLow) { bestLow = low; best = opt; }
+      }
+      if (best) return pjaCommitSelect(select, best.value);
+    }
+  }
+  // EEO semantic fallback for veteran / disability / gender
+  if (key && ['veteran','disability','gender','ethnicity'].includes(key)) {
+    return pjaFillSelectEEO(select, lv, key);
+  }
+  return false;
+}
+
+function pjaCommitSelect(select, val) {
+  try {
+    const desc = Object.getOwnPropertyDescriptor(window.HTMLSelectElement.prototype, 'value');
+    if (desc?.set) desc.set.call(select, val); else select.value = val;
+  } catch (_) { select.value = val; }
+  select.dispatchEvent(new Event('input',  { bubbles: true }));
+  select.dispatchEvent(new Event('change', { bubbles: true }));
+  return true;
+}
+
+// Semantic matching for EEO dropdowns whose option text varies between ATS platforms
+function pjaFillSelectEEO(select, lv, key) {
+  const skip = new Set(['select','please select','choose','--','']);
+
+  const score = (opt, positiveTests, negativeTests = []) => {
+    const ot = opt.text.toLowerCase().trim();
+    if (skip.has(ot)) return -1;
+    const pos = positiveTests.reduce((s, t) => s + (t.test(ot) ? 1 : 0), 0);
+    const neg = negativeTests.reduce((s, t) => s + (t.test(ot) ? 1 : 0), 0);
+    return pos - neg * 2;
+  };
+
+  let best = null, bestScore = 0;
+
+  if (key === 'veteran') {
+    const isNotVet = /\bnot\b.*veteran|\bi am not\b|not a.*veteran|non.veteran/i.test(lv);
+    const isVet    = !isNotVet && /veteran/i.test(lv);
+    for (const opt of select.options) {
+      const s = isNotVet
+        ? score(opt, [/\bnot\b/, /veteran/], [/\bdisabled\b/])
+        : isVet
+          ? score(opt, [/veteran/], [/\bnot\b/])
+          : score(opt, [/decline|identify|prefer|wish/]);
+      if (s > bestScore) { bestScore = s; best = opt; }
+    }
+  }
+
+  if (key === 'disability') {
+    const isNo  = /^no[,\s]|don.t have|do not have|no disability|without a disab/i.test(lv);
+    const isYes = !isNo && /^yes[,\s]|i have a dis|have a disability/i.test(lv);
+    for (const opt of select.options) {
+      const s = isNo
+        ? score(opt, [/^no[,\s]/, /disab/], [/^yes/])
+        : isYes
+          ? score(opt, [/^yes[,\s]/, /disab/], [/^no/])
+          : score(opt, [/decline|prefer|wish/]);
+      if (s > bestScore) { bestScore = s; best = opt; }
+    }
+  }
+
+  if (key === 'gender') {
+    const isFemale  = /\b(female|woman|she\/her)\b/i.test(lv);
+    const isMale    = !isFemale && /\b(male|man|he\/him)\b/i.test(lv);
+    const isNonBin  = /non.bin|enby|they\/them/i.test(lv);
+    for (const opt of select.options) {
+      const s = isFemale  ? score(opt, [/\bfemale\b|\bwoman\b/], [/male.*female|non/])
+              : isMale    ? score(opt, [/\bmale\b|\bman\b/],     [/female/])
+              : isNonBin  ? score(opt, [/non.bin/])
+              : score(opt, [/decline|prefer|not|other/]);
+      if (s > bestScore) { bestScore = s; best = opt; }
+    }
+  }
+
+  if (!best) return false;
+  return pjaCommitSelect(select, best.value);
+}
+
+// ── Label normalization & fuzzy matching ───────────────────────────────────
+function pjaNormalizeLabel(label) {
+  return label
+    .toLowerCase()
+    .replace(/[?!.,;:'"()\[\]*]/g, '')   // strip * so "older?*" → "older" not "older*"
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 100);
+}
+
+function pjaFuzzyScore(a, b) {
+  const words = s => new Set(s.split(/\s+/).filter(w => w.length >= 4));
+  const wa = words(a), wb = words(b);
+  if (!wa.size || !wb.size) return 0;
+  let overlap = 0;
+  for (const w of wa) if (wb.has(w)) overlap++;
+  if (!overlap) return 0;
+  const precision = overlap / wb.size;
+  const recall = overlap / wa.size;
+  return 2 * precision * recall / (precision + recall);
+}
+
+// Built-in answer bank for common yes/no questions — merged with stored answers at lookup time.
+// Keys must be pjaNormalizeLabel()-normalized (lowercase, no punctuation).
+const PJA_BUILTIN_ANSWERS = {
+  'have you signed a non-compete with your current employer':    { answer: 'No' },
+  'have you signed a non-compete agreement':                     { answer: 'No' },
+  'have you signed a non-compete':                               { answer: 'No' },
+  'do you have a non-compete agreement':                         { answer: 'No' },
+  'are you subject to a non-compete':                            { answer: 'No' },
+  'have you ever been convicted of a felony':                    { answer: 'No' },
+  'have you been convicted of a crime':                          { answer: 'No' },
+  'are you able to perform the essential functions of this job': { answer: 'Yes' },
+  'do you have reliable transportation':                         { answer: 'Yes' },
+  'are you 18 years of age or older':                            { answer: 'Yes' },
+  'are you at least 18 years old':                               { answer: 'Yes' },
+  'are you over 18':                                             { answer: 'Yes' },
+  // Background / drug screening
+  'do you consent to a background check':                        { answer: 'Yes' },
+  'do you agree to a background check':                          { answer: 'Yes' },
+  'do you consent to drug testing':                              { answer: 'Yes' },
+  'do you agree to drug testing':                                { answer: 'Yes' },
+  'do you consent to a drug test':                               { answer: 'Yes' },
+  // Work authorization / sponsorship (backup for profile fields)
+  'are you authorized to work in the united states':             { answer: 'Yes' },
+  'are you currently authorized to work in the united states':   { answer: 'Yes' },
+  'are you eligible to work in the united states':               { answer: 'Yes' },
+  'will you now or in the future require sponsorship':           { answer: 'No' },
+  'do you require visa sponsorship':                             { answer: 'No' },
+  // Company-specific "have you worked here before"
+  'have you previously worked at this company':                  { answer: 'No' },
+  'have you previously been employed here':                      { answer: 'No' },
+  // Safety / compliance comfort / onsite
+  'are you comfortable working onsite':                          { answer: 'Yes' },
+  'are you comfortable working in an office':                    { answer: 'Yes' },
+  'are you comfortable working in a cleanroom':                  { answer: 'Yes' },
+  'are you comfortable with shift work':                         { answer: 'Yes' },
+  'are you willing to work onsite':                              { answer: 'Yes' },
+  'are you willing and able to work onsite':                     { answer: 'Yes' },
+  'are you able to work onsite':                                 { answer: 'Yes' },
+  'can you work onsite':                                         { answer: 'Yes' },
+  'will you be able to work onsite':                             { answer: 'Yes' },
+  'are you open to working onsite':                              { answer: 'Yes' },
+  'this position requires working onsite are you able to':       { answer: 'Yes' },
+  // Travel
+  'are you willing to travel':                                   { answer: 'Yes' },
+  'are you able to travel':                                      { answer: 'Yes' },
+  'will you be able to travel':                                  { answer: 'Yes' },
+  'will you be able to travel domestically and internationally': { answer: 'Yes' },
+  'are you able to travel domestically and internationally':     { answer: 'Yes' },
+  'this position requires travel are you able to':               { answer: 'Yes' },
+  // SMS / text consent
+  'do you consent to receive sms':                               { answer: 'Yes' },
+  'do you agree to receive text messages':                       { answer: 'Yes' },
+  'may we contact you via sms':                                  { answer: 'Yes' },
+  // Relatives / conflict of interest
+  'do you have any relatives employed at this company':          { answer: 'No' },
+  'do you have any family members employed here':                { answer: 'No' },
+  'do you have any relatives currently employed':                { answer: 'No' },
+  // Contract / employment obligations
+  'do you have a contract that would prevent you from working':  { answer: 'No' },
+  'do you have a term contract or years contract':               { answer: 'No' },
+  'do you have any contractual obligation':                      { answer: 'No' },
+  'are you bound by any employment contract':                    { answer: 'No' },
+  // ITAR / export control
+  'itar compliance':                                             { answer: 'Yes, I am compliant with ITAR requirements' },
+  'are you itar compliant':                                      { answer: 'Yes' },
+  'do you have itar clearance':                                  { answer: 'Yes, I can comply with ITAR requirements' },
+  // Referral source
+  'how did you hear about this position':                        { answer: 'LinkedIn' },
+  'how did you hear about us':                                   { answer: 'LinkedIn' },
+  'how did you find this job':                                   { answer: 'LinkedIn' },
+  'referral source':                                             { answer: 'LinkedIn' },
+  'where did you hear about this job':                           { answer: 'LinkedIn' },
+  // Salary / compensation
+  'desired salary':                                             { answer: '80000' },
+  'expected salary':                                            { answer: '80000' },
+  'salary expectation':                                         { answer: '80000' },
+  'minimum salary':                                             { answer: '75000' },
+  'what are your salary expectations':                          { answer: '$80,000 - $95,000 depending on role and responsibilities' },
+  // Employment type
+  'are you applying for full time or part time':                { answer: 'Full-time' },
+  'preferred employment type':                                  { answer: 'Full-time' },
+  'are you available full time':                                { answer: 'Yes' },
+  'are you willing to work full time':                          { answer: 'Yes' },
+  // Start date
+  'when can you start':                                         { answer: '2 weeks notice required' },
+  'earliest start date':                                        { answer: 'Available with 2 weeks notice' },
+  'available start date':                                       { answer: 'Available with 2 weeks notice' },
+};
+
+function pjaFindBestAnswer(normalizedLabel, answers) {
+  if (!normalizedLabel) return null;
+  const merged = Object.assign({}, PJA_BUILTIN_ANSWERS, answers || {});
+  let best = null, bestScore = 0.35;
+  for (const [key, entry] of Object.entries(merged)) {
+    const score = pjaFuzzyScore(normalizedLabel, key);
+    if (score > bestScore) { bestScore = score; best = entry.answer; }
+  }
+  return best;
+}
+
+// ── Garbage label detection ────────────────────────────────────────────────
+// Labels that are too generic or are ATS field IDs — not worth storing
+function pjaIsGarbageLabel(label) {
+  if (!label || label.length < 3) return true;
+  // ATS field IDs like "questions-22586-field", "field_12345", "q_abc123"
+  if (/^(questions?|field|input|q)[\-_]\w+/i.test(label)) return true;
+  // Pure numeric or hash-like IDs
+  if (/^\d+$/.test(label) || /^[a-f0-9\-]{10,}$/i.test(label)) return true;
+  // Overly generic labels that match everything and poison the bank
+  const generic = new Set(['text question','text','field','input','question','answer','value','other','enter','type here','n/a']);
+  if (generic.has(label.trim())) return true;
+  return false;
+}
+
+// ── Learn mode ─────────────────────────────────────────────────────────────
+// Listeners are attached to every shadow root (not just document) because
+// composed events are retargeted at shadow boundaries — e.target at document
+// level would be the shadow host, not the actual input.
+const _pjaLearnHandlers = { handle: null, roots: [], observer: null };
+
+function pjaStartLearning(onClassified, onUnclassified) {
+  pjaStopLearning();
+
+  const handle = e => {
+    const el = e.target;
+    if (!el) return;
+    const tag = el.tagName;
+    if (tag !== 'INPUT' && tag !== 'SELECT' && tag !== 'TEXTAREA') return;
+    const t = (el.type || '').toLowerCase();
+    if (['hidden','submit','button','file','reset','image','checkbox'].includes(t)) return;
+    if (t === 'radio' && !el.checked) return;
+
+    const isRadio = t === 'radio';
+    const rawLabel = isRadio ? pjaGetGroupLabel(el) : pjaGetLabel(el);
+    if (pjaIsGarbageLabel(rawLabel)) return;
+
+    const key = pjaClassify(rawLabel);
+    const value = isRadio
+      ? (pjaGetLabel(el) || el.value || '').trim()
+      : (el.value || '').trim();
+    if (!value || value.length < 2) return;
+
+    if (key) {
+      onClassified(key, value);
+    } else if (rawLabel && rawLabel.length > 3) {
+      const norm = pjaNormalizeLabel(rawLabel);
+      if (norm && !pjaIsGarbageLabel(norm)) onUnclassified(norm, value, rawLabel);
+    }
+  };
+
+  _pjaLearnHandlers.handle = handle;
+  _pjaLearnHandlers.roots  = [];
+
+  const attachToRoot = root => {
+    if (_pjaLearnHandlers.roots.includes(root)) return;
+    root.addEventListener('change', handle, true);
+    root.addEventListener('blur',   handle, true);
+    _pjaLearnHandlers.roots.push(root);
+  };
+
+  pjaGetAllRoots().forEach(attachToRoot);
+
+  // Watch for shadow roots that appear later (e.g. LinkedIn's modal on click)
+  const observer = new MutationObserver(() => pjaGetAllRoots().forEach(attachToRoot));
+  observer.observe(document.documentElement, { subtree: true, childList: true });
+  _pjaLearnHandlers.observer = observer;
+}
+
+function pjaStopLearning() {
+  const { handle, roots, observer } = _pjaLearnHandlers;
+  if (!handle) return;
+  for (const root of roots) {
+    root.removeEventListener('change', handle, true);
+    root.removeEventListener('blur',   handle, true);
+  }
+  if (observer) observer.disconnect();
+  _pjaLearnHandlers.handle   = null;
+  _pjaLearnHandlers.roots    = [];
+  _pjaLearnHandlers.observer = null;
+}
+
+// ── Radio button helpers ───────────────────────────────────────────────────
+
+// Get the question/group label for a radio input (not the option label)
+function pjaGetGroupLabel(radio) {
+  const root = radio.getRootNode() || document;
+  const lblBy = radio.getAttribute('aria-labelledby');
+  if (lblBy) {
+    const t = lblBy.split(' ')
+      .map(id => pjaGetById(root, id)?.textContent.trim())
+      .filter(Boolean).join(' ');
+    if (t) return t.toLowerCase();
+  }
+  const fieldset = radio.closest('fieldset');
+  if (fieldset) {
+    const legend = fieldset.querySelector('legend');
+    if (legend) return legend.textContent.trim().toLowerCase();
+  }
+  const parent = radio.closest(
+    '[class*="field"],[class*="Field"],[class*="question"],[class*="Question"],[class*="form-group"],[role="group"]'
+  );
+  if (parent) {
+    const lbl = parent.querySelector('legend,label:not([for]),[class*="label"],[class*="Label"],[class*="question-text"],[class*="prompt"],h3,h4,p');
+    if (lbl && !lbl.contains(radio)) return lbl.textContent.trim().toLowerCase();
+  }
+  return (radio.name || '').toLowerCase().replace(/[_\-\.]/g, ' ');
+}
+
+function pjaClickRadio(radio) {
+  // BUG3 fix: use native setter so React fiber state is updated, then dispatch
+  // input (React's primary event) before change + click.
+  const nativeCheckedDesc = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'checked');
+  if (nativeCheckedDesc?.set) nativeCheckedDesc.set.call(radio, true);
+  else radio.checked = true;
+  radio.dispatchEvent(new Event('input',  { bubbles: true }));
+  radio.dispatchEvent(new Event('change', { bubbles: true }));
+  radio.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+  return true;
+}
+
+// Pick the radio in the group whose label/value best matches the stored profile value
+function pjaSelectRadio(radios, value, key) {
+  const lv = value.toLowerCase().trim();
+
+  // Build labeled list: prefer the per-option label, fall back to value attr
+  const labeled = radios.map(r => ({
+    radio: r,
+    label: (pjaGetLabel(r) || r.value || '').toLowerCase().trim()
+  }));
+
+  // 1. Exact match
+  for (const { radio, label } of labeled) {
+    if (radio.value.toLowerCase() === lv || label === lv) return pjaClickRadio(radio);
+  }
+
+  // 2. EEO semantic matching
+  if (key === 'veteran') {
+    const isNotVet = /\bnot\b.*veteran|\bi am not\b|not a.*veteran/i.test(lv);
+    const target = labeled.find(({ label: l }) =>
+      isNotVet
+        ? /\bnot\b/.test(l) && /veteran/.test(l)
+        : /veteran/.test(l) && !/\bnot\b/.test(l)
+    ) || labeled.find(({ label: l }) => /decline|prefer|identify/.test(l));
+    if (target) return pjaClickRadio(target.radio);
+  }
+
+  if (key === 'disability') {
+    const isNo  = /^no[,\s]|don.t have|do not have|no disab/i.test(lv);
+    const isYes = !isNo && /^yes[,\s]|have a disab/i.test(lv);
+    const target = labeled.find(({ label: l }) =>
+      isNo  ? (/^no/.test(l) || /without|don.t have/.test(l)) :
+      isYes ? /^yes/.test(l) :
+              /decline|prefer|wish/.test(l)
+    );
+    if (target) return pjaClickRadio(target.radio);
+  }
+
+  if (key === 'gender') {
+    const isFemale = /\b(female|woman)\b/i.test(lv);
+    const isMale   = !isFemale && /\b(male|man)\b/i.test(lv);
+    const target = labeled.find(({ label: l }) =>
+      isFemale ? /\b(female|woman)\b/.test(l) :
+      isMale   ? (/\b(male|man)\b/.test(l) && !/female/.test(l)) :
+                 /decline|prefer|not/i.test(l)
+    );
+    if (target) return pjaClickRadio(target.radio);
+  }
+
+  // 3. Partial substring fallback
+  for (const { radio, label } of labeled) {
+    if (label && (lv.includes(label) || label.includes(lv.slice(0, 10)))) {
+      return pjaClickRadio(radio);
+    }
+  }
+
+  return false;
+}
+
+// ── Format validators for fields where a corrupt profile value is worse than blank ──
+const PJA_FIELD_VALIDATORS = {
+  email:    v => v.includes('@'),
+  linkedin: v => /linkedin\.com|^https?:\/\//i.test(v),
+  website:  v => /^https?:\/\//i.test(v),
+};
+
+// ── React fiber-based select fill (Greenhouse react-select dropdowns) ────────
+// react-select doesn't open reliably via DOM events; walk the fiber tree to find
+// the outer Select's onChange handler and call it with the chosen option.
+//
+// ISOLATION NOTE: content scripts run in the ISOLATED world; React fiber closures
+// (mp.onChange) live in the MAIN world.  A direct call from isolated world to a
+// main-world function silently fails.  We therefore use the pja:reactselect
+// CustomEvent bridge (handled by fiber-main.js in MAIN world) and only fall back
+// to a direct call when the bridge is unavailable (e.g. fiber-main.js not yet injected).
+function pjaFillViaReactFiber(input, value, key) {
+  const fiberKey = Object.keys(input).find(k => k.startsWith('__reactFiber'));
+  if (!fiberKey) return false;
+  const lv = (value || '').toLowerCase().trim();
+  const isYes = ['yes','true','1'].includes(lv);
+  const isNo  = ['no','false','0'].includes(lv);
+
+  // Walk fiber tree to find the react-select component's options + depth
+  let fiber = input[fiberKey], depth = 0, optionsList = null, foundDepth = -1;
+  while (fiber && depth < 35) {
+    const mp = fiber.memoizedProps;
+    if (mp && Array.isArray(mp.options) && mp.options.length && typeof mp.onChange === 'function' && depth >= 3) {
+      optionsList = mp.options;
+      foundDepth = depth;
+      break;
+    }
+    fiber = fiber.return; depth++;
+  }
+  if (!optionsList) return false;
+
+  // Pick the best matching option
+  let opt = optionsList.find(o => String(o.label || o.value || '').toLowerCase() === lv);
+  if (!opt && isYes) opt = optionsList.find(o => /^yes\b/i.test(String(o.label || '')));
+  if (!opt && isNo)  opt = optionsList.find(o => /^no\b/i.test(String(o.label || '')));
+  if (!opt && key === 'requireSponsorship' && isNo)
+    opt = optionsList.find(o => /not required|will not require/i.test(String(o.label || '')));
+  if (!opt && key === 'workAuth' && isYes)
+    opt = optionsList.find(o => /authorized/i.test(String(o.label || '')) && !/not authorized/i.test(String(o.label || '')));
+  if (!opt && lv.length > 3)
+    opt = optionsList.find(o => String(o.label || '').toLowerCase().includes(lv));
+  if (!opt) return false;
+
+  // Always route through the MAIN-world bridge (fiber-main.js pja:reactselect listener).
+  // We do not gate on data-pja-fiber-main because fiber-main.js may be loaded without
+  // having set the attribute (timing race). The bridge will succeed if loaded, otherwise
+  // data-pja-fiber-done stays unset and we fall through to the direct call.
+  const uid = 'pja_rs_' + Date.now() + '_' + Math.random().toString(36).slice(2, 7);
+  input.setAttribute('data-pja-fiber-id', uid);
+  input.removeAttribute('data-pja-fiber-done');
+  document.dispatchEvent(new CustomEvent('pja:reactselect', {
+    detail: { uid, optionLabel: String(opt.label || ''), optionValue: String(opt.value !== undefined ? opt.value : opt.label || '') }
+  }));
+  const bridgeOk = input.getAttribute('data-pja-fiber-done') === 'ok';
+  input.removeAttribute('data-pja-fiber-done');
+  if (bridgeOk) return true;
+  input.removeAttribute('data-pja-fiber-id');
+
+  // Bridge unavailable — direct call fallback (only works in MAIN world, will throw in isolated world)
+  try { fiber.memoizedProps.onChange(opt, { action: 'select-option', option: opt }); return true; } catch(_) {}
+  return false;
+}
+
+// ── Greenhouse Education section filler ────────────────────────────────────
+// Greenhouse renders School/Degree/Discipline as react-select comboboxes that
+// (a) often render AFTER the main pjaFillForm pass (so they're missed), and
+// (b) ignore programmatic value-setting. This dedicated pass runs late, scrolls
+// each into view, opens the control (mouse sequence), and clicks the matching
+// option from react-select-{id}-listbox. Degree/Discipline have static option
+// lists (open+select works). School fetches options from typed input — react-
+// select won't fetch from a programmatic set, so school is best-effort here and
+// only fills if its options are already present.
+async function pjaFillGreenhouseEducation(profile) {
+  if (!/greenhouse\.io/i.test(location.hostname)) return;
+  const sleep = ms => new Promise(r => setTimeout(r, ms));
+  const dbg = m => { try { chrome.storage.local.get('pja_dbg', d => { const a=(d.pja_dbg||[]).slice(-40); a.push('[gh-edu] '+m); chrome.storage.local.set({pja_dbg:a}); }); } catch(_){} };
+
+  // Click a react-select option via a TRUSTED CDP mouse click (commits the selection —
+  // synthetic MouseEvents don't reliably commit react-select). Falls back to synthetic.
+  const cdpClickEl = (el) => new Promise(resolve => {
+    el.scrollIntoView({ block: 'center', behavior: 'instant' });
+    const r = el.getBoundingClientRect();
+    const x = r.left + r.width / 2, y = r.top + r.height / 2;
+    let done = false;
+    const fallback = () => { ['mousedown','mouseup','click'].forEach(t => el.dispatchEvent(new MouseEvent(t,{bubbles:true,cancelable:true,button:0}))); };
+    const t = setTimeout(() => { if (!done) { done = true; fallback(); resolve('synthetic-timeout'); } }, 3000);
+    try {
+      chrome.runtime.sendMessage({ type: 'LINKEDIN_TRUSTED_CLICK', x, y }, (resp) => {
+        if (done) return; done = true; clearTimeout(t);
+        if (chrome.runtime.lastError || resp?.error) { fallback(); resolve('synthetic-fail'); }
+        else resolve('cdp');
+      });
+    } catch (_) { if (!done) { done = true; clearTimeout(t); fallback(); resolve('synthetic-catch'); } }
+  });
+
+  const fillRS = async (idPrefix, value, otherFallback) => {
+    if (!value) return;
+    // handle numbered variants school--0, degree--0, etc.
+    const inp = document.getElementById(idPrefix + '--0') || document.getElementById(idPrefix);
+    if (!inp) { dbg(idPrefix + ' not-in-dom'); return; }
+    const ctrl = inp.closest('[class*="select__control"]');
+    // Skip only if a value is actually COMMITTED (react-select single-value present) —
+    // NOT if there's merely typed text (pjaFillForm's combo attempt leaves uncommitted text).
+    if (ctrl?.querySelector('[class*="single-value"],[class*="singleValue"]')) return;
+    inp.scrollIntoView({ block: 'center', behavior: 'instant' });
+    await sleep(150);
+    const openCtrl = () => { if (ctrl) ['mousedown','mouseup','click'].forEach(t => ctrl.dispatchEvent(new MouseEvent(t,{bubbles:true,cancelable:true,button:0,buttons:1}))); };
+    const getOpts = () => { const lb = document.getElementById('react-select-' + inp.id + '-listbox'); return lb ? Array.from(lb.querySelectorAll('[role=option]')) : []; };
+    const lv = value.toLowerCase();
+    const firstWord = lv.split(' ')[0];
+    const pick = (opts) => opts.find(o => o.textContent.trim().toLowerCase() === lv)
+      || opts.find(o => o.textContent.trim().toLowerCase().includes(lv))
+      || opts.find(o => o.textContent.trim().toLowerCase().includes(firstWord));
+
+    // Step 1: open WITHOUT typing — static lists (Degree/Discipline) show all options;
+    // typing would filter out close-but-inexact matches (e.g. "Environmental Studies").
+    openCtrl();
+    await sleep(600);
+    let opts = getOpts();
+    let m = opts.length ? pick(opts) : null;
+
+    // Step 2: if no usable option (async lists like School/Discipline), TYPE via CDP
+    // (real keystrokes) so react-select fires its async option fetch. Synthetic typing
+    // is ignored by react-select, so use a trusted CDP type at the input's coords.
+    if (!m) {
+      const ir = inp.getBoundingClientRect();
+      const ix = ir.left + ir.width / 2, iy = ir.top + ir.height / 2;
+      // Type the first ~2 words: enough to disambiguate a city ("Santa Clara") and to
+      // filter discipline ("Environmental Engineering"), while a too-specific school name
+      // ("a foreign university") simply yields nothing → Other fallback handles it.
+      const q = value.split(/[\s,]+/).slice(0, 2).join(' ').slice(0, 18);
+      await new Promise(res => {
+        let done = false; const to = setTimeout(() => { if (!done) { done = true; res(); } }, 5000);
+        try { chrome.runtime.sendMessage({ type: 'CDP_TYPE_AT', x: ix, y: iy, text: q }, () => { if (!done) { done = true; clearTimeout(to); res(); } }); }
+        catch (_) { if (!done) { done = true; clearTimeout(to); res(); } }
+      });
+      await sleep(1200);
+      opts = getOpts();
+      m = opts.length ? (pick(opts) || opts[0]) : null;
+    }
+    // Step 3: school not in the (US-centric) DB → select "Other" (honest for intl schools).
+    if (!m && otherFallback) {
+      openCtrl(); // CDP-type in step 2 may have closed the menu — reopen it
+      await sleep(300);
+      const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype,'value')?.set;
+      inp.focus();
+      if (setter) { setter.call(inp, ''); inp.dispatchEvent(new InputEvent('input',{bubbles:true})); setter.call(inp, 'Other'); inp.dispatchEvent(new InputEvent('input',{bubbles:true,data:'Other',inputType:'insertText'})); }
+      await sleep(1200);
+      opts = getOpts();
+      m = opts.find(o => /^other$/i.test(o.textContent.trim())) || null;
+      if (m) dbg(inp.id + ' falling back to Other');
+    }
+    if (!m) { dbg(inp.id + ' no-opts'); inp.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',bubbles:true})); return; }
+    const how = await cdpClickEl(m);
+    dbg(inp.id + ' picked "' + m.textContent.trim().slice(0,25) + '" via ' + how);
+    await sleep(400);
+  };
+
+  // Location (City) — react-select with async options (verified: NOT Google Places).
+  // Reuse fillRS: CDP-type the city → options render in react-select-candidate-location-listbox
+  // → CDP-click the match. pick() matches on the city via the "includes" branch.
+  await fillRS('candidate-location', profile.city ? (profile.city + (profile.state ? ', ' + profile.state : '')) : '');
+
+  // Degree & Discipline first (reliable static lists), then School (best-effort).
+  await fillRS('degree', profile.degree);
+  await fillRS('discipline', profile.major, true);   // Other-fallback if exact discipline absent
+  await fillRS('school', profile.university, true);   // Other-fallback for unlisted (intl) schools
+
+  // ── Sweep remaining empty react-select questions (sponsorship, work-auth, EEO) ──
+  // Greenhouse renders custom screening questions as react-selects with generic ids
+  // (question_NNN). Classify by label and pick the matching option via open+select.
+  const rsInputs = Array.from(document.querySelectorAll('input[role="combobox"]'))
+    .filter(el => {
+      const ctrl = el.closest('[class*="select__control"]');
+      if (!ctrl || el.offsetParent === null) return false;
+      // not yet committed (no single-value span)
+      return !ctrl.querySelector('[class*="single-value"],[class*="singleValue"]');
+    });
+  for (const inp of rsInputs) {
+    if (/^(school|degree|discipline)/.test(inp.id || '')) continue; // handled above
+    // resolve label
+    const lblBy = inp.getAttribute('aria-labelledby');
+    let label = '';
+    if (lblBy) label = (document.getElementById(lblBy.split(' ')[0])?.textContent || '').toLowerCase();
+    if (!label) label = (inp.getAttribute('aria-label') || '').toLowerCase();
+    if (!label) {
+      const fld = inp.closest('div'); const l = fld?.querySelector('label'); label = (l?.textContent || '').toLowerCase();
+    }
+    if (!label) continue;
+    // decide answer
+    let want = null;
+    if (/country/i.test(label) || inp.id === 'country') want = /united states|usa|u\.s\./i;
+    else if (/sponsor/i.test(label)) want = /no|not/i;             // require sponsorship → No
+    else if (/authoriz|legally|eligible to work|right to work/i.test(label)) want = /yes|authorized/i;
+    else if (/gender|are you (male|female)/i.test(label)) want = profile.gender ? new RegExp(profile.gender, 'i') : /decline|prefer not/i;
+    else if (/hispanic|latino/i.test(label)) want = /no|not hispanic|decline/i;
+    else if (/veteran/i.test(label)) want = /not a protected veteran|not a veteran|no|decline/i;
+    else if (/disab/i.test(label)) want = /no.*disability|don.t have|decline|no$/i;
+    else if (/onsite|on-site|in person|in-person|commute|relocat|able to work (at|in|on)|willing to work/i.test(label)) want = /yes/i;
+    else if (/shift|schedule|weekend|night|overtime|swing|flexible hours|work.*hours/i.test(label)) want = /yes/i;
+    else if (/18 years|over 18|at least 18|legal age/i.test(label)) want = /yes/i;
+    else if (/current or former|currently employed|former employee|previously (work|employ)|ever (work|been employed)/i.test(label)) want = /^no|^never/i;
+    else if (/(have you|do you|are you).*(read|agree|acknowledge|consent|certify)/i.test(label)) want = /yes|agree|i (agree|certify|acknowledge)/i;
+    else continue; // unknown question — leave for AI/answer-bank
+    // open + select
+    inp.scrollIntoView({ block: 'center', behavior: 'instant' });
+    await sleep(120);
+    const ctrl = inp.closest('[class*="select__control"]');
+    ['mousedown','mouseup','click'].forEach(t => ctrl.dispatchEvent(new MouseEvent(t,{bubbles:true,cancelable:true,button:0,buttons:1})));
+    await sleep(500);
+    const lb = document.getElementById('react-select-' + inp.id + '-listbox');
+    const opts = lb ? Array.from(lb.querySelectorAll('[role=option]')) : [];
+    if (!opts.length) { inp.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',bubbles:true})); continue; }
+    const m = opts.find(o => want.test(o.textContent.trim())) || null;
+    if (m) { const how = await cdpClickEl(m); dbg('q "'+label.slice(0,20)+'" → "'+m.textContent.trim().slice(0,18)+'" via '+how); }
+    else { inp.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',bubbles:true})); }
+    await sleep(300);
+  }
+}
+
+// ── ARIA combobox filler (Greenhouse, Ashby, Lever custom dropdowns) ───────
+// These widgets use <input type="text" role="combobox"> + toggle button +
+// [role="listbox"] flyout — not standard <select> elements.
+// Strategy: click the toggle to open the flyout, then click the matching option.
+// Falls back to React fiber injection, then typing the value if no listbox appears.
+function pjaFillCombobox(input, value, key) {
+  const lv = value.toLowerCase().trim();
+
+  // ── Greenhouse Google Places location combobox (id="candidate-location") ──
+  // This widget only fires its autocomplete on real keystroke events, not on
+  // programmatic value-sets.  Strategy:
+  //   1. Clear any existing text, focus, type the value via execCommand so the
+  //      Places API gets triggered and renders a listbox.
+  //   2. After a 600 ms delay (Places API is async), click the first option whose
+  //      text starts with the city name.  If none appears, fall through to the
+  //      normal combobox path so the text value is at least present.
+  if (input.id === 'candidate-location') {
+    input.focus();
+    // Type the city portion only (before the first comma) to trigger the Places API.
+    // Use the native value setter + InputEvent — execCommand no-ops in an isolated
+    // content script, so the autocomplete never fired before.
+    const cityOnly = value.split(',')[0].trim();
+    const _setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value')?.set;
+    if (_setter) _setter.call(input, ''); else input.value = '';
+    input.dispatchEvent(new InputEvent('input', { bubbles: true }));
+    if (_setter) _setter.call(input, cityOnly); else input.value = cityOnly;
+    input.dispatchEvent(new InputEvent('input', { bubbles: true, data: cityOnly, inputType: 'insertText' }));
+    input.dispatchEvent(new KeyboardEvent('keydown', { key: cityOnly.slice(-1), bubbles: true }));
+    input.dispatchEvent(new KeyboardEvent('keyup', { key: cityOnly.slice(-1), bubbles: true }));
+    setTimeout(() => {
+      const roots = typeof pjaGetAllRoots === 'function' ? pjaGetAllRoots() : [document];
+      let listbox = null;
+      for (const root of roots) {
+        listbox = root.querySelector('[role="listbox"]:not([hidden]), .pac-container:not([style*="display: none"])');
+        if (listbox) break;
+      }
+      if (listbox) {
+        // Google Places .pac-item or ARIA option — click the first one that matches city
+        const opts = Array.from(listbox.querySelectorAll('[role="option"], .pac-item'));
+        const match = opts.find(o => o.textContent.toLowerCase().includes(cityOnly.toLowerCase())) || opts[0];
+        if (match) { match.click(); return; }
+      }
+      // No Places listbox appeared — fall back: set the full value via native setter
+      pjaSetNative(input, value);
+    }, 600);
+    return true;
+  }
+
+  // Workday multiselect widget (data-uxi-widget-type="selectinput")
+  // Container click doesn't open the dropdown — must type into the input via nativeInputValueSetter.
+  // Options must be selected via the inner promptLeafNode child, not the outer role="option" div.
+  if (input.getAttribute('data-uxi-widget-type') === 'selectinput') {
+    const _nativeSetter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set;
+
+    const doSelectWorkday = () => {
+      const listbox = document.querySelector('[data-automation-id="activeListContainer"]') ||
+        document.querySelector('[role="listbox"]:not([hidden]):not([id*="iti"]):not([aria-label*="countr"])');
+      if (!listbox) return false;
+      const opts = Array.from(listbox.querySelectorAll('[role="option"]'));
+      if (!opts.length) return false;
+
+      // Use only the option's OWN label text — clone and strip nested child options
+      // so parent options like "Job Board or Social Media" don't absorb their children's text.
+      const getOptText = opt => {
+        const clone = opt.cloneNode(true);
+        clone.querySelectorAll('[role="option"]').forEach(c => c.remove());
+        return clone.textContent.trim().toLowerCase().replace(/\s+/g, ' ');
+      };
+
+      const isYes = ['yes','true','1'].includes(lv);
+      const isNo  = ['no','false','0'].includes(lv);
+      let match = opts.find(o => getOptText(o) === lv);
+      if (!match && lv.length > 3) match = opts.find(o => getOptText(o).includes(lv));
+      if (!match && isYes) match = opts.find(o => /^yes\b/i.test(getOptText(o)));
+      if (!match && isNo)  match = opts.find(o => /^no\b/i.test(getOptText(o)));
+      if (!match && key === 'requireSponsorship' && isNo)
+        match = opts.find(o => /not required|will not require|no.*will not/i.test(getOptText(o)));
+      if (!match && key === 'workAuth' && isYes)
+        match = opts.find(o => /authorized/i.test(getOptText(o)) && !/not authorized/i.test(getOptText(o)));
+      if (!match && key === 'referralSource') {
+        const RF = ['linkedin','job board or social media','social media','job board','online job board','internet','online','job posting','indeed','glassdoor','external job board'];
+        for (const fb of RF) { match = opts.find(o => getOptText(o).includes(fb)); if (match) break; }
+      }
+      if (!match) return false;
+
+      // Only use promptLeafNode as click target for leaf options (no nested child options).
+      // Parent options (e.g. "Job Board or Social Media") have nested [role="option"] children;
+      // their first promptLeafNode descends into a child ("Indeed"), causing the wrong click.
+      const isLeafOption = !match.querySelector('[role="option"]');
+      const leafNode = isLeafOption ? match.querySelector('[data-automation-id="promptLeafNode"]') : null;
+      const target = leafNode || match;
+      target.dispatchEvent(new MouseEvent('mouseover', { bubbles: true }));
+      target.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true, button: 0, buttons: 1 }));
+      target.dispatchEvent(new MouseEvent('mouseup',   { bubbles: true, cancelable: true, button: 0 }));
+      target.dispatchEvent(new MouseEvent('click',     { bubbles: true, cancelable: true, button: 0 }));
+      const selText = target.textContent?.trim();
+      console.log('PJA WD multiselect select:', selText, 'via:', leafNode ? 'leafNode' : 'option');
+      chrome.storage.local.get('pja_dbg', d => {
+        const arr = (d.pja_dbg || []).slice(-19);
+        arr.push('[WD] multiselect selected: "' + selText?.slice(0,40) + '" key=' + key);
+        chrome.storage.local.set({ pja_dbg: arr });
+      });
+      return true;
+    };
+
+    // Open via CDP trusted click (bypasses Workday's isTrusted check).
+    // Assign a temporary unique ID to the inputContainer so background.js can find it.
+    const openWdMultiselect = () => {
+      const msContainer = input.closest('[data-uxi-widget-type="multiselect"]');
+      const inputContainer = msContainer?.querySelector('[data-automation-id="multiselectInputContainer"]');
+      const clickTarget = inputContainer || input;
+      const tempId = '__pja_wd_ms_' + Date.now();
+      clickTarget.setAttribute('id', tempId);
+      return new Promise(resolve => {
+        chrome.runtime.sendMessage({ type: 'WORKDAY_TRUSTED_CLICK', selector: '#' + CSS.escape(tempId) }, resp => {
+          clickTarget.removeAttribute('id');
+          const ok = resp?.ok || false;
+          console.log('PJA WD CDP click result:', ok, 'selector:', tempId);
+          chrome.storage.local.get('pja_dbg', d => {
+            const arr = (d.pja_dbg || []).slice(-19);
+            arr.push('[WD] CDP click ok=' + ok + ' key=' + key + ' val=' + String(value).slice(0,30));
+            chrome.storage.local.set({ pja_dbg: arr });
+          });
+          resolve(ok);
+        });
+      });
+    };
+
+    window._pjaComboChain = (window._pjaComboChain || Promise.resolve()).then(() => new Promise(resolve => {
+      openWdMultiselect().then(() => {
+        // Wait for the dropdown to populate, then select the target option.
+        setTimeout(() => {
+          if (!doSelectWorkday()) {
+            // Retry after extra delay (options may load via network)
+            setTimeout(() => {
+              if (!doSelectWorkday()) console.log('PJA WD multiselect: no match for', value, 'key:', key);
+              resolve();
+            }, 800);
+            return;
+          }
+          // If we clicked a parent category to expand it, the item isn't selected yet.
+          // Re-run after expansion to pick the correct leaf option.
+          setTimeout(() => {
+            const msContainer = input.closest('[data-uxi-widget-type="multiselect"]');
+            const containerText = msContainer?.textContent || '';
+            if (!/\d+ item/.test(containerText)) doSelectWorkday();
+            resolve();
+          }, 500);
+        }, 700);
+      });
+    }));
+    return true;
+  }
+
+  // Find the outer clickable container (react-select's control div that handles mousedown/click).
+  // Targeting the inner <input> element does NOT open the menu; react-select's handler is on this div.
+  const selectCtrl = input.closest('[class*="select__control"]');
+
+  // Find the toggle/expand button for non-react-select combobox widgets.
+  const widgetContainer = input.closest(
+    '[class*="select__container"],[class*="selectContainer"],[class*="select-container"],' +
+    '[class*="combobox"],[class*="Combobox"],[aria-haspopup="listbox"]'
+  ) || input.parentElement?.parentElement || input.parentElement;
+
+  const toggleBtn = !selectCtrl && widgetContainer && (
+    Array.from(widgetContainer.querySelectorAll('button')).find(b =>
+      /toggle|expand|chevron|dropdown|icon/i.test(
+        b.getAttribute('aria-label') || b.className || b.getAttribute('aria-haspopup') || b.textContent || ''
+      )
+    ) ||
+    widgetContainer.querySelector('[aria-haspopup="listbox"]:not(input)') ||
+    widgetContainer.querySelector('[role="button"]')
+  );
+
+  // react-select uses id="react-select-{inputId}-listbox" for the options menu.
+  const expectedListboxId = input.id ? `react-select-${input.id}-listbox` : null;
+  const ariaControlsId = input.getAttribute('aria-controls');
+
+  const doSelect = () => {
+    let listbox = null;
+    if (expectedListboxId) listbox = document.getElementById(expectedListboxId);
+    if (!listbox && ariaControlsId) listbox = document.getElementById(ariaControlsId);
+    if (!listbox && widgetContainer) listbox = widgetContainer.querySelector('[role="listbox"]');
+    if (!listbox) {
+      const roots = typeof pjaGetAllRoots === 'function' ? pjaGetAllRoots() : [document];
+      for (const root of roots) {
+        const lb = root.querySelector('[role="listbox"]:not([hidden]):not([id*="iti"]):not([aria-label*="countr"]):not([aria-label*="Country"])');
+        if (lb) { listbox = lb; break; }
+      }
+    }
+    if (!listbox) return false;
+
+    const opts = Array.from(listbox.querySelectorAll('[role="option"]'));
+    if (!opts.length) return false;
+
+    const isYes = ['yes','true','1'].includes(lv);
+    const isNo  = ['no','false','0'].includes(lv);
+
+    let match = opts.find(o => o.textContent.trim().toLowerCase() === lv);
+    if (!match && isYes) match = opts.find(o => /^yes\b/i.test(o.textContent.trim()));
+    if (!match && isNo)  match = opts.find(o => /^no\b/i.test(o.textContent.trim()));
+    if (!match && key === 'requireSponsorship' && isNo)
+      match = opts.find(o => /not required|will not require|no.*will not/i.test(o.textContent));
+    if (!match && key === 'workAuth' && isYes)
+      match = opts.find(o => /authorized/i.test(o.textContent) && !/not authorized/i.test(o.textContent));
+    if (!match && lv.length > 3)
+      match = opts.find(o => o.textContent.trim().toLowerCase().includes(lv));
+    // State name → abbreviation (e.g. "California" → "CA")
+    if (!match) {
+      const STATE_ABBR = {
+        'alabama':'AL','alaska':'AK','arizona':'AZ','arkansas':'AR','california':'CA',
+        'colorado':'CO','connecticut':'CT','delaware':'DE','florida':'FL','georgia':'GA',
+        'hawaii':'HI','idaho':'ID','illinois':'IL','indiana':'IN','iowa':'IA',
+        'kansas':'KS','kentucky':'KY','louisiana':'LA','maine':'ME','maryland':'MD',
+        'massachusetts':'MA','michigan':'MI','minnesota':'MN','mississippi':'MS',
+        'missouri':'MO','montana':'MT','nebraska':'NE','nevada':'NV','new hampshire':'NH',
+        'new jersey':'NJ','new mexico':'NM','new york':'NY','north carolina':'NC',
+        'north dakota':'ND','ohio':'OH','oklahoma':'OK','oregon':'OR','pennsylvania':'PA',
+        'rhode island':'RI','south carolina':'SC','south dakota':'SD','tennessee':'TN',
+        'texas':'TX','utah':'UT','vermont':'VT','virginia':'VA','washington':'WA',
+        'west virginia':'WV','wisconsin':'WI','wyoming':'WY'
+      };
+      const abbr = STATE_ABBR[lv];
+      if (abbr) match = opts.find(o => o.textContent.trim().toUpperCase() === abbr);
+      if (!match && lv.length === 2) {
+        const fullName = Object.entries(STATE_ABBR).find(([k,v]) => v === lv.toUpperCase())?.[0];
+        if (fullName) match = opts.find(o => o.textContent.trim().toLowerCase() === fullName);
+      }
+    }
+    // Country code → full name (e.g. "usa"/"us" → "United States")
+    if (!match) {
+      const COUNTRY_MAP = {
+        'usa':'united states','us':'united states','u.s.':'united states','u.s.a.':'united states',
+        'uk':'united kingdom','u.k.':'united kingdom','gb':'united kingdom',
+        'ca':'canada','au':'australia','de':'germany','fr':'france','in':'india',
+        'mx':'mexico','br':'brazil','jp':'japan','cn':'china','sg':'singapore',
+        'nz':'new zealand','ie':'ireland','nl':'netherlands','se':'sweden','no':'norway'
+      };
+      const countryName = COUNTRY_MAP[lv];
+      if (countryName) {
+        match = opts.find(o => o.textContent.trim().toLowerCase() === countryName) ||
+                opts.find(o => o.textContent.trim().toLowerCase().startsWith(countryName));
+      }
+    }
+
+    // referralSource: "LinkedIn" won't match directly on most job sites.
+    // Map to common job-board/social-media options.
+    if (!match && key === 'referralSource') {
+      const REFERRAL_FALLBACKS = ['linkedin','job board or social media','social media','job board','online job board','internet','online','job posting','indeed','glassdoor','external job board'];
+      for (const fallback of REFERRAL_FALLBACKS) {
+        match = opts.find(o => o.textContent.trim().toLowerCase().includes(fallback));
+        if (match) break;
+      }
+    }
+
+    if (match) {
+      // Full mouse sequence — react-select needs mousedown before click to register the selection
+      match.dispatchEvent(new MouseEvent('mouseover', { bubbles: true }));
+      match.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true, button: 0, buttons: 1 }));
+      match.dispatchEvent(new MouseEvent('mouseup',   { bubbles: true, cancelable: true, button: 0 }));
+      match.dispatchEvent(new MouseEvent('click',     { bubbles: true, cancelable: true, button: 0 }));
+      // Log singleValue state after selection to verify react-select processed the click
+      setTimeout(() => {
+        const ctrl = input.closest('[class*="select__container"],[class*="select "]') || input.parentElement?.parentElement?.parentElement;
+        const sv = ctrl?.querySelector('[class*="single-value"],[class*="singleValue"]');
+        console.log('PJA combo post-select sv:', sv?.textContent?.trim() || 'NONE', 'input.value:', input.value, 'id:', input.id);
+      }, 150);
+      return true;
+    }
+    input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+    return false;
+  };
+
+  // For autocomplete comboboxes (aria-autocomplete=list, e.g. Greenhouse School/Degree),
+  // the option list is EMPTY until the user types a query. Typing via the native value
+  // setter + InputEvent (NOT execCommand, which no-ops in an isolated content script)
+  // populates the filtered options so doSelect() can find a match.
+  const isAutocomplete = (input.getAttribute('aria-autocomplete') || '').includes('list')
+    || input.getAttribute('role') === 'combobox';
+  const typeToFilter = (q) => {
+    try {
+      input.focus();
+      const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value')?.set;
+      if (setter) setter.call(input, ''); else input.value = '';
+      input.dispatchEvent(new InputEvent('input', { bubbles: true }));
+      if (setter) setter.call(input, q); else input.value = q;
+      input.dispatchEvent(new InputEvent('input', { bubbles: true, data: String(q), inputType: 'insertText' }));
+      input.dispatchEvent(new KeyboardEvent('keydown', { key: q.slice(-1), bubbles: true }));
+      input.dispatchEvent(new KeyboardEvent('keyup', { key: q.slice(-1), bubbles: true }));
+    } catch (_) {}
+  };
+
+  // Open the flyout — fire full mouse sequence on select__control (the outer clickable div).
+  // Background: react-select's onMouseDown is on the container, not the inner input.
+  const openFlyout = () => {
+    // react-select (selectCtrl present) manages its own input state and shows all options
+    // on open — native value-setting interferes with it. Only type-to-filter for non-
+    // react-select autocompletes (e.g. plain Greenhouse/custom widgets).
+    if (isAutocomplete && !selectCtrl) {
+      typeToFilter(value);
+    }
+    if (selectCtrl) {
+      ['mouseover','mouseenter','mousemove','mousedown','mouseup','click'].forEach(type =>
+        selectCtrl.dispatchEvent(new MouseEvent(type, { bubbles: true, cancelable: true, button: 0, buttons: 1 }))
+      );
+    } else if (toggleBtn && !isAutocomplete) {
+      toggleBtn.click();
+    } else {
+      input.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true }));
+      input.dispatchEvent(new MouseEvent('mouseup',   { bubbles: true, cancelable: true }));
+    }
+  };
+
+  // Sequential queue: comboboxes must be filled one at a time — opening a new dropdown closes
+  // any currently open one, causing parallel fills to cancel each other.
+  const _inputId = input.id || input.name || '?';
+  if (typeof window._pjaComboChain === 'undefined') window._pjaComboChain = Promise.resolve();
+  // Autocomplete options arrive async (often via network) — wait longer between attempts.
+  const w = isAutocomplete ? 700 : 200;
+  const _dbg = (m) => { try { chrome.storage.local.get('pja_dbg', d => { const a=(d.pja_dbg||[]).slice(-40); a.push('[combo] '+m); chrome.storage.local.set({pja_dbg:a}); }); } catch(_){} };
+  window._pjaComboChain = window._pjaComboChain.then(() => new Promise(resolve => {
+    openFlyout();
+    setTimeout(() => {
+      const lbId = expectedListboxId ? document.getElementById(expectedListboxId) : null;
+      _dbg(_inputId+' val="'+String(value).slice(0,20)+'" selectCtrl='+!!selectCtrl+' expLbId='+expectedListboxId+' lbFound='+!!lbId+' exp='+input.getAttribute('aria-expanded'));
+      console.log('PJA combo attempt 1:', _inputId, 'value:', value, 'lbFound:', !!lbId, 'ariaExpanded:', input.getAttribute('aria-expanded'));
+      if (doSelect()) { _dbg(_inputId+' OK-a1'); console.log('PJA combo ok:', _inputId); return resolve(); }
+      openFlyout();
+      setTimeout(() => {
+        console.log('PJA combo attempt 2:', _inputId, 'lbFound:', !!document.getElementById(expectedListboxId));
+        if (doSelect()) { console.log('PJA combo ok:', _inputId); return resolve(); }
+        openFlyout();
+        setTimeout(() => {
+          console.log('PJA combo attempt 3:', _inputId);
+          if (!doSelect()) { _dbg(_inputId+' FAIL→native lbFound='+!!document.getElementById(expectedListboxId)); console.log('PJA combo fallback pjaSetNative:', _inputId); pjaSetNative(input, value); }
+          else { _dbg(_inputId+' OK-a3'); console.log('PJA combo ok:', _inputId); }
+          resolve();
+        }, w);
+      }, w);
+    }, isAutocomplete ? 700 : 150);
+  }));
+
+  return true;
+}
+
+// ── Autofill ───────────────────────────────────────────────────────────────
+function pjaFillForm(profile, answers) {
+  const visible = el => { const r = el.getBoundingClientRect(); return r.width > 0 && r.height > 0; };
+
+  // ── Pass 1: text inputs, selects, textareas ────────────────────────────
+  // Workday selectinput inner inputs have zero BoundingClientRect when closed —
+  // include them regardless of visibility since CDP click works without visual open state.
+  const wdSelectinputVisible = el =>
+    el.getAttribute('data-uxi-widget-type') === 'selectinput' &&
+    /workday\.com|myworkdayjobs\.com/i.test(location.hostname);
+  const fields = pjaQueryAll(
+    'input:not([type=hidden]):not([type=submit]):not([type=button]):not([type=file]):not([type=reset]):not([type=radio]):not([type=checkbox]),select,textarea'
+  ).filter(el => visible(el) || wdSelectinputVisible(el));
+
+  // Debug: log field summary on Workday forms
+  if (/workday\.com|myworkdayjobs\.com/i.test(location.hostname)) {
+    const summary = fields.map(el => {
+      const lbl = pjaGetLabel(el);
+      const uxi = el.getAttribute('data-uxi-widget-type') || '';
+      const role = el.getAttribute('role') || '';
+      return (lbl || el.name || el.id || '?').slice(0,30) + (uxi ? '['+uxi+']' : '') + (role ? '('+role+')' : '');
+    }).join(' | ');
+    chrome.storage.local.get('pja_dbg', d => {
+      const arr = (d.pja_dbg || []).slice(-19);
+      arr.push('[WD] pjaFillForm fields(' + fields.length + '): ' + summary.slice(0, 200));
+      chrome.storage.local.set({ pja_dbg: arr });
+    });
+  }
+
+  let filled = 0;
+  fields.forEach(el => {
+    const rawLabel = pjaGetLabel(el);
+    const key = pjaClassify(rawLabel);
+
+    // Skip OPTIONAL social-profile / personal-URL fields (LinkedIn/Facebook/Twitter/etc).
+    // They're rarely required, and a stale answer-bank value here fails the ATS's URL-format
+    // validation (Workday flags them aria-invalid and blocks the step). Only fill if the
+    // field is genuinely required AND we have a real value for it.
+    const isOptional = !el.required && el.getAttribute('aria-required') !== 'true';
+    if (isOptional && /please provide your (linkedin|facebook|twitter|instagram|github)|(facebook|twitter|instagram) (profile|handle|url|account)|social network|your (linkedin|facebook|twitter) (profile|handle)/i.test(rawLabel || '')) {
+      const directVal = key && profile[key];
+      if (!directVal) return; // leave empty — better than an invalid banked value
+    }
+    // DIAGNOSTIC: education combobox routing
+    if (/^(school|degree|discipline)/.test(el.id || '')) {
+      try { chrome.storage.local.get('pja_dbg', d => { const a=(d.pja_dbg||[]).slice(-40); a.push('[ff] '+el.id+' label="'+String(rawLabel).slice(0,18)+'" key='+key+' role='+el.getAttribute('role')+' val="'+(el.value||'').slice(0,12)+'"'); chrome.storage.local.set({pja_dbg:a}); }); } catch(_){}
+    }
+    // Skip already-filled fields only when we have no profile key for them.
+    // If we have a profile value, always overwrite — prevents stale bfcache
+    // or browser autofill from silently blocking our data.
+    if (el.value && el.value.trim() && el.tagName !== 'SELECT' && !key) return;
+
+    const isCombobox = (el.getAttribute('role') === 'combobox' && el.tagName === 'INPUT') ||
+      // Workday multiselect search input (data-uxi-widget-type="selectinput")
+      (el.getAttribute('data-uxi-widget-type') === 'selectinput' && el.tagName === 'INPUT');
+
+    if (key) {
+      // For currentLocation, fall back to constructing from city+state if the field is empty
+      let profileVal = profile[key];
+      if (key === 'currentLocation' && !profileVal && (profile.city || profile.state)) {
+        profileVal = [profile.city, profile.state].filter(Boolean).join(', ');
+      }
+      // usPersonExportControl: derive from visaStatus if not explicitly set
+      if (key === 'usPersonExportControl' && !profileVal) {
+        const isUSPerson = /citizen|green card|permanent resident/i.test(profile.visaStatus || '');
+        profileVal = isUSPerson ? 'Yes' : 'No';
+      }
+      // React tel/phone validation rejects formatted "(873) 688-2634"; use digits-only
+      if ((el.type === 'tel' || key === 'phone') && profileVal) profileVal = profileVal.replace(/\D/g, '');
+      if (profileVal) {
+        // Don't fill textareas with bare numeric profile values (e.g. yearsExperience="6")
+        // — those fields expect a sentence. Use banked sentence answer if available, else let AI handle.
+        if (el.tagName === 'TEXTAREA' && /^\d+$/.test(String(profileVal).trim())) {
+          const norm2 = pjaNormalizeLabel(rawLabel);
+          const banked2 = answers && pjaFindBestAnswer(norm2, answers);
+          if (banked2) { pjaSetNative(el, banked2); filled++; }
+          return;
+        }
+        const validator = PJA_FIELD_VALIDATORS[key];
+        const valid = !validator || validator(profileVal);
+        if (valid) {
+          let ok;
+          const isPhoneField = el.type === 'tel' || key === 'phone';
+          if (el.tagName === 'SELECT')       ok = pjaFillSelect(el, profileVal, key);
+          else if (isCombobox)               ok = pjaFillCombobox(el, profileVal, key);
+          else if (isPhoneField)            {
+            console.log('PJA pjaFillForm: filling phone via fiber, id=', el.id, 'type=', el.type, 'val=', profileVal);
+            pjaFillTextViaFiber(el, profileVal, true);
+            console.log('PJA pjaFillForm: phone after fiber fill, el.value=', el.value);
+            ok = true;
+          }
+          else { pjaFillTextViaFiber(el, profileVal); ok = true; }
+          if (ok) { filled++; return; }
+        }
+      }
+    }
+
+    // If the label maps to a known profile key with a value, block answer bank fallback.
+    // Exception: for non-sensitive fields with empty profile values (e.g. salaryExpectation=''),
+    // allow the answer bank so pre-banked answers can still fill the field.
+    const PII_KEYS = new Set(['email','phone','firstName','lastName','fullName','middleName','address','address2','zip','city','state','country']);
+    if (key && key in profile && (profile[key] || PII_KEYS.has(key))) {
+      return;
+    }
+
+    if (rawLabel.length > 3) {
+      const norm = pjaNormalizeLabel(rawLabel);
+      const banked = pjaFindBestAnswer(norm, answers);
+      // BUG2 fix: route SELECTs through pjaFillSelect (React-aware) not pjaSetNative.
+      // Also route comboboxes through pjaFillCombobox.
+      if (banked) {
+        const isPhoneField2 = el.type === 'tel' || pjaClassify(rawLabel) === 'phone';
+        const ok = el.tagName === 'SELECT'
+          ? pjaFillSelect(el, banked, null)
+          : isCombobox
+            ? pjaFillCombobox(el, banked, null)
+          : isPhoneField2
+            ? (pjaFillTextViaFiber(el, banked, true), true)
+            : (pjaSetNative(el, banked), true);
+        if (ok) filled++;
+      }
+    }
+  });
+
+  // ── Pass 2: radio button groups ────────────────────────────────────────
+  // Group key = shadow-root id + name + fieldset legend.
+  // LinkedIn reuses the SAME name attribute for every radio group on the page,
+  // so name alone is insufficient — fieldset is the only reliable boundary.
+  const radioGroups = {};
+  pjaQueryAll('input[type=radio]').forEach(r => {
+    if (!r.name || !visible(r)) return;
+    const rootId = r.getRootNode() === document ? '__doc__' : (r.getRootNode().host?.id || '__shadow__');
+    const fieldset = r.closest('fieldset');
+    const fsKey = fieldset
+      ? (fieldset.id || fieldset.querySelector('legend')?.textContent?.trim().slice(0, 30) || '__fs__')
+      : '__nofield__';
+    const key = rootId + '::' + r.name + '::' + fsKey;
+    (radioGroups[key] = radioGroups[key] || []).push(r);
+  });
+
+  for (const radios of Object.values(radioGroups)) {
+    // Skip groups where one radio is already selected
+    if (radios.some(r => r.checked)) continue;
+
+    const groupLabel = pjaGetGroupLabel(radios[0]);
+    const key = pjaClassify(groupLabel);
+
+    if (key && profile[key]) {
+      if (pjaSelectRadio(radios, profile[key], key)) { filled++; continue; }
+    }
+
+    // Answer bank fallback for unclassified radio groups
+    if (groupLabel.length > 3) {
+      const norm = pjaNormalizeLabel(groupLabel);
+      const banked = pjaFindBestAnswer(norm, answers);
+      if (banked && pjaSelectRadio(radios, banked, key)) filled++;
+    }
+  }
+
+  // Post-fill: re-set location/currentLocation fields without blur.
+  // Lever clears autocomplete inputs on blur if no dropdown selection was made.
+  // We set the value a second time after all other events have settled.
+  if (profile.currentLocation || (profile.city && profile.state)) {
+    const locVal = profile.currentLocation || [profile.city, profile.state].filter(Boolean).join(', ');
+    pjaQueryAll('input[name="location"], input[id="location-input"], input[autocomplete="address-level2 address-level1"]')
+      .filter(el => visible(el))
+      .forEach(el => {
+        const desc = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value');
+        if (desc?.set) desc.set.call(el, locVal); else el.value = locVal;
+        el.dispatchEvent(new InputEvent('input', { bubbles: true, data: locVal, inputType: 'insertText' }));
+        el.dispatchEvent(new Event('change', { bubbles: true }));
+      });
+  }
+
+  return filled;
+}
+
+// ── AI-powered answer generation for unknown required text fields ──────────────
+//
+// Usage (called from content.js after pjaFillForm):
+//   pjaFillUnknownTextFields(profile, answers, jobContext, onFilled)
+//
+// jobContext = { title, company }  — sourced from the current job sidebar data
+// onFilled(count)                  — optional callback with number of newly filled fields
+//
+// The function:
+//  1. Finds required text inputs and textareas that are still empty after pjaFillForm()
+//  2. Skips fields whose labels classify to a known profile key (already handled above)
+//  3. Skips fields that already have a banked answer (pjaFindBestAnswer)
+//  4. Reads maxlength to calibrate answer length
+//  5. Batches all remaining questions into ONE /answer-questions call
+//  6. Fills the fields with the returned answers
+//  7. The background handler persists answers into pja_answers automatically
+
+function pjaFillUnknownTextFields(profile, answers, jobContext, onFilled) {
+  const visible = el => { const r = el.getBoundingClientRect(); return r.width > 0 && r.height > 0; };
+
+  // Collect required, visible, unfilled text inputs and textareas
+  // Includes both native [required] and [aria-required="true"] (Greenhouse uses aria-required)
+  const candidates = pjaQueryAll(
+    'input[required]:not([type=hidden]):not([type=submit]):not([type=button])' +
+    ':not([type=file]):not([type=radio]):not([type=checkbox]):not([type=email])' +
+    ':not([type=tel]):not([type=url]),' +
+    'input[aria-required="true"]:not([type=hidden]):not([type=submit]):not([type=button])' +
+    ':not([type=file]):not([type=radio]):not([type=checkbox]):not([type=email])' +
+    ':not([type=tel]):not([type=url]),' +
+    'textarea[required],textarea[aria-required="true"]'
+  ).filter(el => visible(el) && !(el.value && el.value.trim()));
+
+  const questions = [];
+  const elMap = []; // parallel array to candidates — keeps reference to each element
+
+  // Regex to detect multi-part date picker component fields (start/end month and year pickers).
+  // These are form-structure components, not free-text questions; stale banked answers
+  // (e.g., "July" or "2026") cause Greenhouse date validation errors.
+  const DATE_COMPONENT_RE = /\b(start|end|begin|finish)\s+(date\s+)?(month|year)\b/i;
+
+  for (const el of candidates) {
+    const rawLabel = pjaGetLabel(el);
+    if (!rawLabel || rawLabel.length < 4) { console.log('PJA autofill skip: short/empty label', rawLabel?.slice(0,40), el.name?.slice(0,30)); continue; }
+    if (pjaIsGarbageLabel(rawLabel)) { console.log('PJA autofill skip: garbage label', rawLabel.slice(0,40)); continue; }
+
+    // Skip start/end date month and year component fields — these are multi-part date
+    // pickers, not free-text questions. Banked answers are stale and cause validation errors.
+    if (DATE_COMPONENT_RE.test(rawLabel)) { continue; }
+
+    // Skip if it maps to a profile key (profile data handles this, not AI)
+    // EXCEPTION: textareas whose profile value is a bare number (e.g. yearsExperience="6")
+    // need a sentence answer — let AI generate one.
+    if (pjaClassify(rawLabel)) {
+      if (el.tagName !== 'TEXTAREA') { console.log('PJA autofill skip: classified non-textarea', rawLabel.slice(0,40)); continue; }
+      const classKey = pjaClassify(rawLabel);
+      const pVal = profile[classKey];
+      if (!pVal || !/^\d+$/.test(String(pVal).trim())) { console.log('PJA autofill skip: classified non-numeric', rawLabel.slice(0,40), classKey, pVal); continue; }
+      // else: numeric profile val in a textarea → fall through to AI
+      console.log('PJA autofill: numeric-textarea fallthrough to AI', rawLabel.slice(0,40), classKey, pVal);
+    }
+
+    // Skip if we already have a banked answer (pjaFillForm already tried but may have
+    // missed due to score threshold — re-check here with a more lenient approach)
+    const norm = pjaNormalizeLabel(rawLabel);
+    const bankedAns = pjaFindBestAnswer(norm, answers);
+    if (bankedAns) {
+      // Field is empty but bank has an answer — fill it directly (pjaFillForm may have missed this)
+      console.log('PJA autofill: filling from bank (AI skip)', rawLabel.slice(0,40), bankedAns.slice(0,30));
+      pjaSetNative(el, bankedAns);
+      continue;
+    }
+
+    // Read char limit from the DOM
+    const maxLength = parseInt(el.getAttribute('maxlength') || el.getAttribute('maxLength') || '0', 10) || 0;
+
+    // Determine field type
+    const type = el.tagName === 'TEXTAREA' ? 'textarea' : 'text';
+
+    questions.push({ label: rawLabel, type, maxLength: maxLength || null });
+    elMap.push(el);
+  }
+
+  console.log('PJA autofill pjaFillUnknownTextFields: candidates', candidates.length, 'questions', questions.length, questions.map(q => q.label.slice(0,40)).join(' | '));
+  if (questions.length === 0) {
+    if (typeof onFilled === 'function') onFilled(0);
+    return;
+  }
+
+  // Also include visible, unfilled <select> elements whose label is not classified —
+  // the AI can pick the best option from the provided options list.
+  const selectCandidates = pjaQueryAll('select[required], select[aria-required="true"]').filter(
+    el => visible(el) && (!el.value || el.value === '' || el.selectedIndex <= 0)
+  );
+  for (const sel of selectCandidates) {
+    const rawLabel = pjaGetLabel(sel);
+    if (!rawLabel || rawLabel.length < 4) continue;
+    if (pjaIsGarbageLabel(rawLabel)) continue;
+    if (pjaClassify(rawLabel)) continue;
+    const norm = pjaNormalizeLabel(rawLabel);
+    if (pjaFindBestAnswer(norm, answers)) continue;
+    const opts = Array.from(sel.options)
+      .map(o => o.text.trim())
+      .filter(t => t && !['select', 'please select', 'choose', '--'].includes(t.toLowerCase()));
+    questions.push({ label: rawLabel, type: 'select', maxLength: null, options: opts });
+    elMap.push(sel);
+  }
+
+  // Also include required radio groups not yet answered and not matched by pattern fallback.
+  // Collect by fieldset (or by name attr) to avoid duplicate entries per group.
+  const radioGroupsSeen = new Set();
+  for (const r of pjaQueryAll(
+    'input[type=radio][required], input[type=radio][aria-required="true"]'
+  )) {
+    if (!visible(r)) continue;
+    const fs = r.closest('fieldset');
+    const groupKey = fs || r.name || r.getAttribute('aria-labelledby') || '';
+    if (!groupKey || radioGroupsSeen.has(groupKey)) continue;
+    radioGroupsSeen.add(groupKey);
+
+    // Skip if any radio in the group is already checked
+    const name = r.name;
+    const root = r.getRootNode() || document;
+    if (name && root.querySelector(`input[type=radio][name="${CSS.escape(name)}"]:checked`)) continue;
+
+    const legendText = (fs?.querySelector('legend')?.textContent || '').trim();
+    if (!legendText || legendText.length < 4) continue;
+    if (pjaIsGarbageLabel(legendText)) continue;
+
+    const norm = pjaNormalizeLabel(legendText);
+    if (pjaFindBestAnswer(norm, answers)) continue; // answer bank covers it
+
+    const groupRadios = name
+      ? Array.from(root.querySelectorAll(`input[type=radio][name="${CSS.escape(name)}"]`))
+      : Array.from(fs?.querySelectorAll('input[type=radio]') || [r]);
+    const opts = groupRadios.map(rb => {
+      const lbl = (typeof pjaGetLabel === 'function' ? pjaGetLabel(rb) : rb.getAttribute('aria-label') || '').trim();
+      return lbl || rb.value;
+    }).filter(Boolean);
+    if (!opts.length) continue;
+
+    questions.push({ label: legendText, type: 'radio', maxLength: null, options: opts });
+    elMap.push({ _radioGroup: groupRadios }); // sentinel object, not a DOM element
+  }
+
+  if (questions.length === 0) {
+    if (typeof onFilled === 'function') onFilled(0);
+    return;
+  }
+
+  // Send all questions in one batch to the background → dev server
+  chrome.runtime.sendMessage(
+    { type: 'ANSWER_QUESTIONS', payload: { questions, jobContext: jobContext || {} } },
+    resp => {
+      if (chrome.runtime.lastError || !resp?.success || !Array.isArray(resp.answers)) {
+        if (typeof onFilled === 'function') onFilled(0);
+        return;
+      }
+
+      let filled = 0;
+      for (const { label, answer } of resp.answers) {
+        if (!label || !answer) continue;
+
+        // Match the returned label back to the DOM element
+        const idx = questions.findIndex(q => q.label === label);
+        if (idx === -1) continue;
+        const el = elMap[idx];
+        if (!el) continue;
+
+        // Radio group sentinel: { _radioGroup: [...radios] }
+        if (el._radioGroup) {
+          const radios = el._radioGroup;
+          if (radios.some(rb => rb.checked)) continue; // already answered
+          const ansLower = answer.toLowerCase().trim();
+          const target = radios.find(rb => {
+            const lbl = (typeof pjaGetLabel === 'function' ? pjaGetLabel(rb) : rb.getAttribute('aria-label') || '').toLowerCase().trim();
+            const val = (rb.value || '').toLowerCase();
+            return lbl === ansLower || val === ansLower || lbl.startsWith(ansLower[0]) && ansLower.startsWith(lbl.slice(0,4));
+          }) || radios.find(rb => {
+            const lbl = (typeof pjaGetLabel === 'function' ? pjaGetLabel(rb) : rb.getAttribute('aria-label') || '').toLowerCase();
+            return lbl.includes(ansLower) || ansLower.includes(lbl.replace(/\s+/g,'').slice(0,6));
+          });
+          if (target) { pjaClickRadio(target); filled++; }
+          continue;
+        }
+
+        if (el.value && el.value.trim()) continue; // already filled by race (text/select)
+
+        if (el.tagName === 'SELECT') {
+          const ok = pjaFillSelect(el, answer, null);
+          if (ok) filled++;
+        } else {
+          // Truncate to maxlength to avoid ATS validation errors
+          const max = parseInt(el.getAttribute('maxlength') || '0', 10);
+          const truncated = (max > 0 && answer.length > max) ? answer.slice(0, max) : answer;
+          pjaFillTextViaFiber(el, truncated);
+          filled++;
+        }
+      }
+
+      if (typeof onFilled === 'function') onFilled(filled);
+    }
+  );
+}
+
+// Expose to other content scripts sharing the same page scope
+window.pjaQueryAll = pjaQueryAll;
+window.pjaGetById = pjaGetById;
+window.pjaGetLabel = pjaGetLabel;
+window.pjaClassify = pjaClassify;
+window.pjaSetNative = pjaSetNative;
+window.pjaFillSelect = pjaFillSelect;
+window.pjaCommitSelect = pjaCommitSelect;
+window.pjaNormalizeLabel = pjaNormalizeLabel;
+window.pjaFuzzyScore = pjaFuzzyScore;
+window.pjaFindBestAnswer = pjaFindBestAnswer;
+window.pjaIsGarbageLabel = pjaIsGarbageLabel;
+window.pjaIsApplicationPage = pjaIsApplicationPage;
+window.pjaStartLearning = pjaStartLearning;
+window.pjaStopLearning = pjaStopLearning;
+window.pjaFillForm = pjaFillForm;
+window.pjaFillUnknownTextFields = pjaFillUnknownTextFields;
+window.pjaFillCombobox = pjaFillCombobox;
+window.pjaFillGreenhouseEducation = pjaFillGreenhouseEducation;
+window.pjaFillViaReactFiber = pjaFillViaReactFiber;
+window.pjaFillTextViaFiber = pjaFillTextViaFiber;
+window.pjaFillViaFiberOnChange = pjaFillViaFiberOnChange;
+window.pjaClickRadio = pjaClickRadio;
+window.pjaSelectRadio = pjaSelectRadio;
+window.pjaGetGroupLabel = pjaGetGroupLabel;
+window.pjaFillRequiredRadioFallback = typeof pjaFillRequiredRadioFallback !== 'undefined' ? pjaFillRequiredRadioFallback : undefined;
+window.PJA_FIELD_RULES = PJA_FIELD_RULES;
+window.PJA_DEFAULT_PROFILE = PJA_DEFAULT_PROFILE;
+window.PJA_FIELD_VALIDATORS = PJA_FIELD_VALIDATORS;
+})();

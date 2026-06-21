@@ -1,0 +1,136 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Job Pipeline</title>
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+
+  <div class="header">
+    <div class="header-left">
+      <span class="header-logo">🔬</span>
+      <div>
+        <div class="header-title">Job Assistant</div>
+        <div class="header-subtitle">Job Application Assistant</div>
+      </div>
+    </div>
+    <button class="btn-settings" id="btn-shortlist" title="Job Shortlist">🔬 Shortlist</button>
+    <button class="btn-settings" id="btn-settings">⚙ Settings</button>
+  </div>
+
+  <!-- Tab switcher -->
+  <div class="tab-bar">
+    <button class="tab-btn active" data-tab="pipeline">📋 Pipeline</button>
+    <button class="tab-btn" data-tab="search">🔍 Search</button>
+    <button class="tab-btn" data-tab="contacts">👥 Contacts</button>
+  </div>
+
+  <!-- Manual open bar (always visible) -->
+  <div class="manual-open-bar">
+    <span class="manual-open-label">Sidebar didn't open on this page?</span>
+    <button id="btn-force-open" class="btn-force-open">Open now →</button>
+  </div>
+
+  <!-- ── Pipeline panel ── -->
+  <div id="panel-pipeline" class="tab-panel">
+    <div id="reminder-banner" class="reminder-banner" style="display:none">
+      🔔 <span id="reminder-text"></span>
+    </div>
+
+    <div class="filter-bar">
+      <button class="filter-btn active" data-status="All">All</button>
+      <button class="filter-btn shortlist-btn" data-status="Shortlisted">⭐ Shortlisted</button>
+      <button class="filter-btn needs-info-btn" data-status="Needs Info">⚠ Needs Info</button>
+      <button class="filter-btn" data-status="Bookmarked">Bookmarked</button>
+      <button class="filter-btn" data-status="Applied">Applied</button>
+      <button class="filter-btn" data-status="Outreach Sent">Outreach</button>
+      <button class="filter-btn" data-status="Interview">Interview</button>
+      <button class="filter-btn" data-status="Offer">Offer</button>
+    </div>
+
+    <div id="job-list" class="scrollable-list">
+      <div class="empty-state">
+        <div class="emoji">📋</div>
+        <h3>No jobs saved yet</h3>
+        <p>Visit a job posting on LinkedIn, Indeed, or Glassdoor — the assistant will appear automatically.</p>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── Search panel ── -->
+  <div id="panel-search" class="tab-panel" style="display:none">
+
+    <div class="search-shortlist-bar" id="search-shortlist-bar" style="display:none">
+      <span id="search-shortlist-count"></span>
+      <button id="btn-view-shortlist-search" class="btn-view-shortlist">View Shortlist →</button>
+    </div>
+
+    <div class="search-section-label">Strong Match — Technician Roles</div>
+    <div class="search-links" id="search-links-tech"></div>
+
+    <div class="search-section-label" style="margin-top:10px">Stretch — Engineer Roles</div>
+    <div class="search-links" id="search-links-eng"></div>
+
+    <div class="search-tip">
+      💡 Clicking a search opens LinkedIn Jobs. The <strong>🔬 Scanner</strong> widget appears automatically — click <strong>Scan Jobs</strong> to score and shortlist.
+    </div>
+  </div>
+
+  <!-- ── Contacts panel ── -->
+  <div id="panel-contacts" class="tab-panel" style="display:none">
+    <div class="contacts-action-bar">
+      <span class="contacts-action-label">Reach-out tracker</span>
+      <button id="btn-add-contact" class="btn-add-contact">+ Add Contact</button>
+    </div>
+
+    <div class="contact-filter-bar">
+      <button class="cfilt-btn active" data-cstatus="All">All</button>
+      <button class="cfilt-btn" data-cstatus="To Contact">To Contact</button>
+      <button class="cfilt-btn" data-cstatus="Contacted">Contacted</button>
+      <button class="cfilt-btn" data-cstatus="Responded">Responded</button>
+      <button class="cfilt-btn" data-cstatus="In Progress">In Progress</button>
+    </div>
+
+    <!-- Inline add form -->
+    <div id="add-contact-form" class="add-contact-form" style="display:none">
+      <div class="acf-heading">New Contact</div>
+      <div class="acf-grid">
+        <input id="acf-name"     class="acf-input" placeholder="Name *">
+        <input id="acf-company"  class="acf-input" placeholder="Company">
+        <input id="acf-title"    class="acf-input" placeholder="Title / Role">
+        <input id="acf-linkedin" class="acf-input" placeholder="LinkedIn URL">
+        <input id="acf-email"    class="acf-input" placeholder="Email address">
+        <input id="acf-howknown" class="acf-input" placeholder="How you know them (e.g. LinkedIn search, referral)">
+        <div class="acf-row">
+          <select id="acf-status" class="acf-input acf-select">
+            <option value="To Contact">To Contact</option>
+            <option value="Contacted">Contacted</option>
+            <option value="Responded">Responded</option>
+            <option value="In Progress">In Progress</option>
+            <option value="Closed">Closed</option>
+          </select>
+          <input id="acf-target" class="acf-input" type="date" title="Target outreach date">
+        </div>
+        <textarea id="acf-notes" class="acf-textarea" placeholder="Notes…" rows="2"></textarea>
+      </div>
+      <div class="acf-actions">
+        <button id="btn-acf-save" class="btn-acf-save">Add Contact</button>
+        <button id="btn-acf-cancel" class="btn-acf-cancel">Cancel</button>
+      </div>
+    </div>
+
+    <div id="contact-list" class="scrollable-list">
+      <div class="empty-state">
+        <div class="emoji">👥</div>
+        <h3>No contacts yet</h3>
+        <p>Track recruiters, hiring managers, and referrals independently of job postings.</p>
+      </div>
+    </div>
+  </div>
+
+  <div class="popup-footer" id="popup-footer">0 jobs tracked</div>
+
+  <script src="popup.js"></script>
+</body>
+</html>

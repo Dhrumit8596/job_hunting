@@ -1,0 +1,22 @@
+{
+  "name": "job-application-assistant",
+  "version": "1.0.0",
+  "main": "background.js",
+  "directories": {
+    "test": "test"
+  },
+  "scripts": {
+    "test": "node test/check-syntax.js && node test/unit/run.js",
+    "check:profile": "node test/merged_profile.js"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "description": "",
+  "dependencies": {
+    "ws": "^8.21.0"
+  },
+  "devDependencies": {
+    "jsdom": "^22.1.0"
+  }
+}

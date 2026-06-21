@@ -1,0 +1,123 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Quality Technician – Applied Materials | Easy Apply</title>
+  <style>
+    body { font-family: -apple-system, sans-serif; background: #f3f4f6; margin: 0; padding: 24px; }
+    .card { background: #fff; border-radius: 12px; padding: 28px; max-width: 640px; margin: 0 auto; box-shadow: 0 2px 8px rgba(0,0,0,.1); }
+    h1 { font-size: 20px; font-weight: 700; margin-bottom: 4px; }
+    .company { color: #6b7280; font-size: 14px; margin-bottom: 20px; }
+    h2 { font-size: 15px; font-weight: 600; margin: 20px 0 12px; color: #111; }
+    .field { margin-bottom: 14px; }
+    label { display: block; font-size: 13px; font-weight: 500; color: #374151; margin-bottom: 4px; }
+    input, select, textarea {
+      width: 100%; padding: 9px 12px; border: 1px solid #d1d5db; border-radius: 7px;
+      font-size: 14px; box-sizing: border-box; background: #fff;
+    }
+    input:focus, select:focus, textarea:focus { outline: 2px solid #6366f1; border-color: transparent; }
+    .row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+    .submit-btn {
+      width: 100%; padding: 11px; background: #0a66c2; color: #fff;
+      border: none; border-radius: 24px; font-size: 15px; font-weight: 600;
+      cursor: pointer; margin-top: 20px;
+    }
+    .submit-btn:hover { background: #004182; }
+    .section-note { font-size: 12px; color: #9ca3af; margin-bottom: 12px; }
+  </style>
+</head>
+<body>
+<div class="card">
+  <h1>Quality Technician</h1>
+  <div class="company">Applied Materials · Santa Clara, CA · Easy Apply</div>
+
+  <h2>Contact Information</h2>
+  <div class="field">
+    <label for="first-name">First Name *</label>
+    <input id="first-name" name="firstName" type="text" placeholder="First name" autocomplete="given-name">
+  </div>
+  <div class="field">
+    <label for="last-name">Last Name *</label>
+    <input id="last-name" name="lastName" type="text" placeholder="Last name" autocomplete="family-name">
+  </div>
+  <div class="field">
+    <label for="email">Email Address *</label>
+    <input id="email" name="email" type="email" placeholder="Email address" autocomplete="email">
+  </div>
+  <div class="field">
+    <label for="phone">Phone Number *</label>
+    <input id="phone" name="phone" type="tel" placeholder="Phone number" autocomplete="tel">
+  </div>
+
+  <h2>Location</h2>
+  <div class="field">
+    <label for="city">City</label>
+    <input id="city" name="city" type="text" placeholder="City" autocomplete="address-level2">
+  </div>
+  <div class="row">
+    <div class="field">
+      <label for="state">State</label>
+      <input id="state" name="state" type="text" placeholder="State" autocomplete="address-level1">
+    </div>
+    <div class="field">
+      <label for="zip">Zip Code</label>
+      <input id="zip" name="zip" type="text" placeholder="Zip" autocomplete="postal-code">
+    </div>
+  </div>
+
+  <h2>Work Experience</h2>
+  <div class="field">
+    <label for="current-title">Current Job Title</label>
+    <input id="current-title" name="currentTitle" type="text" placeholder="Your current title">
+  </div>
+  <div class="field">
+    <label for="years-exp">Years of Experience</label>
+    <input id="years-exp" name="yearsExperience" type="number" placeholder="Years of experience" min="0" max="50">
+  </div>
+  <div class="field">
+    <label for="current-company">Current Company</label>
+    <input id="current-company" name="currentCompany" type="text" placeholder="Company name">
+  </div>
+
+  <h2>Work Authorization</h2>
+  <div class="field">
+    <label for="work-auth">Are you authorized to work in the US?</label>
+    <select id="work-auth" name="workAuth">
+      <option value="">Select</option>
+      <option value="yes">Yes</option>
+      <option value="no">No</option>
+    </select>
+  </div>
+  <div class="field">
+    <label for="sponsorship">Will you now or in the future require sponsorship?</label>
+    <select id="sponsorship" name="requireSponsorship">
+      <option value="">Select</option>
+      <option value="no">No</option>
+      <option value="yes">Yes</option>
+    </select>
+  </div>
+  <div class="field">
+    <label for="relocate">Are you willing to relocate?</label>
+    <select id="relocate" name="willingToRelocate">
+      <option value="">Select</option>
+      <option value="yes">Yes</option>
+      <option value="no">No</option>
+    </select>
+  </div>
+
+  <h2>Additional</h2>
+  <div class="field">
+    <label for="linkedin-url">LinkedIn Profile URL</label>
+    <input id="linkedin-url" name="linkedin" type="url" placeholder="https://linkedin.com/in/yourprofile">
+  </div>
+  <div class="field">
+    <label for="cover-note">Cover note (optional)</label>
+    <textarea id="cover-note" name="coverLetter" rows="4" placeholder="Tell us why you're a great fit…"></textarea>
+  </div>
+
+  <button class="submit-btn" type="button" onclick="alert('Submit blocked for testing – form filled by extension!')">
+    Submit Application
+  </button>
+</div>
+</body>
+</html>

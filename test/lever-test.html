@@ -1,0 +1,265 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Process Engineer | CelLink Corporation | Apply</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #f5f5f5; color: #1a1a1a; padding: 32px 16px 80px; }
+    .page-header { max-width: 720px; margin: 0 auto 24px; }
+    .page-header h1 { font-size: 22px; font-weight: 700; }
+    .page-header .meta { font-size: 14px; color: #555; margin-top: 4px; }
+    .application-form { max-width: 720px; margin: 0 auto; }
+    .application-section { background: #fff; border: 1px solid #e0e0e0; border-radius: 4px; padding: 28px 32px; margin-bottom: 20px; }
+    .application-section h2 { font-size: 16px; font-weight: 700; margin-bottom: 20px; padding-bottom: 12px; border-bottom: 1px solid #eee; }
+    .application-question { margin-bottom: 18px; }
+    .application-label { display: block; font-size: 13px; font-weight: 600; color: #333; margin-bottom: 6px; }
+    .application-label .req { color: #e02020; margin-left: 2px; }
+    input[type="text"], input[type="email"], input[type="tel"], input[type="url"], textarea {
+      width: 100%; padding: 9px 11px; border: 1px solid #ccc; border-radius: 3px; font-size: 14px; font-family: inherit; color: #1a1a1a;
+    }
+    input:focus, textarea:focus { outline: none; border-color: #5463ff; box-shadow: 0 0 0 2px rgba(84,99,255,0.15); }
+    textarea { resize: vertical; min-height: 80px; }
+
+    /* Lever file upload widget */
+    .application-document .content { margin-top: 8px; }
+    .attach-or-paste { display: flex; gap: 12px; align-items: center; }
+    .attach-file { }
+    .btn { display: inline-block; padding: 8px 18px; border-radius: 3px; font-size: 13px; font-weight: 600; cursor: pointer; font-family: inherit; border: 1px solid transparent; }
+    .btn-primary { background: #5463ff; color: #fff; }
+    .btn-primary:hover { background: #3d4ef0; }
+    .btn-default { background: #fff; color: #333; border-color: #ccc; }
+    .btn-default:hover { background: #f5f5f5; }
+    .resume-filename { margin-top: 8px; font-size: 13px; color: #5463ff; font-weight: 500; }
+    .resume-filename:empty { display: none; }
+    .resume-remove { display: none; margin-top: 4px; font-size: 12px; color: #cc3300; cursor: pointer; text-decoration: underline; }
+
+    /* Select */
+    select { width: 100%; padding: 9px 11px; border: 1px solid #ccc; border-radius: 3px; font-size: 14px; font-family: inherit; background: #fff; }
+    select:focus { outline: none; border-color: #5463ff; }
+
+    /* Submit */
+    .submit-btn { padding: 12px 32px; background: #5463ff; color: #fff; border: none; border-radius: 3px; font-size: 15px; font-weight: 700; font-family: inherit; cursor: pointer; }
+    .submit-btn:hover { background: #3d4ef0; }
+
+    /* Test log */
+    #test-log { max-width: 720px; margin: 24px auto 0; background: #1a1a2e; border-radius: 6px; padding: 16px; font-family: 'SF Mono','Courier New',monospace; font-size: 12px; color: #a8d8a8; max-height: 300px; overflow-y: auto; }
+    #test-log .log-title { color: #7ecfff; font-weight: bold; margin-bottom: 8px; font-size: 13px; }
+    #test-log .log-entry { padding: 2px 0; border-bottom: 1px solid rgba(255,255,255,0.05); white-space: pre-wrap; word-break: break-all; }
+    #test-log .log-entry.warn { color: #ffd080; }
+    #test-log .log-entry.error { color: #ff8080; }
+    #test-log .log-entry.info { color: #80d4ff; }
+  </style>
+</head>
+<body>
+
+<div class="page-header">
+  <h1>Process Engineer</h1>
+  <div class="meta">CelLink Corporation &middot; San Jose, CA &middot; Full-time</div>
+</div>
+
+<form id="application-form" class="application-form" novalidate>
+
+  <!-- Resume Upload — Lever style: div.application-document > div.attach-or-paste > div.attach-file > span.btn -->
+  <div class="application-section">
+    <h2>Resume</h2>
+    <div class="application-question application-document" id="resume-section">
+      <label class="application-label">Resume/CV <span class="req">*</span></label>
+      <div class="content">
+        <div class="attach-or-paste">
+          <div class="attach-file">
+            <span class="btn btn-primary" id="resume-attach-btn" data-action="attachResume">Attach</span>
+          </div>
+          <div class="paste-resume">
+            <span class="btn btn-default" id="resume-paste-btn">Paste</span>
+          </div>
+        </div>
+        <div class="resume-filename" id="resume-filename"></div>
+        <a class="resume-remove" id="resume-remove">Remove</a>
+      </div>
+    </div>
+    <input type="hidden" name="resume" id="resume-hidden" required>
+    <div id="resume-error" style="display:none;color:#e02020;font-size:12px;margin-top:4px">Resume is required.</div>
+  </div>
+
+  <!-- Contact Information -->
+  <div class="application-section">
+    <h2>Contact Information</h2>
+    <div class="application-question">
+      <label class="application-label" for="first-name">First Name <span class="req">*</span></label>
+      <input type="text" id="first-name" name="first_name" required placeholder="First name" autocomplete="given-name">
+    </div>
+    <div class="application-question">
+      <label class="application-label" for="last-name">Last Name <span class="req">*</span></label>
+      <input type="text" id="last-name" name="last_name" required placeholder="Last name" autocomplete="family-name">
+    </div>
+    <div class="application-question">
+      <label class="application-label" for="email">Email <span class="req">*</span></label>
+      <input type="email" id="email" name="email" required placeholder="you@example.com" autocomplete="email">
+    </div>
+    <div class="application-question">
+      <label class="application-label" for="phone">Phone <span class="req">*</span></label>
+      <input type="tel" id="phone" name="phone" required placeholder="+1 (555) 000-0000" autocomplete="tel">
+    </div>
+    <div class="application-question">
+      <label class="application-label" for="location">Current Location <span class="req">*</span></label>
+      <input type="text" id="location" name="location" required placeholder="City, State" autocomplete="address-level2">
+    </div>
+  </div>
+
+  <!-- Work Auth -->
+  <div class="application-section">
+    <h2>Work Authorization</h2>
+    <div class="application-question">
+      <label class="application-label" for="work-auth">Are you authorized to work in the US? <span class="req">*</span></label>
+      <select id="work-auth" name="work_authorization" required>
+        <option value="">-- Select --</option>
+        <option value="Yes">Yes</option>
+        <option value="No">No</option>
+      </select>
+    </div>
+    <div class="application-question">
+      <label class="application-label" for="sponsorship">Do you require visa sponsorship? <span class="req">*</span></label>
+      <select id="sponsorship" name="require_sponsorship" required>
+        <option value="">-- Select --</option>
+        <option value="Yes">Yes, I will require sponsorship</option>
+        <option value="No">No, I will not require sponsorship</option>
+      </select>
+    </div>
+  </div>
+
+  <!-- Custom questions -->
+  <div class="application-section">
+    <h2>Additional Questions</h2>
+    <div class="application-question">
+      <label class="application-label" for="experience">Describe your process engineering experience <span class="req">*</span></label>
+      <textarea id="experience" name="experience" required maxlength="2000" placeholder="Please describe..."></textarea>
+    </div>
+    <div class="application-question">
+      <label class="application-label" for="linkedin-url">LinkedIn Profile</label>
+      <input type="url" id="linkedin-url" name="linkedin_url" placeholder="https://linkedin.com/in/..." autocomplete="url">
+    </div>
+  </div>
+
+  <div class="application-section" style="padding:20px 32px">
+    <button type="button" class="submit-btn" id="submit-btn">Submit Application</button>
+  </div>
+
+</form>
+
+<div id="test-log">
+  <div class="log-title">Test Log (autofill progress)</div>
+</div>
+
+<script>
+(function() {
+  'use strict';
+
+  // Make URL contain /apply so content scripts activate
+  if (!location.href.includes('/apply') && !location.href.includes('lever.co')) {
+    try { history.replaceState(null, '', '/apply/lever-test' + location.search); } catch(e) {}
+  }
+
+  const logPanel = document.getElementById('test-log');
+  function appendLog(msg, level) {
+    const e = document.createElement('div');
+    e.className = 'log-entry' + (level ? ' ' + level : '');
+    const ts = new Date().toLocaleTimeString('en-US', { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' });
+    e.textContent = '[' + ts + '] ' + msg;
+    logPanel.appendChild(e);
+    logPanel.scrollTop = logPanel.scrollHeight;
+  }
+
+  // Patch console for PJA logs
+  ['log','warn','error'].forEach(function(m) {
+    const orig = console[m].bind(console);
+    console[m] = function() {
+      orig.apply(console, arguments);
+      const msg = Array.from(arguments).map(function(a) { return typeof a === 'object' ? JSON.stringify(a) : String(a); }).join(' ');
+      if (msg.indexOf('PJA') !== -1) appendLog(msg, m === 'warn' ? 'warn' : m === 'error' ? 'error' : '');
+    };
+  });
+
+  appendLog('Lever test page loaded. URL rewritten to /apply/lever-test.', 'info');
+
+  // ── Dynamic file upload (Lever pattern) ─────────────────────────────────
+  var attachBtn = document.getElementById('resume-attach-btn');
+  var filenameEl = document.getElementById('resume-filename');
+  var removeLink = document.getElementById('resume-remove');
+  var hiddenField = document.getElementById('resume-hidden');
+
+  attachBtn.addEventListener('click', function() {
+    // Lever creates the file input dynamically, then calls input.click()
+    var fileInput = document.createElement('input');
+    fileInput.type = 'file';
+    fileInput.accept = '.pdf,.doc,.docx';
+    fileInput.style.cssText = 'position:absolute;top:-9999px;left:-9999px;opacity:0';
+    document.body.appendChild(fileInput);
+    appendLog('Lever: dynamic <input type="file"> created, calling input.click() — bridge intercept point.');
+    fileInput.click(); // <-- extension bridge intercepts this
+
+    fileInput.addEventListener('change', function() {
+      var file = fileInput.files && fileInput.files[0];
+      if (file) {
+        filenameEl.textContent = file.name;
+        removeLink.style.display = 'block';
+        attachBtn.textContent = 'Replace';
+        hiddenField.value = 'token_' + Date.now();
+        hiddenField.removeAttribute('required');
+        appendLog('File selected: ' + file.name + ' (' + Math.round(file.size / 1024) + ' KB)', 'info');
+      }
+      document.body.removeChild(fileInput);
+    });
+  });
+
+  removeLink.addEventListener('click', function() {
+    filenameEl.textContent = '';
+    removeLink.style.display = 'none';
+    attachBtn.textContent = 'Attach';
+    hiddenField.value = '';
+    hiddenField.setAttribute('required', '');
+    appendLog('Resume removed.');
+  });
+
+  // ── Submit validation ────────────────────────────────────────────────────
+  document.getElementById('submit-btn').addEventListener('click', function() {
+    var errors = [];
+    var fields = [
+      { id: 'first-name', label: 'First Name' },
+      { id: 'last-name', label: 'Last Name' },
+      { id: 'email', label: 'Email' },
+      { id: 'phone', label: 'Phone' },
+      { id: 'location', label: 'Location' },
+      { id: 'work-auth', label: 'Work Authorization' },
+      { id: 'sponsorship', label: 'Sponsorship' },
+      { id: 'experience', label: 'Experience' },
+    ];
+    fields.forEach(function(f) {
+      var el = document.getElementById(f.id);
+      if (el && (!el.value || !el.value.trim())) errors.push(f.label);
+    });
+    if (!hiddenField.value) errors.push('Resume');
+
+    if (errors.length) {
+      appendLog('Validation failed: ' + errors.join(', '), 'warn');
+    } else {
+      var btn = document.getElementById('submit-btn');
+      btn.textContent = 'Application Submitted!';
+      btn.style.background = '#1b8038';
+      btn.disabled = true;
+      appendLog('Form validation passed — all required fields filled!', 'info');
+    }
+  });
+
+  // Log input events
+  document.getElementById('application-form').addEventListener('input', function(e) {
+    var el = e.target;
+    if (!el.id && !el.name) return;
+    if (el.value) appendLog('Field filled: #' + (el.id || el.name) + ' = "' + el.value.slice(0, 60) + '"');
+  }, true);
+
+  appendLog('Lever-style form ready. Waiting for extension autofill.', 'info');
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,350 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Job Assistant Settings</title>
+  <link rel="stylesheet" href="settings.css">
+</head>
+<body>
+<div class="page">
+
+  <div class="page-header">
+    <span class="logo">🔬</span>
+    <div>
+      <h1>Job Assistant Settings</h1>
+      <p>Auto-fill &amp; apply to job postings</p>
+    </div>
+  </div>
+
+  <!-- Missing Questions from External Apply -->
+  <div class="card" id="missing-questions-card">
+    <h2>Missing Questions <span id="mq-badge" style="display:none;font-size:12px;background:#f59e0b;color:#fff;padding:2px 8px;border-radius:10px;vertical-align:middle"></span></h2>
+    <p class="card-desc">
+      Questions from external job applications that couldn't be auto-filled. Answer them here so future runs skip fewer jobs.
+    </p>
+    <div id="mq-empty" class="empty-state" style="display:none">No missing questions yet. Run External Apply to collect them.</div>
+    <div id="mq-list"></div>
+    <div class="btn-row" style="margin-top:12px">
+      <button class="btn btn-primary" id="btn-save-mq" style="display:none">Save Answers</button>
+      <button class="btn btn-danger" id="btn-clear-mq" style="display:none">Clear All</button>
+      <span class="status-msg" id="mq-status"></span>
+    </div>
+  </div>
+
+  <!-- Application Mode -->
+  <div class="card">
+    <div class="mode-header">
+      <div>
+        <h2>Application Mode</h2>
+        <p class="card-desc">When ON, the sidebar shows autofill tools on every job application page (Greenhouse, Lever, Workday, etc.). The extension will learn your answers as you fill forms and offer one-click autofill.</p>
+      </div>
+      <label class="toggle" title="Toggle Application Mode">
+        <input type="checkbox" id="app-mode-toggle">
+        <span class="toggle-slider"></span>
+      </label>
+    </div>
+    <div id="app-mode-status" class="mode-status off">● Off — autofill tools hidden</div>
+  </div>
+
+  <!-- Application Profile -->
+  <div class="card">
+    <h2>Application Profile</h2>
+    <p class="card-desc">Pre-fill these fields once. The extension uses them to autofill job applications. Leave blank what you prefer to fill manually.</p>
+    <div id="profile-missing-warning" style="display:none;background:#fef3c7;border:1px solid #f59e0b;border-radius:6px;padding:10px 14px;margin-bottom:14px;font-size:13px;color:#92400e;"></div>
+
+    <div class="profile-section-label">Personal</div>
+    <div class="field-grid">
+      <div class="form-group"><label>Salutation / Title</label><input id="pf-salutation" placeholder="Ms."></div>
+      <div class="form-group"><label>First Name</label><input id="pf-firstName" placeholder="Jane"></div>
+      <div class="form-group"><label>Middle Name</label><input id="pf-middleName" placeholder=""></div>
+      <div class="form-group"><label>Last Name</label><input id="pf-lastName" placeholder="Doe"></div>
+      <div class="form-group"><label>Email</label><input id="pf-email" type="email" placeholder="you@email.com"></div>
+      <div class="form-group"><label>Phone</label><input id="pf-phone" placeholder="+1 (408) 555-0000"></div>
+      <div class="form-group full"><label>LinkedIn URL</label><input id="pf-linkedin" placeholder="https://linkedin.com/in/username"></div>
+      <div class="form-group full"><label>Website / Portfolio</label><input id="pf-website" placeholder="https://..."></div>
+    </div>
+
+    <div class="profile-section-label">Location</div>
+    <div class="field-grid">
+      <div class="form-group full"><label>Street Address</label><input id="pf-address" placeholder="123 Main St"></div>
+      <div class="form-group full"><label>Apt / Suite / Unit</label><input id="pf-address2" placeholder=""></div>
+      <div class="form-group"><label>City</label><input id="pf-city" placeholder="Santa Clara"></div>
+      <div class="form-group"><label>State</label><input id="pf-state" placeholder="CA"></div>
+      <div class="form-group"><label>ZIP</label><input id="pf-zip" placeholder=""></div>
+      <div class="form-group"><label>Country</label><input id="pf-country" placeholder="United States"></div>
+    </div>
+
+    <div class="profile-section-label">Work</div>
+    <div class="field-grid">
+      <div class="form-group full"><label>Current Job Title</label><input id="pf-currentTitle" placeholder="e.g. Process Engineer"></div>
+      <div class="form-group full"><label>Current Company</label><input id="pf-currentCompany" placeholder="a medical-device employer"></div>
+      <div class="form-group"><label>Years of Experience</label><input id="pf-yearsExperience" placeholder="6"></div>
+      <div class="form-group"><label>Salary Expectation</label><input id="pf-salaryExpectation" placeholder="$110,000"></div>
+    </div>
+
+    <div class="profile-section-label">Education</div>
+    <div class="field-grid">
+      <div class="form-group full"><label>University / College</label><input id="pf-university" placeholder="University of Toronto"></div>
+      <div class="form-group"><label>Degree</label><input id="pf-degree" placeholder="B.Sc. Engineering"></div>
+      <div class="form-group"><label>Major</label><input id="pf-major" placeholder="Materials Science"></div>
+      <div class="form-group"><label>Graduation Year</label><input id="pf-graduationYear" placeholder="2019"></div>
+    </div>
+
+    <div class="profile-section-label">Work Authorization</div>
+    <div class="field-grid">
+      <div class="form-group">
+        <label>Authorized to Work in US?</label>
+        <select id="pf-workAuth">
+          <option value="Yes">Yes</option>
+          <option value="No">No</option>
+        </select>
+      </div>
+      <div class="form-group">
+        <label>Require Sponsorship?</label>
+        <select id="pf-requireSponsorship">
+          <option value="No">No</option>
+          <option value="Yes">Yes</option>
+        </select>
+      </div>
+      <div class="form-group"><label>Visa / Status</label><input id="pf-visaStatus" placeholder="TN Visa"></div>
+      <div class="form-group">
+        <label>Willing to Relocate?</label>
+        <select id="pf-willingToRelocate">
+          <option value="Yes">Yes</option>
+          <option value="No">No</option>
+        </select>
+      </div>
+      <div class="form-group"><label>How did you hear about us?</label><input id="pf-referralSource" placeholder="LinkedIn"></div>
+    </div>
+
+    <div class="profile-section-label">EEO (Optional — used for voluntary disclosure forms)</div>
+    <div class="field-grid">
+      <div class="form-group">
+        <label>Gender</label>
+        <select id="pf-gender">
+          <option value="">Prefer not to say</option>
+          <option value="Female">Female</option>
+          <option value="Male">Male</option>
+          <option value="Non-binary">Non-binary / third gender</option>
+          <option value="Decline">Decline to self-identify</option>
+        </select>
+      </div>
+      <div class="form-group">
+        <label>Ethnicity</label>
+        <input id="pf-ethnicity" placeholder="e.g. Asian">
+      </div>
+    </div>
+
+    <div class="btn-row">
+      <button class="btn btn-primary" id="btn-save-profile">Save Profile</button>
+      <span class="status-msg" id="profile-status"></span>
+    </div>
+  </div>
+
+  <!-- Resume Upload -->
+  <div class="card">
+    <h2>Resume</h2>
+    <p class="card-desc">Upload your resume once. The extension will automatically attach it to every job application form (Greenhouse, Lever, Workday, iCIMS, etc.).</p>
+    <div id="resume-current" style="display:none;align-items:center;gap:12px;background:#f0fdf4;border:1px solid #86efac;border-radius:8px;padding:12px 14px;margin-bottom:14px;">
+      <span style="font-size:20px">📄</span>
+      <div style="flex:1;min-width:0">
+        <div id="resume-filename" style="font-weight:600;font-size:13px;color:#166534;white-space:nowrap;overflow:hidden;text-overflow:ellipsis"></div>
+        <div id="resume-filesize" style="font-size:12px;color:#4ade80;margin-top:2px"></div>
+      </div>
+      <button class="btn btn-danger" id="btn-remove-resume" style="padding:5px 12px;font-size:12px;white-space:nowrap">Remove</button>
+    </div>
+    <div id="resume-missing-warning" style="display:none;background:#fef3c7;border:1px solid #f59e0b;border-radius:6px;padding:10px 14px;margin-bottom:14px;font-size:13px;color:#92400e;">
+      ⚠ No resume uploaded. Applications will stop at the resume upload step without it.
+    </div>
+    <input type="file" id="resume-file-input" accept=".pdf,.doc,.docx" style="display:none">
+    <div class="btn-row">
+      <button class="btn btn-primary" id="btn-upload-resume">Upload Resume</button>
+      <span class="status-msg" id="resume-status"></span>
+    </div>
+  </div>
+
+  <!-- Workday / ATS Settings -->
+  <div class="card">
+    <h2>Workday &amp; ATS Settings</h2>
+    <p class="card-desc">Password and Gmail account used when the extension creates job application accounts on Workday and other ATS platforms.</p>
+
+    <!-- Gmail account selector -->
+    <div class="form-group">
+      <label>Gmail account for verification emails</label>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:6px;" id="gmail-account-btns">
+        <button class="btn btn-secondary gmail-acct-btn" data-idx="0">Account 1 (u/0)</button>
+        <button class="btn btn-secondary gmail-acct-btn" data-idx="1">Account 2 (u/1)</button>
+        <button class="btn btn-secondary gmail-acct-btn" data-idx="2">Account 3 (u/2)</button>
+        <button class="btn btn-secondary gmail-acct-btn" data-idx="3">Account 4 (u/3)</button>
+      </div>
+      <div class="help">Select which Gmail account is the candidate's job email. Workday sends verification emails there — the extension will open that inbox automatically. Currently signed-in accounts appear as u/0, u/1, u/2, u/3 in Gmail.</div>
+      <div id="gmail-acct-status" style="margin-top:6px;font-size:13px;color:#16a34a;"></div>
+    </div>
+
+    <div class="form-group">
+      <label for="wd-password-input">Or enter custom password</label>
+      <input type="password" id="wd-password-input" placeholder="8+ chars, number, symbol" autocomplete="new-password">
+      <div class="help">Stored locally in Chrome only. Requirements: 8+ characters, one number, one symbol.</div>
+    </div>
+    <div class="btn-row">
+      <button class="btn btn-primary" id="btn-save-wd-password">Save Password</button>
+      <span class="status-msg" id="wd-password-status"></span>
+    </div>
+  </div>
+
+  <!-- Answer Bank -->
+  <div class="card">
+    <h2>Answer Bank</h2>
+    <p class="card-desc">
+      Answers learned from your previous applications. Autofill matches these to open-ended questions
+      using fuzzy label matching — gets smarter every time you use Learn mode.
+    </p>
+    <div id="answer-bank-empty" class="empty-state" style="display:none">
+      No answers yet. Enable Application Mode, open a job application, click <strong>Start Learning</strong>, then fill the form normally.
+    </div>
+    <div id="answer-bank-list"></div>
+    <div class="btn-row" style="margin-top:12px">
+      <button class="btn btn-danger" id="btn-clear-answers">Clear All Answers</button>
+      <span class="status-msg" id="answers-status"></span>
+    </div>
+  </div>
+
+  <!-- Message Templates -->
+  <div class="card">
+    <h2>Message Templates</h2>
+    <p class="card-desc">Saved outreach messages. Create and manage them in the sidebar while browsing LinkedIn, then copy here any time.</p>
+    <div id="templates-empty" class="empty-state" style="display:none">No templates yet. Open the sidebar on any page, write or generate a message, and click <strong>💾 Template</strong> to save it.</div>
+    <div id="templates-list"></div>
+    <div class="btn-row" style="margin-top:12px">
+      <span class="status-msg" id="templates-status"></span>
+    </div>
+  </div>
+
+  <!-- API Key -->
+  <div class="card">
+    <h2>Claude API Key</h2>
+    <p class="card-desc">
+      Required for AI-powered fit scoring and outreach generation.
+      Without a key, the extension runs in Demo Mode with sample data.
+      Get your key at <strong>console.anthropic.com</strong>.
+    </p>
+    <div class="form-group">
+      <label for="api-key-input">API Key</label>
+      <input type="password" id="api-key-input" placeholder="sk-ant-api03-…" autocomplete="off">
+      <div class="help">Stored locally in Chrome. Only sent to Anthropic's API.</div>
+    </div>
+    <div class="btn-row">
+      <button class="btn btn-primary" id="btn-save-key">Save Key</button>
+      <button class="btn btn-danger" id="btn-clear-key">Clear Key</button>
+      <span class="status-msg" id="key-status"></span>
+    </div>
+  </div>
+
+  <!-- Profile Summary -->
+  <div class="card">
+    <h2>AI Analysis Profile</h2>
+    <p class="card-desc">This profile is embedded in every Claude analysis prompt. Based on verified resume.</p>
+    <div class="profile-item">
+      <div class="profile-key">Current Role</div>
+      <div class="profile-val">Senior Inspection Metrology Tech, a medical-device employer (Sept 2024–present)</div>
+    </div>
+    <div class="profile-item">
+      <div class="profile-key">Previous</div>
+      <div class="profile-val">Operation Associate II, a medical-device employer (May 2022–Aug 2024)</div>
+    </div>
+    <div class="profile-item">
+      <div class="profile-key">Target Roles</div>
+      <div class="profile-val">Senior Metrology Tech · Quality Technician · Quality Inspector · Quality Engineer (stretch)</div>
+    </div>
+    <div class="profile-item">
+      <div class="profile-key">Confirmed Skills</div>
+      <div class="profile-val">Wafer Inspection · Thin Film Metrology · Photolithography · GMP · SPC · Quality Management · 5S · Root Cause Analysis · Clean Room · Defect Detection · EH&S · Lean Six Sigma (White Belt certified, Green Belt training)</div>
+    </div>
+    <div class="profile-item">
+      <div class="profile-key">Not on Resume</div>
+      <div class="profile-val" style="color:#dc2626">FMEA · 8D · ISO 13485 · Optical Metrology · Supplier Audits · Python · CAD — treated as gaps when required</div>
+    </div>
+    <div class="profile-item">
+      <div class="profile-key">Education</div>
+      <div class="profile-val">B.E. Environmental Engineering (WES equivalency) · Diploma Water &amp; Wastewater Management</div>
+    </div>
+    <div class="profile-item">
+      <div class="profile-key">Visa</div>
+      <div class="profile-val"><span class="tn-badge">✓ Canadian Citizen · USMCA TN Visa Eligible · No H-1B Needed</span></div>
+    </div>
+  </div>
+
+  <!-- Pipeline Stats -->
+  <div class="card">
+    <h2>Pipeline Stats</h2>
+    <div class="stats-row">
+      <div class="stat-box">
+        <div class="stat-num" id="stat-total">0</div>
+        <div class="stat-label">Total Saved</div>
+      </div>
+      <div class="stat-box">
+        <div class="stat-num" id="stat-outreach">0</div>
+        <div class="stat-label">Outreach Sent</div>
+      </div>
+      <div class="stat-box">
+        <div class="stat-num" id="stat-interview">0</div>
+        <div class="stat-label">Interviews</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Auto-trigger Domains -->
+  <div class="card">
+    <h2>Auto-trigger Domains</h2>
+    <p class="card-desc">
+      The sidebar opens automatically on these domains — added whenever you use <strong>Open now →</strong>.
+      Remove a domain if the sidebar becomes disruptive there.
+    </p>
+    <div id="custom-domains-empty" class="empty-state" style="display:none">No custom domains yet. Use "Open now →" on any page to add one.</div>
+    <div id="custom-domains-list"></div>
+  </div>
+
+  <!-- Site Log -->
+  <div class="card">
+    <h2>Site Log</h2>
+    <p class="card-desc">
+      Domains where the sidebar didn't open automatically and you used <strong>Open now →</strong> from the popup.
+      Use this list to identify sites that need better extractor support.
+    </p>
+    <div id="site-log-empty" class="empty-state" style="display:none">No manual opens logged yet.</div>
+    <div id="site-log-list"></div>
+    <div class="btn-row" style="margin-top:12px">
+      <button class="btn btn-danger" id="btn-clear-site-log">Clear Log</button>
+      <span class="status-msg" id="site-log-status"></span>
+    </div>
+  </div>
+
+  <!-- Export -->
+  <div class="card">
+    <h2>Export Learning Data</h2>
+    <p class="card-desc">
+      Download everything the extension has learned — answer bank, profile, contacts, saved jobs, and site log —
+      as a single JSON file. Share it to improve the tool. API key is never included.
+    </p>
+    <div id="export-preview" class="export-preview" style="display:none"></div>
+    <div class="btn-row">
+      <button class="btn btn-primary" id="btn-export">⬇ Download Export</button>
+      <button class="btn btn-outline" id="btn-preview-export">Preview</button>
+      <span class="status-msg" id="export-status"></span>
+    </div>
+  </div>
+
+  <!-- Danger Zone -->
+  <div class="card">
+    <h2>Data</h2>
+    <p class="card-desc">Clear all saved jobs from local storage.</p>
+    <div class="btn-row">
+      <button class="btn btn-danger" id="btn-clear-all">Clear All Pipeline Data</button>
+      <span class="status-msg" id="clear-status"></span>
+    </div>
+  </div>
+
+</div>
+<script src="settings.js"></script>
+</body>
+</html>

@@ -1,0 +1,122 @@
+[
+  {
+    "id": "gh-harbinger-metrology",
+    "title": "Quality Technician, Metrology (Contract)",
+    "company": "Harbinger Motors",
+    "ats": "greenhouse",
+    "applyUrl": "https://job-boards.greenhouse.io/harbingermotors/jobs/4873922007",
+    "location": "Garden Grove, CA",
+    "fitScore": 72,
+    "notes": "CMM/PC-DMIS focus; contract role. Greenhouse combobox form."
+  },
+  {
+    "id": "gh-chaos-hardware-quality",
+    "title": "Hardware Quality Engineer",
+    "company": "CHAOS Industries",
+    "ats": "greenhouse",
+    "applyUrl": "https://job-boards.greenhouse.io/chaosindustries/jobs/5112064007",
+    "location": "Hawthorne, CA",
+    "fitScore": 60,
+    "notes": "Aerospace hardware QA. Greenhouse combobox form."
+  },
+  {
+    "id": "gh-astranis-prod-quality",
+    "title": "Senior Production Quality Engineer",
+    "company": "Astranis",
+    "ats": "greenhouse",
+    "applyUrl": "https://job-boards.greenhouse.io/astranis/jobs/4676417006",
+    "location": "San Francisco, CA",
+    "fitScore": 58,
+    "notes": "Space hardware; FAI/root-cause. Greenhouse combobox form."
+  },
+  {
+    "id": "gh-natera-qa-specialist",
+    "title": "Quality Assurance Specialist",
+    "company": "Natera",
+    "ats": "greenhouse",
+    "applyUrl": "https://job-boards.greenhouse.io/natera/jobs/5973444004",
+    "location": "Austin, TX / Remote",
+    "fitScore": 50,
+    "notes": "Medtech QA; lab environment. Greenhouse form."
+  },
+  {
+    "id": "lev-sqa-pcba-inspector",
+    "title": "PCBA Quality Inspector",
+    "company": "SQA Services",
+    "ats": "lever",
+    "applyUrl": "https://jobs.lever.co/sqaservices/bc7debbc-0b83-46bc-a0ae-9659cdb0616a/apply",
+    "location": "Los Angeles / Torrance / Orange, CA",
+    "fitScore": 48,
+    "notes": "PCBA focus; IPC-610 required. Lever form with custom questions."
+  },
+  {
+    "id": "wday-amat-r2612281",
+    "title": "Process Technician III",
+    "company": "Applied Materials",
+    "ats": "workday",
+    "applyUrl": "https://amat.wd1.myworkdayjobs.com/en-US/External/job/Process-Technician-III_R2612281/apply/applyManually",
+    "location": "Santa Clara, CA",
+    "fitScore": 70,
+    "notes": "Process tech; cleanroom. Workday 7-step form."
+  },
+  {
+    "id": "wday-amat-r2615418",
+    "title": "Process Technician III",
+    "company": "Applied Materials",
+    "ats": "workday",
+    "applyUrl": "https://amat.wd1.myworkdayjobs.com/en-US/External/job/Process-Technician-III_R2615418/apply/applyManually",
+    "location": "Santa Clara, CA",
+    "fitScore": 68,
+    "notes": "Process tech second posting. Workday 7-step form."
+  },
+  {
+    "id": "wday-amat-eng-tech-iii",
+    "title": "Engineering Technician III",
+    "company": "Applied Materials",
+    "ats": "workday",
+    "applyUrl": "https://amat.wd1.myworkdayjobs.com/en-US/External/job/Engineering-Technician-III----T3-_R2513946/apply/applyManually",
+    "location": "Santa Clara, CA",
+    "fitScore": 65,
+    "notes": "Electro-mechanical; $29-39/hr. Workday 7-step form."
+  },
+  {
+    "id": "tesla-quality-eng-lathrop",
+    "title": "Quality Engineer",
+    "company": "Tesla",
+    "ats": "tesla-custom",
+    "applyUrl": "https://www.tesla.com/careers/search/job/271474",
+    "location": "Lathrop, CA",
+    "fitScore": 42,
+    "notes": "FMEA/APQP required. Tesla custom ATS."
+  },
+  {
+    "id": "gh-medtronic-quality-spec",
+    "title": "Quality Systems Specialist",
+    "company": "Medtronic",
+    "ats": "greenhouse",
+    "applyUrl": "https://job-boards.greenhouse.io/medtronic/jobs/5536919004",
+    "location": "Santa Rosa, CA",
+    "fitScore": 62,
+    "notes": "Medtech QMS; GMP. Greenhouse form."
+  },
+  {
+    "id": "lev-hrl-quality-eng",
+    "title": "Quality Engineer",
+    "company": "HRL Laboratories",
+    "ats": "lever",
+    "applyUrl": "https://jobs.lever.co/hrl/a7a28e40-3c89-4a97-a0e9-a7c7a8cd4d3a/apply",
+    "location": "Malibu, CA",
+    "fitScore": 55,
+    "notes": "Defense/aerospace quality. Lever form."
+  },
+  {
+    "id": "gh-applied-intuition-quality",
+    "title": "Quality Engineer, Manufacturing",
+    "company": "Applied Intuition",
+    "ats": "greenhouse",
+    "applyUrl": "https://job-boards.greenhouse.io/appliedintuition/jobs/4420396005",
+    "location": "Mountain View, CA",
+    "fitScore": 58,
+    "notes": "AV hardware quality. Greenhouse form."
+  }
+]

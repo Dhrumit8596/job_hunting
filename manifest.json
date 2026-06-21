@@ -1,0 +1,111 @@
+{
+  "manifest_version": 3,
+  "name": "Job Application Assistant",
+  "version": "1.0.0",
+  "description": "AI-powered job search assistant for semiconductor/medtech roles",
+  "permissions": ["storage", "alarms", "scripting", "activeTab", "tabs", "debugger"],
+  "host_permissions": [
+    "*://*.linkedin.com/*",
+    "*://*.linkedin.com/in/*",
+    "*://*.indeed.com/*",
+    "*://*.glassdoor.com/*",
+    "*://*.greenhouse.io/*",
+    "*://*.lever.co/*",
+    "*://*.workday.com/*",
+    "*://*.myworkdayjobs.com/*",
+    "*://*.jobvite.com/*",
+    "*://*.icims.com/*",
+    "*://*.taleo.net/*",
+    "*://*.bamboohr.com/*",
+    "*://*.smartrecruiters.com/*",
+    "*://*.ashbyhq.com/*",
+    "*://*.rippling.com/*",
+    "*://*/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "*://*.linkedin.com/in/*",
+        "*://*.linkedin.com/jobs/view/*",
+        "*://*.linkedin.com/jobs/collections/*",
+        "*://*.linkedin.com/jobs/search-results/*",
+        "*://*.linkedin.com/jobs/search/*",
+        "*://*.indeed.com/viewjob*",
+        "*://*.indeed.com/jobs*",
+        "*://*.glassdoor.com/job-listing/*",
+        "*://*.glassdoor.com/Jobs/*",
+        "*://*.greenhouse.io/*",
+        "*://*.lever.co/*",
+        "*://*.workday.com/*",
+        "*://*.myworkdayjobs.com/*",
+        "*://*.jobvite.com/*",
+        "*://*.icims.com/*",
+        "*://*.taleo.net/*",
+        "*://*.bamboohr.com/*",
+        "*://*.smartrecruiters.com/*",
+        "*://*.ashbyhq.com/*",
+        "*://*.successfactors.com/*",
+        "*://*.smashfly.com/*",
+        "*://*/careers/*",
+        "*://*/careers*",
+        "*://*/jobs/*",
+        "*://*/job-details/*",
+        "*://*/job/*",
+        "*://*/apply*",
+        "*://localhost/*",
+        "*://127.0.0.1/*"
+      ],
+      "js": [
+        "content/extractors/linkedin.js",
+        "content/extractors/indeed.js",
+        "content/extractors/glassdoor.js",
+        "content/extractors/generic.js",
+        "content/autofill.js",
+        "content/workday-auth.js",
+        "content/auto-apply.js",
+        "content/external-apply.js",
+        "content/job-scraper.js",
+        "content/content.js"
+      ],
+      "run_at": "document_idle",
+      "all_frames": false
+    },
+    {
+      "matches": ["<all_urls>"],
+      "js": ["content/external-apply.js"],
+      "run_at": "document_idle",
+      "all_frames": false,
+      "exclude_matches": [
+        "*://*.linkedin.com/*",
+        "*://*.indeed.com/*",
+        "*://*.glassdoor.com/*",
+        "*://localhost/*",
+        "*://127.0.0.1/*"
+      ]
+    }
+  ],
+  "action": {
+    "default_popup": "popup/popup.html",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "48": "icons/icon48.png",
+      "128": "icons/icon128.png"
+    },
+    "default_title": "Job Pipeline"
+  },
+  "options_page": "settings/settings.html",
+  "icons": {
+    "16": "icons/icon16.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  },
+  "web_accessible_resources": [
+    {
+      "resources": ["icons/*.png", "test/*.html", "shortlist/shortlist.html"],
+      "matches": ["<all_urls>"]
+    }
+  ]
+}

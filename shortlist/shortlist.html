@@ -1,0 +1,67 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Job Shortlist</title>
+  <link rel="stylesheet" href="shortlist.css">
+</head>
+<body>
+<div class="page">
+
+  <div class="page-header">
+    <div class="header-left">
+      <span class="logo">🔬</span>
+      <div>
+        <h1>Job Shortlist</h1>
+        <p>Review scored jobs · Approve to apply or reach out</p>
+      </div>
+    </div>
+    <div class="header-actions">
+      <button class="btn btn-outline" id="btn-clear-done">Clear Done</button>
+      <button class="btn btn-danger" id="btn-clear-all">Clear All</button>
+    </div>
+  </div>
+
+  <!-- Stats bar -->
+  <div class="stats-bar">
+    <div class="stat"><span id="stat-pending">0</span><label>Pending</label></div>
+    <div class="stat"><span id="stat-approved">0</span><label>Approved</label></div>
+    <div class="stat"><span id="stat-applying">0</span><label>Applying</label></div>
+    <div class="stat"><span id="stat-done">0</span><label>Done</label></div>
+    <div class="stat"><span id="stat-skipped">0</span><label>Skipped</label></div>
+  </div>
+
+  <!-- Filter tabs -->
+  <div class="filter-tabs">
+    <button class="filter-tab active" data-filter="pending">Pending Review</button>
+    <button class="filter-tab" data-filter="approved">Approved</button>
+    <button class="filter-tab" data-filter="applying">Applying</button>
+    <button class="filter-tab" data-filter="done">Done</button>
+    <button class="filter-tab" data-filter="skipped">Skipped</button>
+    <button class="filter-tab" data-filter="all">All</button>
+  </div>
+
+  <!-- Job list -->
+  <div class="empty-state" id="empty-state" style="display:none">
+    <div class="empty-icon">🔍</div>
+    <div class="empty-title">No jobs here yet</div>
+    <div class="empty-desc">Go to <strong>LinkedIn Jobs Search</strong>, then click <strong>Scan Jobs</strong> in the floating widget.</div>
+  </div>
+  <div id="job-list"></div>
+
+  <!-- Outreach panel (slide-in) -->
+  <div class="outreach-panel" id="outreach-panel" style="display:none">
+    <div class="outreach-header">
+      <h2 id="op-title">Outreach</h2>
+      <button class="btn-close" id="op-close">✕</button>
+    </div>
+    <div class="outreach-body" id="op-body">
+      <div class="loading-state">Finding recruiters…</div>
+    </div>
+  </div>
+  <div class="overlay" id="overlay" style="display:none"></div>
+
+</div>
+<script src="shortlist.js"></script>
+</body>
+</html>

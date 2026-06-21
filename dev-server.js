@@ -1,0 +1,608 @@
+#!/usr/bin/env node
+'use strict';
+
+/**
+ * PJA Dev Server — routes extension analysis through local `claude` CLI
+ * Uses your existing Claude Code subscription — zero extra API cost.
+ *
+ * Usage:
+ *   node dev-server.js
+ *
+ * Requires: `claude` CLI to be installed and authenticated (claude login)
+ *
+ * Hot-reload:
+ *   curl -X POST http://localhost:6174/reload
+ *   (background.js connects via WebSocket and calls chrome.runtime.reload())
+ */
+
+const http  = require('http');
+const fs    = require('fs');
+const path  = require('path');
+const { WebSocketServer } = require('ws');
+const { spawn } = require('child_process');
+
+const PORT = 6174;
+
+// Connected extension background workers (WebSocket clients)
+const wsClients = new Set();
+let _lastQueueStatus = null;
+
+// Candidate-specific analyzer prompt is loaded from candidate.local.txt (gitignored) so no
+// personal profile data ships in the repo. Falls back to a generic prompt if absent.
+const GENERIC_SYSTEM_PROMPT =
+`You are a job-fit analyzer. Using the candidate profile supplied in the user message,
+score how well the candidate matches the job posting. Return ONLY valid JSON, no markdown:
+{"fitScore":<integer 0-100>,"tnEligible":<true|false>,"matchedSkills":[<skills the candidate has that match>],"gaps":[<skills the job requires that the candidate lacks>],"recruiterTitle":"<LinkedIn recruiter title>","dmMessage":"<DM under 280 chars>","emailMessage":"<Subject: line first, under 500 chars>","linkedinSearchQuery":"<search query>"}`;
+
+const SYSTEM_PROMPT = (() => {
+  try {
+    const p = path.join(__dirname, 'candidate.local.txt');
+    if (fs.existsSync(p)) return fs.readFileSync(p, 'utf8');
+  } catch (_) {}
+  return GENERIC_SYSTEM_PROMPT;
+})();
+
+const JSON_SCHEMA = JSON.stringify({
+  type: 'object',
+  required: ['fitScore','matchedSkills','gaps','recruiterTitle','dmMessage','emailMessage','linkedinSearchQuery'],
+  properties: {
+    fitScore:            { type: 'integer', minimum: 0, maximum: 100 },
+    tnEligible:          { type: 'boolean' },
+    matchedSkills:       { type: 'array',   items: { type: 'string' } },
+    gaps:                { type: 'array',   items: { type: 'string' } },
+    recruiterTitle:      { type: 'string' },
+    dmMessage:           { type: 'string' },
+    emailMessage:        { type: 'string' },
+    linkedinSearchQuery: { type: 'string' }
+  }
+});
+
+function runClaudeWithSystemPrompt(systemPrompt, userPrompt) {
+  return new Promise((resolve, reject) => {
+    const child = spawn('claude', [
+      '--print',
+      '--system-prompt',       systemPrompt,
+      '--output-format',       'json',
+      '--no-session-persistence',
+      '--model',               'haiku'
+    ], { env: process.env });
+
+    let stdout = '';
+    let stderr = '';
+    child.stdout.on('data', d => stdout += d);
+    child.stderr.on('data', d => stderr += d);
+    child.on('error', e => reject(new Error(`Cannot run claude CLI: ${e.message}`)));
+    child.on('close', code => {
+      if (code !== 0) reject(new Error(`claude exited ${code}: ${stderr.slice(0, 300)}`));
+      else {
+        try { const env = JSON.parse(stdout.trim()); resolve(env.result || stdout.trim()); }
+        catch { resolve(stdout.trim()); }
+      }
+    });
+    child.stdin.write(userPrompt);
+    child.stdin.end();
+  });
+}
+
+function runClaude(userPrompt) {
+  return new Promise((resolve, reject) => {
+    const child = spawn('claude', [
+      '--print',
+      '--system-prompt',       SYSTEM_PROMPT,
+      '--output-format',       'json',
+      '--no-session-persistence',
+      '--model',               'haiku'
+    ], { env: process.env });
+
+    let stdout = '';
+    let stderr = '';
+
+    child.stdout.on('data', d => stdout += d);
+    child.stderr.on('data', d => stderr += d);
+    child.on('error', e => reject(new Error(`Cannot run claude CLI: ${e.message}`)));
+    child.on('close', code => {
+      if (code !== 0) reject(new Error(`claude exited ${code}: ${stderr.slice(0, 300)}`));
+      else {
+        try {
+          const envelope = JSON.parse(stdout.trim());
+          resolve(envelope.result || stdout.trim());
+        } catch {
+          resolve(stdout.trim());
+        }
+      }
+    });
+
+    // Send prompt via stdin (handles long job descriptions safely)
+    child.stdin.write(userPrompt);
+    child.stdin.end();
+  });
+}
+
+const CORS = {
+  'Access-Control-Allow-Origin':  '*',
+  'Access-Control-Allow-Methods': 'POST, OPTIONS',
+  'Access-Control-Allow-Headers': 'Content-Type',
+  'Content-Type': 'application/json'
+};
+
+// ── HTTP request handler ────────────────────────────────────────────────────
+async function handleRequest(req, res) {
+  if (req.method === 'OPTIONS') {
+    res.writeHead(204, CORS); res.end(); return;
+  }
+
+  if (req.method === 'GET' && req.url === '/health') {
+    res.writeHead(200, CORS);
+    res.end(JSON.stringify({ ok: true, engine: 'claude-cli', clients: wsClients.size }));
+    return;
+  }
+
+  // ── /reload: push reload signal to all connected extension clients ──────────
+  if (req.method === 'POST' && req.url === '/reload') {
+    let pushed = 0;
+    for (const client of wsClients) {
+      if (client.readyState === 1 /* OPEN */) {
+        client.send('reload');
+        pushed++;
+      }
+    }
+    res.writeHead(200, CORS);
+    res.end(JSON.stringify({ ok: true, pushed }));
+    console.log(`[PJA] /reload → pushed to ${pushed} client(s)`);
+    return;
+  }
+
+  // ── /inject: push inject signal to re-inject content scripts into open tabs ──
+  if (req.method === 'POST' && req.url === '/inject') {
+    let pushed = 0;
+    for (const client of wsClients) {
+      if (client.readyState === 1 /* OPEN */) {
+        client.send('inject');
+        pushed++;
+      }
+    }
+    res.writeHead(200, CORS);
+    res.end(JSON.stringify({ ok: true, pushed }));
+    console.log(`[PJA] /inject → pushed to ${pushed} client(s)`);
+    return;
+  }
+
+  // ── /get-storage: request storage values from extension via WS round-trip ───
+  if (req.method === 'POST' && req.url === '/get-storage') {
+    let body = '';
+    req.on('data', d => body += d);
+    req.on('end', () => {
+      try {
+        const { keys } = JSON.parse(body);
+        const reqId = Date.now() + '_' + Math.random().toString(36).slice(2, 6);
+        let responded = false;
+        // Wait for the extension to reply with a storageReply message
+        const handler = (ws) => {
+          const onMsg = (raw) => {
+            try {
+              const msg = JSON.parse(raw);
+              if (msg.cmd === 'storageReply' && msg.reqId === reqId && !responded) {
+                responded = true;
+                ws.removeListener('message', onMsg);
+                res.writeHead(200, CORS);
+                res.end(JSON.stringify({ ok: true, data: msg.data }));
+              }
+            } catch(e) {}
+          };
+          ws.on('message', onMsg);
+        };
+        let sent = 0;
+        for (const client of wsClients) {
+          if (client.readyState === 1) {
+            handler(client);
+            client.send(JSON.stringify({ cmd: 'getStorage', keys, reqId }));
+            sent++;
+            break; // only need one client
+          }
+        }
+        if (!sent) { res.writeHead(503, CORS); res.end(JSON.stringify({ error: 'no extension connected' })); return; }
+        setTimeout(() => { if (!responded) { responded = true; res.writeHead(504, CORS); res.end(JSON.stringify({ error: 'timeout' })); } }, 3000);
+      } catch(e) {
+        res.writeHead(400, CORS);
+        res.end(JSON.stringify({ error: e.message }));
+      }
+    });
+    return;
+  }
+
+  // ── /set-storage: push arbitrary storage data to the extension ─────────────
+  if (req.method === 'POST' && req.url === '/set-storage') {
+    let body = '';
+    req.on('data', d => body += d);
+    req.on('end', () => {
+      try {
+        const data = JSON.parse(body);
+        let pushed = 0;
+        for (const client of wsClients) {
+          if (client.readyState === 1) {
+            client.send(JSON.stringify({ cmd: 'setStorage', data }));
+            pushed++;
+          }
+        }
+        res.writeHead(200, CORS);
+        res.end(JSON.stringify({ ok: true, pushed }));
+        console.log(`[PJA] /set-storage → pushed ${Object.keys(data).join(', ')} to ${pushed} client(s)`);
+      } catch(e) {
+        res.writeHead(400, CORS);
+        res.end(JSON.stringify({ error: e.message }));
+      }
+    });
+    return;
+  }
+
+  // ── /launch-queue: seed pja_ext_queue + pja_ext_current from test-jobs.json ──
+  // Optional body: { startIndex: 0, jobIds: ["id1","id2",...] } to filter/start at offset
+  // Also needs the extension to have pja_profile+pja_answers in storage already.
+  // After setting storage, sends an 'openTab' command to open the first job URL.
+  if (req.method === 'POST' && req.url.startsWith('/launch-queue')) {
+    let body = '';
+    req.on('data', d => body += d);
+    req.on('end', () => {
+      try {
+        const opts = body ? JSON.parse(body) : {};
+        const jobsFile = path.join(__dirname, 'test', 'test-jobs.json');
+        let jobs = JSON.parse(fs.readFileSync(jobsFile, 'utf8'));
+        if (opts.jobIds && opts.jobIds.length) {
+          jobs = jobs.filter(j => opts.jobIds.includes(j.id));
+        }
+        const startIndex = opts.startIndex || 0;
+        const runId = 'devrun_' + Date.now();
+        const returnUrl = 'https://www.linkedin.com/jobs/search/?f_AL=true';
+
+        // Get profile+answers from extension, then set the queue
+        const reqId = 'lq_' + Date.now();
+        let responded = false;
+
+        const finalize = (profile, answers) => {
+          const queue = {
+            status: 'applying',
+            jobs,
+            currentIndex: startIndex,
+            results: { applied: [], skipped: [] },
+            profile: profile || {},
+            answers: answers || {},
+            startedAt: Date.now(),
+            runId,
+            source: 'dev-server-launch'
+          };
+          const first = jobs[startIndex];
+          if (!first) { res.writeHead(400, CORS); res.end(JSON.stringify({ error: 'no jobs at startIndex' })); return; }
+          const firstCurrent = { ...first, profile: profile || {}, answers: answers || {}, returnUrl, applyUrl: first.applyUrl, runId };
+
+          let pushed = 0;
+          for (const client of wsClients) {
+            if (client.readyState === 1) {
+              client.send(JSON.stringify({ cmd: 'setStorage', data: { pja_ext_queue: queue, pja_ext_current: firstCurrent } }));
+              client.send(JSON.stringify({ cmd: 'openTab', url: first.applyUrl }));
+              pushed++;
+            }
+          }
+          res.writeHead(200, CORS);
+          res.end(JSON.stringify({ ok: true, pushed, jobs: jobs.length, first: first.title + ' @ ' + first.company, runId }));
+          console.log(`[PJA] /launch-queue → ${jobs.length} jobs, starting ${first.title} @ ${first.company}`);
+        };
+
+        // Fetch current profile+answers from extension
+        const handler = (ws) => {
+          const onMsg = (raw) => {
+            try {
+              const msg = JSON.parse(raw);
+              if (msg.cmd === 'storageReply' && msg.reqId === reqId && !responded) {
+                responded = true;
+                ws.removeListener('message', onMsg);
+                finalize(msg.data.pja_profile, msg.data.pja_answers);
+              }
+            } catch(e) {}
+          };
+          ws.on('message', onMsg);
+        };
+
+        let sent = 0;
+        for (const client of wsClients) {
+          if (client.readyState === 1) {
+            handler(client);
+            client.send(JSON.stringify({ cmd: 'getStorage', keys: ['pja_profile', 'pja_answers'], reqId }));
+            sent++;
+            break;
+          }
+        }
+        if (!sent) { res.writeHead(503, CORS); res.end(JSON.stringify({ error: 'no extension connected' })); return; }
+        setTimeout(() => { if (!responded) { responded = true; finalize({}, {}); } }, 3000);
+      } catch(e) {
+        res.writeHead(400, CORS);
+        res.end(JSON.stringify({ error: e.message }));
+      }
+    });
+    return;
+  }
+
+  // ── /cdp-date-test: trigger CDP date typing into a Workday spinner ──────────
+  if (req.method === 'POST' && req.url === '/cdp-date-test') {
+    let body = '';
+    req.on('data', d => body += d);
+    req.on('end', () => {
+      try {
+        const data = JSON.parse(body); // { tabId, baseId, month, day, year }
+        let pushed = 0;
+        for (const client of wsClients) {
+          if (client.readyState === 1) {
+            client.send(JSON.stringify({ cmd: 'cdpDateTest', ...data }));
+            pushed++;
+          }
+        }
+        res.writeHead(200, CORS);
+        res.end(JSON.stringify({ ok: true, pushed }));
+        console.log(`[PJA] /cdp-date-test → tabId=${data.tabId} baseId=${data.baseId}`);
+      } catch(e) {
+        res.writeHead(400, CORS);
+        res.end(JSON.stringify({ error: e.message }));
+      }
+    });
+    return;
+  }
+
+  // ── /queue-status: background pushes queue state here; curl /queue-status to read ──
+  if (req.method === 'POST' && req.url === '/queue-status') {
+    let body = '';
+    req.on('data', d => body += d);
+    req.on('end', () => {
+      try { _lastQueueStatus = JSON.parse(body); } catch(e) {}
+      res.writeHead(200, CORS); res.end('{"ok":true}');
+    });
+    return;
+  }
+  if (req.method === 'GET' && req.url === '/queue-status') {
+    res.writeHead(200, { ...CORS, 'Content-Type': 'application/json' });
+    res.end(JSON.stringify(_lastQueueStatus || { error: 'no data yet' }));
+    return;
+  }
+
+  if (req.method === 'POST' && req.url === '/analyze') {
+    let body = '';
+    req.on('data', d => body += d);
+    req.on('end', async () => {
+      try {
+        const { title, company, description } = JSON.parse(body);
+        const label = `${title || 'Unknown'} @ ${company || 'Unknown'}`;
+        process.stdout.write(`[PJA] ${label} … `);
+        const t0 = Date.now();
+
+        const userPrompt =
+`Analyze this job posting for the candidate:
+
+Job Title: ${title || 'Unknown'}
+Company: ${company || 'Unknown'}
+
+Job Description:
+${(description || '').slice(0, 6000)}`;
+
+        const raw = await runClaude(userPrompt);
+        // Extract the JSON object robustly — Haiku sometimes adds text after the closing }
+        const start = raw.indexOf('{');
+        const end   = raw.lastIndexOf('}');
+        if (start === -1 || end === -1) throw new Error('No JSON object in response: ' + raw.slice(0, 120));
+        const data = JSON.parse(raw.slice(start, end + 1));
+        data.engine = 'claude-dev';
+
+        console.log(`done (${Date.now() - t0}ms) score=${data.fitScore}`);
+        res.writeHead(200, CORS);
+        res.end(JSON.stringify({ success: true, data, engine: 'claude-dev' }));
+      } catch (e) {
+        console.error(`\n[PJA] Error: ${e.message}`);
+        res.writeHead(500, CORS);
+        res.end(JSON.stringify({ success: false, error: e.message }));
+      }
+    });
+    return;
+  }
+
+  // ── /batch-score: score up to 10 jobs in one Claude call ──────────────────
+  if (req.method === 'POST' && req.url === '/batch-score') {
+    let body = '';
+    req.on('data', d => body += d);
+    req.on('end', async () => {
+      try {
+        const { jobs } = JSON.parse(body);  // jobs: [{id, title, company, description}]
+        if (!Array.isArray(jobs) || jobs.length === 0) throw new Error('jobs array required');
+        const batch = jobs.slice(0, 10);
+        process.stdout.write(`[PJA] Batch scoring ${batch.length} jobs… `);
+        const t0 = Date.now();
+
+        const jobList = batch.map((j, i) =>
+          `Job ${i + 1}: "${j.title}" at "${j.company}"\n${(j.description || '').slice(0, 800)}`
+        ).join('\n---\n');
+
+        const prompt =
+`Score each job 0-100 for the candidate's fit. Return ONLY a JSON array, no other text:
+[{"id":"<job id>","score":<0-100>},...]
+
+Jobs:
+${jobList}
+
+Job IDs (in order): ${batch.map(j => JSON.stringify(j.id)).join(', ')}`;
+
+        const batchPrompt = `You score job fit for the candidate, a Canadian moving to California on a TN visa. Her ACTUAL skills (from resume): wafer inspection (~2,500/day), thin film metrology, photolithography, defect detection, thickness measurement, cleanroom, yield improvement, GMP, SPC, quality management/control, 5S, root cause analysis, EH&S, SDS handling, data management. She has a B.E. (Environmental Engineering). She does NOT have: FMEA, 8D, ISO 13485, optical metrology, supplier audits, Python, CAD.
+TN VISA RULE (critical): TN status is only for PROFESSIONAL roles (Engineer/Scientist + degree). Any Technician/Tech/Operator/Associate/Assembler/Supervisor/Manager/Coordinator/Lead title is NOT TN-eligible → score it 0-25 no matter how well skills match. Engineer/Scientist titles are eligible. No H-1B available; roles needing US citizenship/clearance → ≤30.
+BEST FITS (TN-eligible, score 85-95): Wafer Inspection/Metrology/Yield/Defect/Process(-Integration) Engineer in semiconductor; Thin Film/Photolithography/CMP/Etch Process Engineer. Quality/Reliability Engineer (semi/medtech) 70-88. Deduct 10-15 per required gap (FMEA/8D/ISO13485/Python/CAD). Score 0-100. Return ONLY a JSON array [{id, score}]. No markdown, no explanation.`;
+
+        const raw = await runClaudeWithSystemPrompt(batchPrompt, prompt);
+        const start = raw.indexOf('[');
+        const end   = raw.lastIndexOf(']');
+        if (start === -1 || end === -1) throw new Error('No JSON array in response: ' + raw.slice(0, 120));
+        const scores = JSON.parse(raw.slice(start, end + 1));
+
+        console.log(`done (${Date.now() - t0}ms) scores=[${scores.map(s=>s.score).join(',')}]`);
+        res.writeHead(200, CORS);
+        res.end(JSON.stringify({ success: true, scores }));
+      } catch (e) {
+        console.error(`\n[PJA] Batch error: ${e.message}`);
+        res.writeHead(500, CORS);
+        res.end(JSON.stringify({ success: false, error: e.message }));
+      }
+    });
+    return;
+  }
+
+  // ── /outreach: generate DM + email for an approved job ────────────────────
+  if (req.method === 'POST' && req.url === '/outreach') {
+    let body = '';
+    req.on('data', d => body += d);
+    req.on('end', async () => {
+      try {
+        const { title, company, description, matchedSkills } = JSON.parse(body);
+        process.stdout.write(`[PJA] Outreach for ${title} @ ${company}… `);
+        const t0 = Date.now();
+
+        const prompt =
+`Generate outreach messages for the candidate applying to: ${title} at ${company}.
+Matched skills: ${(matchedSkills || []).join(', ')}.
+Job snippet: ${(description || '').slice(0, 400)}
+
+Return ONLY valid JSON, no markdown:
+{"dmMessage":"<LinkedIn DM under 280 chars, open with Canadian TN Visa no sponsorship>","emailMessage":"<cold email, Subject: line first, TN Visa in first sentence, under 500 chars>","recruiterSearchUrl":"recruiter ${encodeURIComponent(company)}","hmSearchUrl":"hiring manager engineer ${encodeURIComponent(company)}"}`;
+
+        const raw = await runClaude(prompt);
+        const start = raw.indexOf('{');
+        const end   = raw.lastIndexOf('}');
+        if (start === -1 || end === -1) throw new Error('No JSON in response');
+        const data = JSON.parse(raw.slice(start, end + 1));
+
+        console.log(`done (${Date.now() - t0}ms)`);
+        res.writeHead(200, CORS);
+        res.end(JSON.stringify({ success: true, ...data }));
+      } catch (e) {
+        console.error(`\n[PJA] Outreach error: ${e.message}`);
+        res.writeHead(500, CORS);
+        res.end(JSON.stringify({ success: false, error: e.message }));
+      }
+    });
+    return;
+  }
+
+  // ── /answer-questions: generate AI answers for open-ended form questions ──
+  if (req.method === 'POST' && req.url === '/answer-questions') {
+    let body = '';
+    req.on('data', d => body += d);
+    req.on('end', async () => {
+      try {
+        const { questions, jobContext, profile } = JSON.parse(body);
+        // questions: [{label, type, maxLength, options}]
+        // jobContext: {title, company}
+        // profile: stored pja_profile object (may be absent — use hardcoded fallback)
+        if (!Array.isArray(questions) || questions.length === 0) {
+          throw new Error('questions array required');
+        }
+        const title   = jobContext?.title   || 'Unknown Role';
+        const company = jobContext?.company || 'Unknown Company';
+
+        process.stdout.write(`[PJA] Answering ${questions.length} question(s) for ${title} @ ${company}… `);
+        const t0 = Date.now();
+
+        // Build dynamic profile fields, falling back to hardcoded the candidate defaults
+        const p = profile || {};
+        const fullName      = [p.firstName, p.lastName].filter(Boolean).join(' ') || 'the candidate';
+        const currentRole   = [p.currentTitle, p.currentCompany].filter(Boolean).join(' at ') || 'Senior Inspection Metrology Tech at a medical-device employer';
+        const prevRole      = p.prevTitle && p.prevCompany
+          ? `${p.prevTitle} at ${p.prevCompany}`
+          : 'Operation Associate II at a medical-device employer (May 2022–Aug 2024)';
+        const yearsExp      = p.yearsExperience || '6';
+        const locationLine  = [p.city, p.state].filter(Boolean).join(', ') || 'Santa Clara, CA';
+        const visaLine      = p.visa || 'Canadian citizen, TN Visa (USMCA) — no sponsorship needed';
+        const skillsLine    = p.skills || 'wafer inspection (~2,500/day), thin film metrology, photolithography, GMP, SPC, quality management, 5S, root cause analysis, EH&S, defect detection, yield improvement, clean room operations, data management, Lean Six Sigma White Belt';
+
+        const ANSWER_SYSTEM_PROMPT =
+`You are filling out a job application for ${fullName}.
+
+PROFILE:
+- Current: ${currentRole}
+- Previous: ${prevRole}
+- Total work experience: ${yearsExp} years; semiconductor/medtech quality/metrology experience: ~4 years
+- Skills: ${skillsLine}
+- Does NOT have (flag as aspirational or "actively learning" if asked): FMEA, 8D, ISO 13485, optical metrology, supplier audits, Python, CAD
+- Visa: ${visaLine}
+- Location: ${locationLine} (willing to relocate in Bay Area)
+
+ANSWERING RULES:
+1. Always write in first person ("I have…", "My experience includes…")
+2. For "years of experience" questions: answer with the numeric value only (e.g. "6") unless it is a text field, in which case write one short sentence
+3. For yes/no questions: answer with just "Yes" or "No" (with one brief reason if it is a textarea)
+4. For "describe your experience" or knowledge questions: write 2–4 sentences, specific to ${fullName}'s actual resume, mentioning named tools/standards she actually used (SPC, GMP, KLA tools, photolithography, clean room). Do NOT claim skills she lacks.
+5. For "are you open to / willing to" questions: answer "Yes" with a brief enthusiastic line
+6. For contract/temp work questions: answer "Yes, I am open to contract and contract-to-hire opportunities"
+7. Keep answers proportional to maxLength — if maxLength ≤ 100, use 1–2 sentences max; if ≤ 300, use 2–3 sentences; if > 300, up to 4 sentences
+8. Do NOT include filler phrases like "Great question" or "I would like to say"
+9. Return ONLY valid JSON — no markdown, no extra text`;
+
+        const questionList = questions.map((q, i) => {
+          const parts = [`Q${i + 1}: "${q.label}"`];
+          if ((q.type === 'select' || q.type === 'radio') && q.options?.length) {
+            parts.push(`  Type: ${q.type === 'radio' ? 'radio choice' : 'dropdown'}; options: ${q.options.slice(0, 12).join(' | ')}`);
+            parts.push(`  IMPORTANT: your answer must be copied exactly from one of the options above`);
+          } else if (q.type === 'textarea') {
+            parts.push(`  Type: long text${q.maxLength ? `; maxLength: ${q.maxLength} chars` : ''}`);
+          } else {
+            parts.push(`  Type: short text${q.maxLength ? `; maxLength: ${q.maxLength} chars` : ''}`);
+          }
+          return parts.join('\n');
+        }).join('\n\n');
+
+        const userPrompt =
+`Job: ${title} at ${company}
+
+Answer each question below for the candidate's application. Return a JSON array with one object per question:
+[{"label":"<exact question label>","answer":"<your answer>"},...]
+
+Questions:
+${questionList}`;
+
+        const raw = await runClaudeWithSystemPrompt(ANSWER_SYSTEM_PROMPT, userPrompt);
+        const start = raw.indexOf('[');
+        const end   = raw.lastIndexOf(']');
+        if (start === -1 || end === -1) throw new Error('No JSON array in response: ' + raw.slice(0, 120));
+        const answers = JSON.parse(raw.slice(start, end + 1));
+
+        console.log(`done (${Date.now() - t0}ms) answered=${answers.length}`);
+        res.writeHead(200, CORS);
+        res.end(JSON.stringify({ success: true, answers }));
+      } catch (e) {
+        console.error(`\n[PJA] answer-questions error: ${e.message}`);
+        res.writeHead(500, CORS);
+        res.end(JSON.stringify({ success: false, error: e.message }));
+      }
+    });
+    return;
+  }
+
+  res.writeHead(404, CORS);
+  res.end(JSON.stringify({ error: 'Not found' }));
+}
+
+// ── HTTP + WebSocket server (shared port) ──────────────────────────────────
+const server = http.createServer(handleRequest);
+
+const wss = new WebSocketServer({ server });
+wss.on('connection', ws => {
+  wsClients.add(ws);
+  console.log(`[PJA] Extension connected (${wsClients.size} client(s))`);
+  // Keep the MV3 service worker alive: respond to pings from the extension
+  ws.on('message', msg => {
+    if (msg.toString() === 'ping') ws.send('pong');
+  });
+  ws.on('close', () => {
+    wsClients.delete(ws);
+    console.log(`[PJA] Extension disconnected (${wsClients.size} client(s))`);
+  });
+  ws.on('error', () => wsClients.delete(ws));
+});
+
+server.listen(PORT, '127.0.0.1', () => {
+  console.log(`\n🔬 PJA dev server  →  http://localhost:${PORT}`);
+  console.log(`   Engine            : claude CLI (your subscription, no extra cost)`);
+  console.log(`   Hot-reload        : curl -X POST http://localhost:${PORT}/reload`);
+  console.log(`   Stop              : Ctrl+C\n`);
+});

@@ -1,0 +1,200 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Manufacturing Engineer | Foxconn Industrial Internet | Apply</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #f0f0f0; color: #1a1a1a; padding: 32px 16px 80px; }
+    .page { max-width: 780px; margin: 0 auto; }
+    h1 { font-size: 22px; font-weight: 700; margin-bottom: 4px; }
+    .meta { font-size: 14px; color: #555; margin-bottom: 24px; }
+    .card { background: #fff; border: 1px solid #d8d8d8; border-radius: 6px; padding: 28px; margin-bottom: 20px; }
+    .card h2 { font-size: 16px; font-weight: 600; margin-bottom: 20px; padding-bottom: 10px; border-bottom: 1px solid #eee; }
+    .field { margin-bottom: 16px; }
+    label { display: block; font-size: 13px; font-weight: 500; color: #333; margin-bottom: 5px; }
+    label .req { color: #c00; }
+    input[type="text"], input[type="email"], input[type="tel"] {
+      width: 100%; padding: 9px 12px; border: 1px solid #b0b0b0; border-radius: 4px; font-size: 14px; font-family: inherit;
+    }
+    input:focus { outline: none; border-color: #0063a3; box-shadow: 0 0 0 2px rgba(0,99,163,0.15); }
+
+    /* Workday-style upload widget */
+    .wd-upload-zone { border: 2px dashed #b0b0b0; border-radius: 6px; padding: 28px 20px; text-align: center; background: #fafafa; }
+    .wd-upload-zone.has-file { border-color: #0063a3; background: #f0f6fb; }
+    .wd-upload-title { font-size: 15px; font-weight: 600; color: #333; margin-bottom: 8px; }
+    .wd-upload-hint { font-size: 12px; color: #777; margin-bottom: 16px; }
+    [data-automation-id="click-to-upload"] {
+      display: inline-block; padding: 9px 22px; background: #0063a3; color: #fff; border: none; border-radius: 4px;
+      font-size: 14px; font-weight: 600; font-family: inherit; cursor: pointer;
+    }
+    [data-automation-id="click-to-upload"]:hover { background: #00508a; }
+    [data-automation-id="file-upload-item-name"] { display: none; margin-top: 12px; font-size: 14px; color: #0063a3; font-weight: 500; }
+    [data-automation-id="file-upload-item-name"].visible { display: block; }
+    [data-automation-id="file-upload-successful"] { display: none; margin-top: 8px; font-size: 13px; color: #2e7d32; }
+    [data-automation-id="file-upload-successful"].visible { display: block; }
+    .wd-remove-btn { display: none; margin-top: 8px; font-size: 12px; color: #c00; cursor: pointer; text-decoration: underline; }
+    .wd-remove-btn.visible { display: block; }
+
+    .submit-btn { padding: 11px 28px; background: #0063a3; color: #fff; border: none; border-radius: 4px; font-size: 15px; font-weight: 600; font-family: inherit; cursor: pointer; }
+    .submit-btn:hover { background: #00508a; }
+
+    #test-log { max-width: 780px; margin: 24px auto 0; background: #1a1a2e; border-radius: 6px; padding: 16px; font-family: monospace; font-size: 12px; color: #a8d8a8; max-height: 300px; overflow-y: auto; }
+    .log-title { color: #7ecfff; font-weight: bold; margin-bottom: 8px; }
+    .log-entry { padding: 2px 0; border-bottom: 1px solid rgba(255,255,255,0.05); white-space: pre-wrap; }
+    .log-entry.warn { color: #ffd080; }
+    .log-entry.error { color: #ff8080; }
+    .log-entry.info { color: #80d4ff; }
+  </style>
+</head>
+<body>
+<div class="page">
+  <h1>Manufacturing Engineer</h1>
+  <div class="meta">Foxconn Industrial Internet &middot; Houston, TX &middot; Full-time</div>
+
+  <form id="app-form" novalidate>
+
+    <!-- Resume upload — Workday pattern: data-automation-id="click-to-upload" button -->
+    <div class="card">
+      <h2>Resume / CV</h2>
+      <input type="hidden" id="resume-hidden" name="resume" required>
+      <div class="wd-upload-zone" id="upload-zone">
+        <div class="wd-upload-title">Upload your resume</div>
+        <div class="wd-upload-hint">PDF, DOC, DOCX — max 5 MB</div>
+        <button type="button" data-automation-id="click-to-upload" id="wd-upload-btn">Select Files</button>
+        <div data-automation-id="file-upload-item-name" id="file-name-el"></div>
+        <div data-automation-id="file-upload-successful" id="upload-success-el">Resume uploaded successfully</div>
+        <a class="wd-remove-btn" id="wd-remove-btn">Remove</a>
+      </div>
+    </div>
+
+    <!-- Contact info -->
+    <div class="card">
+      <h2>My Information</h2>
+      <div class="field">
+        <label for="first-name">First Name <span class="req">*</span></label>
+        <input type="text" id="first-name" name="firstName" required autocomplete="given-name" placeholder="First name">
+      </div>
+      <div class="field">
+        <label for="last-name">Last Name <span class="req">*</span></label>
+        <input type="text" id="last-name" name="lastName" required autocomplete="family-name" placeholder="Last name">
+      </div>
+      <div class="field">
+        <label for="email">Email <span class="req">*</span></label>
+        <input type="email" id="email" name="email" required autocomplete="email" placeholder="you@example.com">
+      </div>
+      <div class="field">
+        <label for="phone">Phone <span class="req">*</span></label>
+        <input type="tel" id="phone" name="phone" required autocomplete="tel" placeholder="+1 (555) 000-0000">
+      </div>
+    </div>
+
+    <div class="card" style="padding:16px 28px">
+      <button type="button" class="submit-btn" id="submit-btn">Submit Application</button>
+    </div>
+  </form>
+</div>
+
+<div id="test-log">
+  <div class="log-title">Test Log</div>
+</div>
+
+<script>
+(function() {
+  'use strict';
+
+  // Make URL match /apply pattern for content script activation
+  if (!location.href.includes('/apply')) {
+    try { history.replaceState(null, '', '/apply/workday-resume-test' + location.search); } catch(e) {}
+  }
+  // Fake workday hostname check by storing in sessionStorage for test purposes
+  // (real Workday check is hostname-based; here we tag the DOM instead)
+  document.documentElement.setAttribute('data-pja-wd-test', 'true');
+
+  const logPanel = document.getElementById('test-log');
+  function log(msg, level) {
+    const e = document.createElement('div');
+    e.className = 'log-entry' + (level ? ' ' + level : '');
+    e.textContent = '[' + new Date().toLocaleTimeString('en-US',{hour12:false,hour:'2-digit',minute:'2-digit',second:'2-digit'}) + '] ' + msg;
+    logPanel.appendChild(e); logPanel.scrollTop = logPanel.scrollHeight;
+  }
+  ['log','warn','error'].forEach(function(m) {
+    var orig = console[m].bind(console);
+    console[m] = function() {
+      orig.apply(console, arguments);
+      var msg = Array.from(arguments).map(function(a){return typeof a==='object'?JSON.stringify(a):String(a);}).join(' ');
+      if (msg.indexOf('PJA')!==-1) log(msg, m==='warn'?'warn':m==='error'?'error':'');
+    };
+  });
+
+  log('Workday-style resume upload test loaded.', 'info');
+
+  var uploadBtn = document.getElementById('wd-upload-btn');
+  var uploadZone = document.getElementById('upload-zone');
+  var fileNameEl = document.getElementById('file-name-el');
+  var successEl = document.getElementById('upload-success-el');
+  var removeBtn = document.getElementById('wd-remove-btn');
+  var hiddenField = document.getElementById('resume-hidden');
+
+  // Workday pattern: button click → create input → call input.click()
+  uploadBtn.addEventListener('click', function() {
+    var inp = document.createElement('input');
+    inp.type = 'file';
+    inp.accept = '.pdf,.doc,.docx';
+    inp.style.cssText = 'position:absolute;top:-9999px;left:-9999px;';
+    document.body.appendChild(inp);
+    log('Workday: created input[type=file], calling input.click() — bridge intercept point.');
+    inp.click(); // Extension's pja:injectresume listener intercepts this
+
+    inp.addEventListener('change', function() {
+      var file = inp.files && inp.files[0];
+      if (file) {
+        fileNameEl.textContent = file.name;
+        fileNameEl.classList.add('visible');
+        successEl.classList.add('visible');
+        removeBtn.classList.add('visible');
+        uploadZone.classList.add('has-file');
+        uploadBtn.textContent = 'Replace';
+        hiddenField.value = 'wd_token_' + Date.now();
+        hiddenField.removeAttribute('required');
+        log('Workday upload: ' + file.name + ' (' + Math.round(file.size/1024) + ' KB)', 'info');
+      }
+      document.body.removeChild(inp);
+    });
+  });
+
+  removeBtn.addEventListener('click', function() {
+    fileNameEl.textContent = ''; fileNameEl.classList.remove('visible');
+    successEl.classList.remove('visible'); removeBtn.classList.remove('visible');
+    uploadZone.classList.remove('has-file');
+    uploadBtn.textContent = 'Select Files';
+    hiddenField.value = ''; hiddenField.setAttribute('required','');
+    log('Resume removed.');
+  });
+
+  document.getElementById('submit-btn').addEventListener('click', function() {
+    var errors = [];
+    ['first-name','last-name','email','phone'].forEach(function(id) {
+      var el = document.getElementById(id);
+      if (!el || !el.value.trim()) errors.push(id);
+    });
+    if (!hiddenField.value) errors.push('resume');
+    if (errors.length) {
+      log('Validation failed: ' + errors.join(', '), 'warn');
+    } else {
+      document.getElementById('submit-btn').textContent = 'Submitted!';
+      document.getElementById('submit-btn').style.background = '#2e7d32';
+      document.getElementById('submit-btn').disabled = true;
+      log('Form validation passed — all fields filled!', 'info');
+    }
+  });
+
+  document.getElementById('app-form').addEventListener('input', function(e) {
+    if (e.target.value) log('Field: #' + e.target.id + ' = "' + e.target.value.slice(0,50) + '"');
+  }, true);
+
+  log('Workday-style form ready. Waiting for extension.', 'info');
+})();
+</script>
+</body>
+</html>
