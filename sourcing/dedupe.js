@@ -35,4 +35,34 @@ function dedupe(jobs, appliedKeys) {
   return out;
 }
 
-module.exports = { jobKey, appliedKeySet, dedupe };
+// Append applied roles to a durable log, deduped by jobKey. This survives pja_ext_queue being
+// overwritten each run (Bug2): without it, /source only saw the LAST queue's applied roles and
+// re-surfaced roles applied in earlier (overwritten) queues.
+function pjaMergeAppliedLog(log, entries) {
+  const out = Array.isArray(log) ? log.slice() : [];
+  const have = new Set(out.map(jobKey));
+  for (const e of entries || []) {
+    if (!e) continue;
+    const rec = { company: e.company || e.companyName || '', title: e.title || e.role || e.jobTitle || '', appliedAt: e.appliedAt || Date.now() };
+    if (!rec.company && !rec.title) continue;
+    const k = jobKey(rec);
+    if (have.has(k)) continue;
+    have.add(k);
+    out.push(rec);
+  }
+  return out;
+}
+
+// Aggregate every source of "already applied" from storage for dedupe: the durable applied log
+// (primary), plus pja_jobs and the current queue's results (belt-and-suspenders).
+function pjaCollectAppliedRecords(storage) {
+  const s = storage || {};
+  const recs = [];
+  for (const j of (s.pja_applied_log || [])) recs.push(j);
+  for (const j of (s.pja_jobs || [])) recs.push(j);
+  const r = s.pja_ext_queue && s.pja_ext_queue.results;
+  if (r) for (const x of [...(r.applied || []), ...(r.skipped || [])]) recs.push(x);
+  return recs;
+}
+
+module.exports = { jobKey, appliedKeySet, dedupe, pjaMergeAppliedLog, pjaCollectAppliedRecords };

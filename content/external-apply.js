@@ -1963,6 +1963,16 @@
       }
     }
 
+    // Required checkbox-GROUP questions (Greenhouse single-select-as-checkboxes) — flagged so
+    // they trigger the AI path pre-submit instead of silently failing validation on submit.
+    if (typeof pjaFindRequiredCheckboxGroups === 'function') {
+      for (const g of pjaFindRequiredCheckboxGroups(document)) {
+        if (!g.question || seen.has(g.question.toLowerCase())) continue;
+        seen.add(g.question.toLowerCase());
+        missing.push({ label: g.question, type: 'checkboxgroup', options: g.options });
+      }
+    }
+
     return missing;
   }
 
@@ -2100,6 +2110,14 @@
         maxLength: parseInt(el.getAttribute('maxlength') || '0', 10) || 0,
       });
     }
+    // Required checkbox-GROUP questions (Greenhouse single-select rendered as checkboxes).
+    if (typeof pjaFindRequiredCheckboxGroups === 'function') {
+      for (const g of pjaFindRequiredCheckboxGroups(document)) {
+        if (!g.question || pjaIsGarbageLabel(g.question) || seen.has(g.question.toLowerCase())) continue;
+        seen.add(g.question.toLowerCase());
+        out.push({ el: g.members[0], members: g.members, label: g.question, type: 'checkboxgroup', options: g.options, maxLength: 0 });
+      }
+    }
     return out;
   }
 
@@ -2138,7 +2156,8 @@
     }
     if (detApplied) { await dbg('[ai] deterministic applied=' + detApplied); await sleep(500); fields = collectRequiredEmptyFields(); }
     if (!fields.length) return { applied: detApplied, asked: 0 };
-    const questions = fields.map(f => ({ label: f.label, type: f.type, options: f.options || [], maxLength: f.maxLength || 0 }));
+    // checkboxgroup -> present to the AI as a 'select' so it sees the options and copies one exactly.
+    const questions = fields.map(f => ({ label: f.label, type: f.type === 'checkboxgroup' ? 'select' : f.type, options: f.options || [], maxLength: f.maxLength || 0 }));
     await dbg('[ai] asking ' + questions.length + ' req Q: ' + questions.map(q=>q.label.slice(0,22)).join(' | ').slice(0,150));
     const resp = await new Promise(resolve => {
       try {
@@ -2160,7 +2179,8 @@
       const ans = pjaAnswerValue(f.label, a);
       if (!ans) { low++; continue; }
       try {
-        if (f.type === 'select' && typeof pjaFillSelect === 'function') pjaFillSelect(f.el, ans);
+        if (f.type === 'checkboxgroup' && typeof pjaCheckMatchingBox === 'function') pjaCheckMatchingBox(f.members || [], ans);
+        else if (f.type === 'select' && typeof pjaFillSelect === 'function') pjaFillSelect(f.el, ans);
         else if (f.type === 'combobox' && typeof pjaFillCombobox === 'function') pjaFillCombobox(f.el, ans);
         else if (f.type === 'radio' && typeof pjaSelectRadio === 'function') pjaSelectRadio(f.radios || [], ans);
         else if (typeof pjaFillTextViaFiber === 'function') pjaFillTextViaFiber(f.el, ans);
@@ -2218,6 +2238,20 @@
     // Mark job as handled so we don't re-process on reload
     job._handled = true;
     await new Promise(resolve => chrome.storage.local.set({ pja_ext_current: job }, resolve));
+
+    // Bug2 fix: persist successful applies to a DURABLE log (pja_ext_queue gets overwritten each
+    // run, so sourcing dedupe needs this to avoid re-surfacing already-applied roles).
+    if (result.success) {
+      await new Promise(resolve => chrome.storage.local.get('pja_applied_log', d => {
+        const log = Array.isArray(d.pja_applied_log) ? d.pja_applied_log : [];
+        const norm = s => (s || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+        const k = norm(job.company) + '::' + norm(job.title);
+        if (!log.some(e => norm(e.company) + '::' + norm(e.title) === k)) {
+          log.push({ company: job.company, title: job.title, appliedAt: Date.now() });
+        }
+        chrome.storage.local.set({ pja_applied_log: log }, resolve);
+      }));
+    }
 
     return new Promise(resolve => {
       chrome.storage.local.get('pja_ext_queue', data => {

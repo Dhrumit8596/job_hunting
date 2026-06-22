@@ -540,12 +540,11 @@ BEST FITS (TN-eligible, score 85-95): Wafer Inspection/Metrology/Yield/Defect/Pr
         const write = o.write !== false;
         const sources = (o.sources) || JSON.parse(fs.readFileSync(__dirname + '/sourcing/sources.json', 'utf8')).sources;
 
-        // Dedupe against already-applied (pja_jobs + prior queue results + existing shortlist).
-        const st = await getStorageFromExtension(['pja_jobs', 'pja_ext_queue', 'pja_shortlist']);
-        const applied = [];
-        for (const j of (st.pja_jobs || [])) applied.push(j);
-        const prevQ = st.pja_ext_queue && st.pja_ext_queue.results;
-        if (prevQ) for (const r of [...(prevQ.applied || []), ...(prevQ.skipped || [])]) applied.push(r);
+        // Dedupe against already-applied: durable applied log (survives queue overwrites) +
+        // pja_jobs + current queue results.
+        const st = await getStorageFromExtension(['pja_jobs', 'pja_ext_queue', 'pja_shortlist', 'pja_applied_log']);
+        const { pjaCollectAppliedRecords } = require('./sourcing/dedupe');
+        const applied = pjaCollectAppliedRecords(st);
 
         console.log(`[PJA] /source: ${sources.length} sources, threshold=${threshold}, queueLimit=${queueLimit}, applied-known=${applied.length}`);
         const result = await runPipeline({

@@ -4,7 +4,7 @@ const path = require('path');
 const R = d => require(path.resolve(__dirname, '../../sourcing', d));
 const { makeJob, isRemote } = R('normalize');
 const { isEligibleTitle, isEligibleLocation, isItarExcluded, filterJobs, tnAdjustScore } = R('filter');
-const { jobKey, appliedKeySet, dedupe } = R('dedupe');
+const { jobKey, appliedKeySet, dedupe, pjaMergeAppliedLog, pjaCollectAppliedRecords } = R('dedupe');
 const { routeJobs } = R('pipeline');
 const gh = R('adapters/greenhouse');
 const lever = R('adapters/lever');
@@ -61,6 +61,26 @@ module.exports = (t) => {
     makeJob({ id: 12, title: 'Quality Engineer', company: 'Twist Bioscience', location: 'SSF, CA' }),
   ], applied);
   t.eq(dd.map(x => x.id), ['11'], 'dedupe: drops applied + within-run dup');
+
+  // --- Bug2: durable applied-log dedupe (survives pja_ext_queue being overwritten) ---
+  // Reproduce the gap: run1 applies a role -> persisted to pja_applied_log. run2 overwrites
+  // pja_ext_queue with a different job. Dedupe must STILL know about run1's role.
+  let log = pjaMergeAppliedLog([], [{ company: 'Acme', title: 'Quality Engineer' }]);
+  t.eq(log.length, 1, 'mergeAppliedLog: appends');
+  log = pjaMergeAppliedLog(log, [{ company: 'Acme', title: 'Quality Engineer' }]); // dup
+  t.eq(log.length, 1, 'mergeAppliedLog: dedups same role');
+  log = pjaMergeAppliedLog(log, [{ company: 'Beta Bio', title: 'Process Engineer' }]);
+  t.eq(log.length, 2, 'mergeAppliedLog: adds new role');
+  const storage = {
+    pja_jobs: [],
+    pja_applied_log: log,
+    pja_ext_queue: { results: { applied: [{ company: 'Gamma', title: 'Equipment Engineer' }], skipped: [] } },
+  };
+  const recs = pjaCollectAppliedRecords(storage);
+  const keys = appliedKeySet(recs);
+  t.ok(keys.has(jobKey({ company: 'Acme', title: 'Quality Engineer' })), 'collectApplied: durable-log role deduped across overwritten queue');
+  t.ok(keys.has(jobKey({ company: 'Beta Bio', title: 'Process Engineer' })), 'collectApplied: 2nd durable-log role deduped');
+  t.ok(keys.has(jobKey({ company: 'Gamma', title: 'Equipment Engineer' })), 'collectApplied: current-queue role deduped');
 
   // --- adapter normalize (synthetic raw) ---
   const ghJob = gh.normalize({ id: 99, title: 'Quality Engineer', location: { name: 'San Diego, CA' }, absolute_url: 'https://boards.greenhouse.io/x/jobs/99', updated_at: '2026-06-01' }, { name: 'Acme', slug: 'acme' });

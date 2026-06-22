@@ -49,4 +49,19 @@ module.exports = (t) => {
   t.eq(val('work-auth'), 'yes', 'fixture: work-auth select -> yes');
   t.eq(val('sponsorship'), 'no', 'fixture: sponsorship select -> no');
   t.eq(val('relocate'), 'yes', 'fixture: relocate select -> yes');
+
+  // --- Bug1: required checkbox-group detection + selection ---
+  const groups = w.pjaFindRequiredCheckboxGroups(doc);
+  t.eq(groups.length, 1, 'checkboxgroup: detects the required group');
+  const g = groups[0] || {};
+  t.ok(/years of experience/i.test(g.question || ''), 'checkboxgroup: question text');
+  t.eq(g.anyChecked, false, 'checkboxgroup: none checked yet');
+  t.eq(g.options, ['Less than 1', '1-2', '2-5', '5+'], 'checkboxgroup: options from labels');
+  // select the "5+" option (label via label[for], value is a numeric id) — confirm exactly that
+  // box is checked and the group is then satisfied.
+  w.pjaCheckMatchingBox(g.members, '5+');
+  const checked = g.members.filter(m => m.checked);
+  t.eq(checked.length, 1, 'checkboxgroup: exactly one option checked');
+  t.eq(checked[0].id, 'yq_d', 'checkboxgroup: checks the "5+" option matched via label[for]');
+  t.eq(w.pjaFindRequiredCheckboxGroups(doc).length, 0, 'checkboxgroup: satisfied group no longer reported');
 };

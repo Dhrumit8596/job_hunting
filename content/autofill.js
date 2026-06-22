@@ -721,6 +721,68 @@ function pjaClickRadio(radio) {
   return true;
 }
 
+// Option text for a checkbox/radio: wrapping <label>, then label[for=id], then a sibling label,
+// then the value attr. (Greenhouse uses label[for]; the value attr is often a numeric id.)
+function pjaCheckboxOptionText(cb) {
+  let t = (cb.closest && cb.closest('label') ? cb.closest('label').textContent : '') || '';
+  if (!t.trim() && cb.id) { const root = (cb.getRootNode && cb.getRootNode()) || document; const esc = (typeof CSS !== 'undefined' && CSS.escape) ? CSS.escape(cb.id) : cb.id.replace(/["\\]/g, '\\$&'); const fl = root.querySelector(`label[for="${esc}"]`); if (fl) t = fl.textContent; }
+  if (!t.trim()) { const s = cb.nextElementSibling; if (s && s.tagName === 'LABEL') t = s.textContent; }
+  if (!t.trim()) t = cb.value || '';
+  return t.replace(/\s+/g, ' ').trim();
+}
+
+// Find required checkbox-GROUP questions (Greenhouse renders some single/multi-select questions
+// as a group of checkboxes sharing a name base, e.g. question_999[]_a..d). These have no
+// [required] on a single control the missing-field scan recognizes as a group, and are excluded
+// by [type=checkbox] filters, so they silently block submit. Returns unanswered required groups.
+function pjaFindRequiredCheckboxGroups(root) {
+  root = root || document;
+  const groups = {}; const order = [];
+  for (const cb of root.querySelectorAll('input[type=checkbox]')) {
+    if (root === document && !cb.offsetParent && cb.getBoundingClientRect().width === 0) continue;
+    const name = cb.name || cb.id || '';
+    const base = name.replace(/\[\]_.*$/, '').replace(/_\d+$/, '').replace(/\[\]$/, '');
+    if (!base) continue;
+    if (!groups[base]) { groups[base] = { base, members: [], required: false, anyChecked: false }; order.push(base); }
+    const g = groups[base];
+    g.members.push(cb);
+    if (cb.required || cb.getAttribute('aria-required') === 'true') g.required = true;
+    if (cb.checked) g.anyChecked = true;
+  }
+  const out = [];
+  for (const base of order) {
+    const g = groups[base];
+    if (!g.required || g.anyChecked || g.members.length < 2) continue; // single required cb = a consent box
+    const block = g.members[0].closest('.application--questions, .field, [class*="field"], [class*="question"], fieldset');
+    let question = '';
+    if (block) {
+      const al = block.querySelector('.application-label, legend');
+      if (al && !al.querySelector('input')) question = al.textContent.replace(/\s+/g, ' ').trim();
+      if (!question) for (const lb of block.querySelectorAll('label')) { if (!lb.querySelector('input')) { question = lb.textContent.replace(/\s+/g, ' ').trim(); break; } }
+    }
+    out.push({ base, question, required: true, anyChecked: false, members: g.members, options: g.members.map(pjaCheckboxOptionText) });
+  }
+  return out;
+}
+
+// Check the checkbox in a group whose label/value matches `answer` (single-select semantics:
+// unchecks siblings). Dispatches input+change+click so React/Greenhouse state updates.
+function pjaCheckMatchingBox(members, answer) {
+  const lv = String(answer || '').toLowerCase().trim();
+  if (!lv || !members || !members.length) return false;
+  const optText = cb => pjaCheckboxOptionText(cb).toLowerCase();
+  let target = members.find(cb => (cb.value || '').toLowerCase().trim() === lv)
+            || members.find(cb => optText(cb) === lv)
+            || members.find(cb => { const o = optText(cb); return o && (o.includes(lv) || lv.includes(o)); });
+  if (!target) return false;
+  // React updates checkbox state from the CLICK event, not from a native checked-setter
+  // (a programmatic .checked = true leaves React's internal state stale, so Greenhouse still
+  // sees it unchecked on submit). Click to toggle into the desired state instead.
+  for (const cb of members) { if (cb !== target && cb.checked) cb.click(); } // single-select: clear others
+  if (!target.checked) target.click();
+  return true;
+}
+
 // Pick the radio in the group whose label/value best matches the stored profile value
 function pjaSelectRadio(radios, value, key) {
   const lv = value.toLowerCase().trim();
@@ -1760,6 +1822,8 @@ window.pjaFillTextViaFiber = pjaFillTextViaFiber;
 window.pjaFillViaFiberOnChange = pjaFillViaFiberOnChange;
 window.pjaClickRadio = pjaClickRadio;
 window.pjaSelectRadio = pjaSelectRadio;
+window.pjaFindRequiredCheckboxGroups = pjaFindRequiredCheckboxGroups;
+window.pjaCheckMatchingBox = pjaCheckMatchingBox;
 window.pjaGetGroupLabel = pjaGetGroupLabel;
 window.pjaFillRequiredRadioFallback = typeof pjaFillRequiredRadioFallback !== 'undefined' ? pjaFillRequiredRadioFallback : undefined;
 window.PJA_FIELD_RULES = PJA_FIELD_RULES;
