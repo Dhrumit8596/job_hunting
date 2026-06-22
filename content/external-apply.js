@@ -1983,6 +1983,23 @@
     if (String(a.confidence).toLowerCase() === 'low') return null; // experiential guess → skip
     return ans;
   }
+  // PURE: deterministic answer for common policy questions — reliable across ALL ATSes
+  // (esp. Lever .application-question radios that the fieldset-based fallbacks miss). Returns
+  // the answer string or null (→ let the AI handle it, e.g. education level, novel questions).
+  function pjaDeterministicAnswer(label) {
+    const t = String(label || '');
+    if (/referr/i.test(t)) return 'No';
+    if (/require.*sponsor|\bsponsorship\b|visa sponsor/i.test(t)) return 'No';
+    if (/authoriz|eligible to work|legally (authorized|entitled|able)|right to work/i.test(t)) return 'Yes';
+    if (/(now or have you ever|currently)[\s\S]{0,40}(employee|employed|worked? (for|at))/i.test(t)) return 'No';
+    if (/worked (for|at)[\s\S]{0,30}(pricewaterhouse|pwc)/i.test(t)) return 'No';
+    if (/\bat least 18\b|\bover 18\b|\b18 (years|or older)\b|are you 18/i.test(t)) return 'Yes';
+    if (/willing to (relocate|travel|commute)|able to (relocate|commute|travel)|open to relocat/i.test(t)) return 'Yes';
+    if (/background check|drug (test|screen)/i.test(t)) return 'Yes';
+    return null;
+  }
+  if (typeof window !== 'undefined') window.pjaDeterministicAnswer = pjaDeterministicAnswer;
+
   // Label-keyed lookup (used by unit tests + as the preferred match).
   function pjaSelectAiAnswer(label, aiAnswers) {
     const norm = s => (s || '').toLowerCase().replace(/\s+/g, ' ').trim();
@@ -2063,7 +2080,39 @@
       out.push({ el: r, radios, label, type: 'radio',
         options: radios.map(optionText).filter(Boolean), maxLength: 0 });
     }
+    // Asterisk-required scan: Greenhouse custom questions are often marked required ONLY by a
+    // "*" in the label (no [required]/aria-required on the input), so the selectors above miss
+    // them and the form fails validation on submit. Catch visible, empty, asterisk-labelled
+    // text/select/combobox controls here too.
+    for (const el of pjaQueryAllExt('input:not([type=hidden]):not([type=file]):not([type=checkbox]):not([type=radio]):not([type=submit]):not([type=button]), select, textarea, [role="combobox"]')) {
+      if (!el.offsetParent && el.getBoundingClientRect().width === 0) continue;
+      if (el.value && el.value.trim()) continue;
+      const role = (el.getAttribute('role') || '').toLowerCase();
+      if (!role && !['input', 'select', 'textarea'].includes(el.tagName.toLowerCase())) continue;
+      if (!pjaLabelHasAsterisk(el)) continue;
+      const label = getLabelFor(el);
+      if (!label || /^resume|^cv\b|curriculum vitae/i.test(label.trim()) || pjaIsGarbageLabel(label) || seen.has(label.toLowerCase())) continue;
+      seen.add(label.toLowerCase());
+      out.push({
+        el, label,
+        type: el.tagName === 'SELECT' ? 'select' : role === 'combobox' ? 'combobox' : el.tagName === 'TEXTAREA' ? 'textarea' : 'text',
+        options: el.tagName === 'SELECT' ? Array.from(el.options).map(o => o.text.trim()).filter(t => t && !/^select/i.test(t)) : [],
+        maxLength: parseInt(el.getAttribute('maxlength') || '0', 10) || 0,
+      });
+    }
     return out;
+  }
+
+  // True if the control's associated label/container text carries a required marker (* or ✱).
+  function pjaLabelHasAsterisk(el) {
+    const texts = [];
+    if (el.id) { const l = document.querySelector(`label[for="${CSS.escape(el.id)}"]`); if (l) texts.push(l.textContent); }
+    const lc = el.closest && el.closest('label'); if (lc) texts.push(lc.textContent);
+    const al = el.getAttribute && el.getAttribute('aria-labelledby');
+    if (al) al.split(/\s+/).forEach(id => { const n = document.getElementById(id); if (n) texts.push(n.textContent); });
+    const fld = el.closest && el.closest('.field, [class*="field"], [class*="question"], .form-group');
+    if (fld) { const lbl = fld.querySelector('label, .label, legend'); if (lbl) texts.push(lbl.textContent); }
+    return texts.some(t => /[*✱]/.test(t || ''));
   }
 
   // Route still-empty required fields to the AI answerer (background ANSWER_QUESTIONS ->
@@ -2071,10 +2120,25 @@
   // Honest by construction (prompt forbids fabricating skills she lacks). Low-confidence
   // answers are left unfilled (so they surface as missing rather than guessed).
   async function pjaAnswerRequiredViaAI(job) {
-    const fields = collectRequiredEmptyFields();
-    if (!fields.length) return { applied: 0, asked: 0 };
-    const questions = fields.map(f => ({ label: f.label, type: f.type, options: f.options || [], maxLength: f.maxLength || 0 }));
     const dbg = m => new Promise(r => chrome.storage.local.get('pja_dbg', d => { const a=(d.pja_dbg||[]).slice(-19); a.push(m); chrome.storage.local.set({pja_dbg:a}, r); }));
+    let fields = collectRequiredEmptyFields();
+    if (!fields.length) return { applied: 0, asked: 0 };
+    // Deterministic pre-pass: answer common policy questions directly (no AI flakiness).
+    let detApplied = 0;
+    for (const f of fields) {
+      const ans = pjaDeterministicAnswer(f.label);
+      if (!ans) continue;
+      try {
+        if (f.type === 'radio' && typeof pjaSelectRadio === 'function') pjaSelectRadio(f.radios || [], ans);
+        else if (f.type === 'select' && typeof pjaFillSelect === 'function') pjaFillSelect(f.el, ans);
+        else if (f.type === 'combobox' && typeof pjaFillCombobox === 'function') pjaFillCombobox(f.el, ans);
+        else continue;
+        detApplied++;
+      } catch (_) {}
+    }
+    if (detApplied) { await dbg('[ai] deterministic applied=' + detApplied); await sleep(500); fields = collectRequiredEmptyFields(); }
+    if (!fields.length) return { applied: detApplied, asked: 0 };
+    const questions = fields.map(f => ({ label: f.label, type: f.type, options: f.options || [], maxLength: f.maxLength || 0 }));
     await dbg('[ai] asking ' + questions.length + ' req Q: ' + questions.map(q=>q.label.slice(0,22)).join(' | ').slice(0,150));
     const resp = await new Promise(resolve => {
       try {
@@ -2084,10 +2148,10 @@
     });
     if (!resp || !resp.success || !Array.isArray(resp.answers)) {
       await dbg('[ai] no answers: ' + (resp && resp.error || 'null'));
-      return { applied: 0, asked: questions.length };
+      return { applied: detApplied, asked: questions.length };
     }
     const norm = s => (s || '').toLowerCase().replace(/\s+/g, ' ').trim();
-    let applied = 0, low = 0;
+    let applied = detApplied, low = 0;
     for (let i = 0; i < fields.length; i++) {
       const f = fields[i];
       // Prefer exact label match; fall back to positional (dev-server returns answers in

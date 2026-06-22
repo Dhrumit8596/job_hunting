@@ -93,6 +93,16 @@ module.exports = (t) => {
     [{ label: 'Do you have at least a high school diploma or GED?', answer: 'Yes', confidence: 'low' }]),
     'Yes', 'AI: low-conf DIPLOMA still applied (policy)');
 
+  // --- pjaDeterministicAnswer: reliable common-policy answers (no AI dependency) ---
+  t.eq(w.pjaDeterministicAnswer('Were you referred by a Penumbra Employee?'), 'No', 'det: referred -> No');
+  t.eq(w.pjaDeterministicAnswer('Do you now or will you ever require sponsorship?'), 'No', 'det: sponsorship -> No');
+  t.eq(w.pjaDeterministicAnswer('Are you legally authorized to work in the US?'), 'Yes', 'det: work-auth -> Yes');
+  t.eq(w.pjaDeterministicAnswer('Are you now or have you ever been a Penumbra employee?'), 'No', 'det: employed-here -> No');
+  t.eq(w.pjaDeterministicAnswer('Do you now or have you ever worked for Pricewaterhouse Cooper (PwC)?'), 'No', 'det: PwC -> No');
+  t.eq(w.pjaDeterministicAnswer('Are you at least 18 years of age?'), 'Yes', 'det: 18+ -> Yes');
+  t.eq(w.pjaDeterministicAnswer('What is the highest level of education you have completed?'), null, 'det: education -> null (AI handles)');
+  t.eq(w.pjaDeterministicAnswer('Describe your experience with SPC'), null, 'det: open-ended -> null');
+
   // --- pjaIsGarbageLabel: never send junk labels to the AI ---
   t.eq(w.pjaIsGarbageLabel('yes'), true, 'garbage: "yes"');
   t.eq(w.pjaIsGarbageLabel('No'), true, 'garbage: "No"');

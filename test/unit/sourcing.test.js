@@ -3,7 +3,7 @@
 const path = require('path');
 const R = d => require(path.resolve(__dirname, '../../sourcing', d));
 const { makeJob, isRemote } = R('normalize');
-const { isEligibleTitle, isEligibleLocation, isItarExcluded, filterJobs } = R('filter');
+const { isEligibleTitle, isEligibleLocation, isItarExcluded, filterJobs, tnAdjustScore } = R('filter');
 const { jobKey, appliedKeySet, dedupe } = R('dedupe');
 const { routeJobs } = R('pipeline');
 const gh = R('adapters/greenhouse');
@@ -70,6 +70,13 @@ module.exports = (t) => {
   const levJob = lever.normalize({ id: 'abc', text: 'Equipment Engineer', categories: { location: 'Alameda, CA' }, hostedUrl: 'https://jobs.lever.co/acme/abc' }, { name: 'Acme', slug: 'acme' });
   t.eq(levJob.applyUrl, 'https://jobs.lever.co/acme/abc/apply', 'lever.normalize: applyUrl gets /apply');
   t.eq(levJob.location, 'Alameda, CA', 'lever.normalize: location');
+
+  // --- tnAdjustScore: down-weight gray-TN senior titles ---
+  t.eq(tnAdjustScore('Senior Quality Engineer', 88), 88, 'tnAdjust: normal title unchanged');
+  t.eq(tnAdjustScore('Senior Principal Validation Engineer', 78), 55, 'tnAdjust: Principal capped 55');
+  t.eq(tnAdjustScore('Distinguished Engineer', 80), 55, 'tnAdjust: Distinguished capped 55');
+  t.eq(tnAdjustScore('Staff Mechanical Engineer', 82), 65, 'tnAdjust: Staff capped 65');
+  t.eq(tnAdjustScore('Staff Engineer', 60), 60, 'tnAdjust: below cap unchanged');
 
   // --- pipeline routing ---
   const scored = [

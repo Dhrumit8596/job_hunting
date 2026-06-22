@@ -195,7 +195,11 @@ async function scoreAll(jobs, concurrency = 4) {
     }
   }
   await Promise.all(Array.from({ length: Math.min(concurrency, chunks.length || 1) }, worker));
-  return jobs.map(j => ({ ...j, fitScore: byId[String(j.id)] != null ? byId[String(j.id)] : null }));
+  const { tnAdjustScore } = require('./sourcing/filter');
+  return jobs.map(j => {
+    const raw = byId[String(j.id)] != null ? byId[String(j.id)] : null;
+    return { ...j, fitScore: raw == null ? null : tnAdjustScore(j.title, raw) };
+  });
 }
 
 // ── HTTP request handler ────────────────────────────────────────────────────

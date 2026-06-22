@@ -27,6 +27,15 @@
     { "ats": "greenhouse", "slug": "eikontherapeutics", "name": "Eikon Therapeutics" },
     { "ats": "lever", "slug": "penumbrainc", "name": "Penumbra" },
     { "ats": "lever", "slug": "capstan-medical", "name": "Capstan Medical" },
-    { "ats": "lever", "slug": "plenty", "name": "Plenty" }
+    { "ats": "lever", "slug": "plenty", "name": "Plenty" },
+    { "ats": "greenhouse", "slug": "redwoodmaterials", "name": "Redwood Materials" },
+    { "ats": "greenhouse", "slug": "revolutionmedicines", "name": "Revolution Medicines" },
+    { "ats": "greenhouse", "slug": "ultimagenomics", "name": "Ultima Genomics" },
+    { "ats": "greenhouse", "slug": "lucidmotors", "name": "Lucid Motors" },
+    { "ats": "greenhouse", "slug": "nuro", "name": "Nuro" },
+    { "ats": "lever", "slug": "brightmachines", "name": "Bright Machines" },
+    { "ats": "lever", "slug": "dexterity", "name": "Dexterity" },
+    { "ats": "lever", "slug": "zoox", "name": "Zoox" },
+    { "ats": "lever", "slug": "ambirobotics", "name": "Ambi Robotics" }
   ]
 }

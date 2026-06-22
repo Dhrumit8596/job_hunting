@@ -47,4 +47,16 @@ function filterJobs(jobs, opts = {}) {
   });
 }
 
-module.exports = { isEligibleTitle, isEligibleLocation, isItarExcluded, filterJobs, ELIGIBLE_TITLE, TITLE_EXCLUDE };
+// TN-title grading: cap the fit score for senior/gray-TN titles that are a stretch for an
+// early-career candidate. "Principal/Distinguished/Fellow" are gray for TN and unlikely fits;
+// "Staff" is a stretch. Returns the adjusted score.
+function tnAdjustScore(title, score) {
+  const s = Number(score);
+  if (!Number.isFinite(s)) return score;
+  const t = String(title || '');
+  if (/\b(distinguished|fellow|principal)\b/i.test(t)) return Math.min(s, 55);
+  if (/\bstaff\b/i.test(t)) return Math.min(s, 65);
+  return s;
+}
+
+module.exports = { isEligibleTitle, isEligibleLocation, isItarExcluded, filterJobs, tnAdjustScore, ELIGIBLE_TITLE, TITLE_EXCLUDE };
