@@ -2017,6 +2017,8 @@
     return pjaAnswerValue(label, (aiAnswers || []).find(x => norm(x.label) === want));
   }
   if (typeof window !== 'undefined') { window.pjaSelectAiAnswer = pjaSelectAiAnswer; window.pjaAnswerValue = pjaAnswerValue; }
+  // Exported so auto-apply.js (Easy Apply) can reuse the exact same answerer on the modal root.
+  if (typeof window !== 'undefined') setTimeout(() => { try { window.pjaAnswerRequiredViaAI = pjaAnswerRequiredViaAI; window.pjaCollectRequiredEmptyFields = collectRequiredEmptyFields; } catch (_) {} }, 0);
 
   // A label too short/garbage to be a real question (e.g. "yes", a stray radio-option label,
   // a bare placeholder). Sending these to the AI confuses it into returning prose, not JSON.
@@ -2030,10 +2032,13 @@
 
   // Collect required-but-empty answerable fields WITH element refs + enriched options,
   // so they can be routed to the AI answerer and the answers applied to the right control.
-  function collectRequiredEmptyFields() {
+  // scope: optional root (e.g. an Easy Apply modal element/shadow root) to confine the scan.
+  // Defaults to the shadow-aware whole-document query used by external ATS pages.
+  function collectRequiredEmptyFields(scope) {
     const out = [];
     const seen = new Set();
-    for (const el of pjaQueryAllExt(
+    const Q = sel => scope ? Array.from(scope.querySelectorAll(sel)) : pjaQueryAllExt(sel);
+    for (const el of Q(
       'input[required]:not([type=hidden]):not([type=file]):not([type=checkbox]):not([type=radio]),' +
       'select[required], textarea[required],' +
       '[aria-required="true"]:not([type=hidden]):not([type=file])'
@@ -2067,7 +2072,7 @@
     }
     // Required radio groups (collect option labels + the group's radios)
     const groups = {};
-    for (const r of pjaQueryAllExt('input[type=radio][required], input[type=radio][aria-required="true"]')) {
+    for (const r of Q('input[type=radio][required], input[type=radio][aria-required="true"]')) {
       if (!r.offsetParent) continue;
       const name = r.name || r.getAttribute('aria-labelledby') || '';
       if (!name || groups[name]) continue;
@@ -2094,7 +2099,7 @@
     // "*" in the label (no [required]/aria-required on the input), so the selectors above miss
     // them and the form fails validation on submit. Catch visible, empty, asterisk-labelled
     // text/select/combobox controls here too.
-    for (const el of pjaQueryAllExt('input:not([type=hidden]):not([type=file]):not([type=checkbox]):not([type=radio]):not([type=submit]):not([type=button]), select, textarea, [role="combobox"]')) {
+    for (const el of Q('input:not([type=hidden]):not([type=file]):not([type=checkbox]):not([type=radio]):not([type=submit]):not([type=button]), select, textarea, [role="combobox"]')) {
       if (!el.offsetParent && el.getBoundingClientRect().width === 0) continue;
       if (el.value && el.value.trim()) continue;
       const role = (el.getAttribute('role') || '').toLowerCase();
@@ -2112,7 +2117,7 @@
     }
     // Required checkbox-GROUP questions (Greenhouse single-select rendered as checkboxes).
     if (typeof pjaFindRequiredCheckboxGroups === 'function') {
-      for (const g of pjaFindRequiredCheckboxGroups(document)) {
+      for (const g of pjaFindRequiredCheckboxGroups(scope || document)) {
         if (!g.question || pjaIsGarbageLabel(g.question) || seen.has(g.question.toLowerCase())) continue;
         seen.add(g.question.toLowerCase());
         out.push({ el: g.members[0], members: g.members, label: g.question, type: 'checkboxgroup', options: g.options, maxLength: 0 });
@@ -2137,9 +2142,11 @@
   // dev-server /answer-questions using profile + resume + pja_prefs) and apply the answers.
   // Honest by construction (prompt forbids fabricating skills she lacks). Low-confidence
   // answers are left unfilled (so they surface as missing rather than guessed).
-  async function pjaAnswerRequiredViaAI(job) {
+  // scope: optional root to confine the scan (e.g. a LinkedIn Easy Apply modal). Reused by
+  // both external ATS pages (scope=undefined → whole doc) and Easy Apply (scope=modal root).
+  async function pjaAnswerRequiredViaAI(job, scope) {
     const dbg = m => new Promise(r => chrome.storage.local.get('pja_dbg', d => { const a=(d.pja_dbg||[]).slice(-19); a.push(m); chrome.storage.local.set({pja_dbg:a}, r); }));
-    let fields = collectRequiredEmptyFields();
+    let fields = collectRequiredEmptyFields(scope);
     if (!fields.length) return { applied: 0, asked: 0 };
     // Deterministic pre-pass: answer common policy questions directly (no AI flakiness).
     let detApplied = 0;
@@ -2154,7 +2161,7 @@
         detApplied++;
       } catch (_) {}
     }
-    if (detApplied) { await dbg('[ai] deterministic applied=' + detApplied); await sleep(500); fields = collectRequiredEmptyFields(); }
+    if (detApplied) { await dbg('[ai] deterministic applied=' + detApplied); await sleep(500); fields = collectRequiredEmptyFields(scope); }
     if (!fields.length) return { applied: detApplied, asked: 0 };
     // checkboxgroup -> present to the AI as a 'select' so it sees the options and copies one exactly.
     const questions = fields.map(f => ({ label: f.label, type: f.type === 'checkboxgroup' ? 'select' : f.type, options: f.options || [], maxLength: f.maxLength || 0 }));

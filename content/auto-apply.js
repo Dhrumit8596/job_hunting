@@ -501,10 +501,17 @@ async function pjaAutoApplyOne(job, profile, answers, onStatus) {
       // Run autofill
       pjaFillForm(profile, answers);
       await pjaAutoWait(600);
-      // Fallback pass: fill any required radio groups autofill missed
+      // Fallback pass: fill any required radio groups / comboboxes autofill missed
       pjaFillRequiredRadioFallback();
+      if (typeof pjaFillRequiredComboboxFallback === 'function') pjaFillRequiredComboboxFallback(profile, answers);
       // Auto-check consent/acknowledgment checkboxes
       pjaAutoCheckConsent();
+      // Reuse the SAME AI answerer used by external-apply, scoped to this modal, for screening
+      // questions (years, work-auth, US-person, education, checkbox-groups, etc.).
+      if (typeof window.pjaAnswerRequiredViaAI === 'function') {
+        const m2 = pjaGetCurrentModal();
+        if (m2) { try { await window.pjaAnswerRequiredViaAI(job, m2.root); } catch (_) {} await pjaAutoWait(700); }
+      }
     }
 
     const btns = pjaModalBtns();
@@ -838,7 +845,14 @@ async function pjaApplyOnCurrentPage(job, profile, answers, onStatus) {
       await pjaAutoWait(600);
       pjaFillRequiredRadioFallback();
       pjaFillRequiredSelectFallback();
+      if (typeof pjaFillRequiredComboboxFallback === 'function') pjaFillRequiredComboboxFallback(profile, answers);
       pjaAutoCheckConsent();
+      // Reuse the SAME AI answerer used by external-apply, scoped to this modal, for screening
+      // questions (years, work-auth, US-person, education, checkbox-groups, etc.).
+      if (typeof window.pjaAnswerRequiredViaAI === 'function') {
+        const m2 = pjaGetCurrentModal();
+        if (m2) { try { await window.pjaAnswerRequiredViaAI(job, m2.root); } catch (_) {} await pjaAutoWait(700); }
+      }
     }
 
     const btns = pjaModalBtns();
@@ -853,7 +867,7 @@ async function pjaApplyOnCurrentPage(job, profile, answers, onStatus) {
         return { success: false, reason: 'ready_to_submit' };
       }
       pjaTrace('clicking Submit application');
-      pjaClickInModal('Submit application');
+      await pjaTrustedClickInModal('Submit application');
       await pjaAutoWait(2500);
       // Dismiss post-apply "Update profile" / "Not now" dialog
       const notNow = Array.from(document.querySelectorAll('button'))
@@ -879,7 +893,12 @@ async function pjaApplyOnCurrentPage(job, profile, answers, onStatus) {
     }
 
     if (!isResumeStep) {
-      const emptyFields = pjaEmptyRequiredFields();
+      // Use the shared collector (proper react-select/checkbox value detection) so we don't
+      // false-bail on fields the AI just filled.
+      const mNow = pjaGetCurrentModal();
+      const emptyFields = (typeof window.pjaCollectRequiredEmptyFields === 'function' && mNow)
+        ? window.pjaCollectRequiredEmptyFields(mNow.root).map(f => f.label)
+        : pjaEmptyRequiredFields();
       if (emptyFields.length) {
         pjaTrace('result=missing_required step' + step + ' fields=' + emptyFields.join('|').slice(0, 80));
         pjaDismissModal();
@@ -887,9 +906,11 @@ async function pjaApplyOnCurrentPage(job, profile, answers, onStatus) {
       }
     }
 
-    if (btns.includes('Review')) pjaClickInModal('Review');
-    else if (btns.includes('Next')) pjaClickInModal('Next');
-    else if (btns.includes('Continue to next step')) pjaClickInModal('Continue to next step');
+    // Step-advance clicks MUST be trusted (CDP) — LinkedIn rejects synthetic clicks on
+    // Next/Review and reloads the page, killing the flow mid-step (the "mid-refresh" issue).
+    if (btns.includes('Review')) await pjaTrustedClickInModal('Review');
+    else if (btns.includes('Next')) await pjaTrustedClickInModal('Next');
+    else if (btns.includes('Continue to next step')) await pjaTrustedClickInModal('Continue to next step');
     else { pjaTrace('result=unknown_buttons btns=' + btns.join(',').slice(0,40)); pjaDismissModal(); return { success: false, reason: 'unknown_buttons', btns }; }
 
     await pjaAutoWait(1200);
