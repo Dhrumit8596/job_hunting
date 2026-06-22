@@ -2051,8 +2051,17 @@
       const label = getLabelFor(r) || name;
       if (pjaIsGarbageLabel(label) || seen.has(label.toLowerCase())) continue;
       seen.add(label.toLowerCase());
+      // Option text per radio = its OWN value/label, NOT getLabelFor (which now returns the
+      // shared Lever card QUESTION for every radio in the group). Using the question as the
+      // option text would give the AI useless choices (e.g. education-level picker).
+      const optionText = x => {
+        const v = (x.value || '').trim();
+        if (v && v.toLowerCase() !== 'on') return v;
+        const l = x.closest && x.closest('label');
+        return l ? l.textContent.replace(/\s+/g, ' ').trim() : '';
+      };
       out.push({ el: r, radios, label, type: 'radio',
-        options: radios.map(x => getLabelFor(x) || x.value).filter(Boolean), maxLength: 0 });
+        options: radios.map(optionText).filter(Boolean), maxLength: 0 });
     }
     return out;
   }

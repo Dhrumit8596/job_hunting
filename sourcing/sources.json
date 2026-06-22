@@ -1,0 +1,32 @@
+{
+  "_doc": "Sourcing registry. Add a company: append {ats, slug, name} for greenhouse/lever, or {ats:'workday', name, apiUrl, siteBase} for workday. Dead/unknown slugs return nothing and are skipped. Grow this list to scale volume. Greenhouse slug = boards-api.greenhouse.io/v1/boards/<slug>/jobs ; Lever slug = api.lever.co/v0/postings/<slug>?mode=json.",
+  "sources": [
+    { "ats": "greenhouse", "slug": "elementbiosciences", "name": "Element Biosciences" },
+    { "ats": "greenhouse", "slug": "twistbioscience", "name": "Twist Bioscience" },
+    { "ats": "greenhouse", "slug": "10xgenomics", "name": "10x Genomics" },
+    { "ats": "greenhouse", "slug": "alamarbiosciences", "name": "Alamar Biosciences" },
+    { "ats": "greenhouse", "slug": "asteralabs", "name": "Astera Labs" },
+    { "ats": "greenhouse", "slug": "cerebrassystems", "name": "Cerebras Systems" },
+    { "ats": "greenhouse", "slug": "guardanthealth", "name": "Guardant Health" },
+    { "ats": "greenhouse", "slug": "natera", "name": "Natera" },
+    { "ats": "greenhouse", "slug": "pacificbiosciences", "name": "Pacific Biosciences" },
+    { "ats": "greenhouse", "slug": "nanostring", "name": "NanoString" },
+    { "ats": "greenhouse", "slug": "standardbiotools", "name": "Standard BioTools" },
+    { "ats": "greenhouse", "slug": "ginkgobioworks", "name": "Ginkgo Bioworks" },
+    { "ats": "greenhouse", "slug": "benchling", "name": "Benchling" },
+    { "ats": "greenhouse", "slug": "gritstonebio", "name": "Gritstone bio" },
+    { "ats": "greenhouse", "slug": "cariboubiosciences", "name": "Caribou Biosciences" },
+    { "ats": "greenhouse", "slug": "mammothbiosciences", "name": "Mammoth Biosciences" },
+    { "ats": "greenhouse", "slug": "generatebiomedicines", "name": "Generate Biomedicines" },
+    { "ats": "greenhouse", "slug": "verkada", "name": "Verkada" },
+    { "ats": "greenhouse", "slug": "carbon", "name": "Carbon" },
+    { "ats": "greenhouse", "slug": "matterport", "name": "Matterport" },
+    { "ats": "greenhouse", "slug": "saildrone", "name": "Saildrone" },
+    { "ats": "greenhouse", "slug": "zipline", "name": "Zipline" },
+    { "ats": "greenhouse", "slug": "ouraring", "name": "Oura" },
+    { "ats": "greenhouse", "slug": "eikontherapeutics", "name": "Eikon Therapeutics" },
+    { "ats": "lever", "slug": "penumbrainc", "name": "Penumbra" },
+    { "ats": "lever", "slug": "capstan-medical", "name": "Capstan Medical" },
+    { "ats": "lever", "slug": "plenty", "name": "Plenty" }
+  ]
+}

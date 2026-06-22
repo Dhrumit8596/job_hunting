@@ -57,7 +57,7 @@ const JSON_SCHEMA = JSON.stringify({
   }
 });
 
-function runClaudeWithSystemPrompt(systemPrompt, userPrompt) {
+function runClaudeWithSystemPrompt(systemPrompt, userPrompt, timeoutMs = 90000) {
   return new Promise((resolve, reject) => {
     const child = spawn('claude', [
       '--print',
@@ -69,14 +69,19 @@ function runClaudeWithSystemPrompt(systemPrompt, userPrompt) {
 
     let stdout = '';
     let stderr = '';
+    let settled = false;
+    const done = fn => (...a) => { if (!settled) { settled = true; clearTimeout(timer); fn(...a); } };
+    const ok = done(resolve), bad = done(reject);
+    // Kill a hung CLI call so one stuck request can't stall a whole batch run.
+    const timer = setTimeout(() => { try { child.kill('SIGKILL'); } catch (_) {} bad(new Error('claude CLI timeout')); }, timeoutMs);
     child.stdout.on('data', d => stdout += d);
     child.stderr.on('data', d => stderr += d);
-    child.on('error', e => reject(new Error(`Cannot run claude CLI: ${e.message}`)));
+    child.on('error', e => bad(new Error(`Cannot run claude CLI: ${e.message}`)));
     child.on('close', code => {
-      if (code !== 0) reject(new Error(`claude exited ${code}: ${stderr.slice(0, 300)}`));
+      if (code !== 0) bad(new Error(`claude exited ${code}: ${stderr.slice(0, 300)}`));
       else {
-        try { const env = JSON.parse(stdout.trim()); resolve(env.result || stdout.trim()); }
-        catch { resolve(stdout.trim()); }
+        try { const env = JSON.parse(stdout.trim()); ok(env.result || stdout.trim()); }
+        catch { ok(stdout.trim()); }
       }
     });
     child.stdin.write(userPrompt);
@@ -124,6 +129,74 @@ const CORS = {
   'Access-Control-Allow-Headers': 'Content-Type',
   'Content-Type': 'application/json'
 };
+
+// ── Sourcing pipeline wiring ────────────────────────────────────────────────
+const { runPipeline } = require('./sourcing/pipeline');
+
+// Read chrome.storage from the connected extension (best-effort; [] if none).
+function getStorageFromExtension(keys, timeoutMs = 4000) {
+  return new Promise(resolve => {
+    const reqId = Date.now() + '_' + Math.random().toString(36).slice(2, 6);
+    let done = false;
+    const client = [...wsClients].find(c => c.readyState === 1);
+    if (!client) return resolve({});
+    const onMsg = raw => {
+      try {
+        const msg = JSON.parse(raw);
+        if (msg.cmd === 'storageReply' && msg.reqId === reqId && !done) {
+          done = true; client.removeListener('message', onMsg); resolve(msg.data || {});
+        }
+      } catch (_) {}
+    };
+    client.on('message', onMsg);
+    client.send(JSON.stringify({ cmd: 'getStorage', keys, reqId }));
+    setTimeout(() => { if (!done) { done = true; client.removeListener('message', onMsg); resolve({}); } }, timeoutMs);
+  });
+}
+
+// Push storage to the extension (returns count of clients written).
+function setStorageToExtension(obj) {
+  let pushed = 0;
+  for (const c of wsClients) {
+    if (c.readyState === 1) { c.send(JSON.stringify({ cmd: 'setStorage', data: obj })); pushed++; }
+  }
+  return pushed;
+}
+
+// Score one chunk (<=10) of jobs via the same prompt /batch-score uses.
+const SCORE_SYSTEM_PROMPT = `You score job fit for the candidate, a Canadian moving to California on a TN visa. Her ACTUAL skills (from resume): wafer inspection (~2,500/day), thin film metrology, photolithography, defect detection, thickness measurement, cleanroom, yield improvement, GMP, SPC, quality management/control, 5S, root cause analysis, EH&S, SDS handling, data management. She has a B.E. (Environmental Engineering). She does NOT have: FMEA, 8D, ISO 13485, optical metrology, supplier audits, Python, CAD.
+TN VISA RULE (critical): TN status is only for PROFESSIONAL roles (Engineer/Scientist + degree). Any Technician/Tech/Operator/Associate/Assembler/Supervisor/Manager/Coordinator/Lead title is NOT TN-eligible → score it 0-25 no matter how well skills match. Engineer/Scientist titles are eligible. No H-1B available; roles needing US citizenship/clearance → ≤30.
+BEST FITS (TN-eligible, score 85-95): Wafer Inspection/Metrology/Yield/Defect/Process(-Integration) Engineer in semiconductor; Thin Film/Photolithography/CMP/Etch Process Engineer. Quality/Reliability/Equipment/Manufacturing Engineer (semi/medtech) 70-88. Deduct 10-15 per required gap (FMEA/8D/ISO13485/Python/CAD). Score 0-100. Return ONLY a JSON array [{id, score}]. No markdown, no explanation.`;
+
+async function scoreJobChunk(batch) {
+  const jobList = batch.map((j, i) => `Job ${i + 1}: "${j.title}" at "${j.company}" (${j.location})`).join('\n---\n');
+  const prompt = `Score each job 0-100 for the candidate's fit. Return ONLY a JSON array, no other text:\n[{"id":"<job id>","score":<0-100>},...]\n\nJobs:\n${jobList}\n\nJob IDs (in order): ${batch.map(j => JSON.stringify(j.id)).join(', ')}`;
+  const raw = await runClaudeWithSystemPrompt(SCORE_SYSTEM_PROMPT, prompt);
+  const s = raw.indexOf('['), e = raw.lastIndexOf(']');
+  if (s === -1 || e === -1) return [];
+  try { return JSON.parse(raw.slice(s, e + 1)); } catch (_) { return []; }
+}
+
+// Score all jobs in chunks of 10, with bounded concurrency. Resilient: a chunk that errors
+// or times out leaves its jobs unscored (→ shortlist) instead of stalling the whole run.
+async function scoreAll(jobs, concurrency = 4) {
+  const chunks = [];
+  for (let i = 0; i < jobs.length; i += 10) chunks.push(jobs.slice(i, i + 10));
+  const byId = {};
+  let next = 0, done = 0;
+  async function worker() {
+    while (next < chunks.length) {
+      const idx = next++;
+      let scores = [];
+      try { scores = await scoreJobChunk(chunks[idx]); }
+      catch (e) { console.log(`[PJA] chunk ${idx + 1} failed: ${e.message}`); }
+      for (const s of scores) if (s && s.id != null) byId[String(s.id)] = Number(s.score);
+      console.log(`[PJA] scored chunk ${++done}/${chunks.length}`);
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(concurrency, chunks.length || 1) }, worker));
+  return jobs.map(j => ({ ...j, fitScore: byId[String(j.id)] != null ? byId[String(j.id)] : null }));
+}
 
 // ── HTTP request handler ────────────────────────────────────────────────────
 async function handleRequest(req, res) {
@@ -441,6 +514,72 @@ BEST FITS (TN-eligible, score 85-95): Wafer Inspection/Metrology/Yield/Defect/Pr
         res.end(JSON.stringify({ success: true, scores }));
       } catch (e) {
         console.error(`\n[PJA] Batch error: ${e.message}`);
+        res.writeHead(500, CORS);
+        res.end(JSON.stringify({ success: false, error: e.message }));
+      }
+    });
+    return;
+  }
+
+  // ── /source: find roles across ATSes, fit-score, route to queue/shortlist ──
+  // body: { threshold=70, queueLimit=0, write=true }
+  //   queueLimit>0 → auto-queue that many top roles into pja_ext_queue (auto-submit).
+  //   queueLimit=0 → only write the scored shortlist (review-first), no submission.
+  if (req.method === 'POST' && req.url === '/source') {
+    let body = '';
+    req.on('data', d => body += d);
+    req.on('end', async () => {
+      try {
+        const o = body ? JSON.parse(body) : {};
+        const threshold = o.threshold != null ? o.threshold : 70;
+        const queueLimit = o.queueLimit || 0;
+        const write = o.write !== false;
+        const sources = (o.sources) || JSON.parse(fs.readFileSync(__dirname + '/sourcing/sources.json', 'utf8')).sources;
+
+        // Dedupe against already-applied (pja_jobs + prior queue results + existing shortlist).
+        const st = await getStorageFromExtension(['pja_jobs', 'pja_ext_queue', 'pja_shortlist']);
+        const applied = [];
+        for (const j of (st.pja_jobs || [])) applied.push(j);
+        const prevQ = st.pja_ext_queue && st.pja_ext_queue.results;
+        if (prevQ) for (const r of [...(prevQ.applied || []), ...(prevQ.skipped || [])]) applied.push(r);
+
+        console.log(`[PJA] /source: ${sources.length} sources, threshold=${threshold}, queueLimit=${queueLimit}, applied-known=${applied.length}`);
+        const result = await runPipeline({
+          sources, opts: { threshold, concurrency: 8 }, appliedRecords: applied, scoreFn: scoreAll,
+        });
+
+        let wrote = { shortlist: 0, queued: 0 };
+        if (write) {
+          // Append new scored roles to pja_shortlist (existing review UI renders them).
+          const existing = Array.isArray(st.pja_shortlist) ? st.pja_shortlist : [];
+          const merged = existing.concat(result.scored.map(j => ({
+            id: j.id, title: j.title, company: j.company, location: j.location,
+            applyUrl: j.applyUrl, ats: j.ats, fitScore: j.fitScore, source: 'sourcing',
+          })));
+          const payload = { pja_shortlist: merged };
+          wrote.shortlist = result.scored.length;
+
+          if (queueLimit > 0 && result.queue.length) {
+            const pick = result.queue.slice(0, queueLimit).map(j => ({
+              id: j.id, title: j.title, company: j.company, ats: j.ats,
+              applyUrl: j.applyUrl, location: j.location, profile: {}, answers: {},
+            }));
+            const runId = 'source-' + Date.now();
+            const queue = { status: 'applying', jobs: pick, currentIndex: 0, results: { applied: [], skipped: [] }, runId, startedAt: Date.now() };
+            const first = { ...pick[0], returnUrl: 'https://www.linkedin.com/jobs/search/?f_AL=true', runId };
+            Object.assign(payload, { pja_ext_queue: queue, pja_ext_current: first, pja_ext_stop_before_submit: false, pja_navigate_to: pick[0].applyUrl });
+            wrote.queued = pick.length;
+          }
+          setStorageToExtension(payload);
+        }
+
+        res.writeHead(200, CORS);
+        res.end(JSON.stringify({ success: true, totals: result.totals, wrote,
+          liveSources: result.stats.filter(s => s.count > 0).length,
+          top: result.scored.slice().sort((a, b) => (b.fitScore || 0) - (a.fitScore || 0)).slice(0, 25)
+            .map(j => ({ score: j.fitScore, company: j.company, title: j.title, location: j.location })) }));
+      } catch (e) {
+        console.error('[PJA] /source error:', e.message);
         res.writeHead(500, CORS);
         res.end(JSON.stringify({ success: false, error: e.message }));
       }
