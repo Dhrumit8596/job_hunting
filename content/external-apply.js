@@ -2006,6 +2006,7 @@
     if (/\bat least 18\b|\bover 18\b|\b18 (years|or older)\b|are you 18/i.test(t)) return 'Yes';
     if (/willing to (relocate|travel|commute)|able to (relocate|commute|travel)|open to relocat/i.test(t)) return 'Yes';
     if (/background check|drug (test|screen)/i.test(t)) return 'Yes';
+    if (/how did you hear|where did you (hear|find)|referral source|source of (this )?application/i.test(t)) return 'LinkedIn';
     return null;
   }
   if (typeof window !== 'undefined') window.pjaDeterministicAnswer = pjaDeterministicAnswer;

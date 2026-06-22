@@ -100,6 +100,7 @@ module.exports = (t) => {
   t.eq(w.pjaDeterministicAnswer('Are you now or have you ever been a Penumbra employee?'), 'No', 'det: employed-here -> No');
   t.eq(w.pjaDeterministicAnswer('Do you now or have you ever worked for Pricewaterhouse Cooper (PwC)?'), 'No', 'det: PwC -> No');
   t.eq(w.pjaDeterministicAnswer('Are you at least 18 years of age?'), 'Yes', 'det: 18+ -> Yes');
+  t.eq(w.pjaDeterministicAnswer('How did you hear about us?'), 'LinkedIn', 'det: how-did-you-hear -> LinkedIn');
   t.eq(w.pjaDeterministicAnswer('What is the highest level of education you have completed?'), null, 'det: education -> null (AI handles)');
   t.eq(w.pjaDeterministicAnswer('Describe your experience with SPC'), null, 'det: open-ended -> null');
 
