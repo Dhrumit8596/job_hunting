@@ -490,10 +490,11 @@ Return ONLY valid JSON, no markdown:
     req.on('data', d => body += d);
     req.on('end', async () => {
       try {
-        const { questions, jobContext, profile } = JSON.parse(body);
+        const { questions, jobContext, profile, prefs } = JSON.parse(body);
         // questions: [{label, type, maxLength, options}]
         // jobContext: {title, company}
         // profile: stored pja_profile object (may be absent — use hardcoded fallback)
+        // prefs: high-level preference profile (pja_prefs) — comp/workMode/startDate/screening + factual answers
         if (!Array.isArray(questions) || questions.length === 0) {
           throw new Error('questions array required');
         }
@@ -505,6 +506,8 @@ Return ONLY valid JSON, no markdown:
 
         // Build dynamic profile fields, falling back to hardcoded the candidate defaults
         const p = profile || {};
+        const pf = prefs || {};
+        const fa = (prefs && prefs.factual) || {};
         const fullName      = [p.firstName, p.lastName].filter(Boolean).join(' ') || 'the candidate';
         const currentRole   = [p.currentTitle, p.currentCompany].filter(Boolean).join(' at ') || 'Senior Inspection Metrology Tech at a medical-device employer';
         const prevRole      = p.prevTitle && p.prevCompany
@@ -525,18 +528,41 @@ PROFILE:
 - Skills: ${skillsLine}
 - Does NOT have (flag as aspirational or "actively learning" if asked): FMEA, 8D, ISO 13485, optical metrology, supplier audits, Python, CAD
 - Visa: ${visaLine}
-- Location: ${locationLine} (willing to relocate in Bay Area)
+- Location: ${locationLine}
+
+PREFERENCES (use these for preference/logistics questions):
+- Compensation: ${pf.compensation || "answer 'competitive'/'negotiable'; do not give a low rate"}
+- Work mode: ${pf.workMode || 'open to onsite or hybrid'}
+- Relocation: ${pf.relocation || 'open to relocating'}
+- Availability/start: ${pf.startDate || 'available with standard notice'}
+- Consent stance: ${pf.screeningStance || 'consent to standard background/drug/data checks'}
+
+FACTUAL ANSWERS (use these EXACTLY for the matching question — do not contradict them):
+- Authorized to work in the US: ${fa.authorizedToWorkUS || 'Yes'}
+- Requires visa sponsorship (H-1B/etc.): ${fa.requiresSponsorship || 'No'}
+- Visa status: ${fa.visaStatus || 'TN visa (Canadian citizen)'}
+- Is a US citizen or permanent resident: ${fa.usCitizenOrPermanentResident || 'No'}
+- Is a "US person" for export-control/ITAR/EAR: ${fa.usPersonForExportControl || 'No'}
+- 18 or older: ${fa.over18 || 'Yes'}
+- Has security clearance: ${fa.securityClearance || 'No'}
+- Veteran status: ${fa.veteranStatus || 'Not a protected veteran'}
+- Disability: ${fa.disability || 'No'}
+- Gender: ${fa.gender || 'Female'}
+- Race/ethnicity: ${fa.ethnicity || 'Decline to self-identify'}
+- Years of experience: ${fa.yearsExperience || yearsExp}
+- HONEST GAPS: ${fa.honestGaps || 'Do NOT claim FMEA, 8D, ISO 13485, optical metrology, supplier audits, Python, or CAD — answer such requirements honestly (no / limited / willing to learn).'}
 
 ANSWERING RULES:
-1. Always write in first person ("I have…", "My experience includes…")
-2. For "years of experience" questions: answer with the numeric value only (e.g. "6") unless it is a text field, in which case write one short sentence
-3. For yes/no questions: answer with just "Yes" or "No" (with one brief reason if it is a textarea)
-4. For "describe your experience" or knowledge questions: write 2–4 sentences, specific to ${fullName}'s actual resume, mentioning named tools/standards she actually used (SPC, GMP, KLA tools, photolithography, clean room). Do NOT claim skills she lacks.
-5. For "are you open to / willing to" questions: answer "Yes" with a brief enthusiastic line
-6. For contract/temp work questions: answer "Yes, I am open to contract and contract-to-hire opportunities"
-7. Keep answers proportional to maxLength — if maxLength ≤ 100, use 1–2 sentences max; if ≤ 300, use 2–3 sentences; if > 300, up to 4 sentences
-8. Do NOT include filler phrases like "Great question" or "I would like to say"
-9. Return ONLY valid JSON — no markdown, no extra text`;
+1. First person ("I have…"). Be truthful — never claim a skill/credential ${fullName} lacks (see HONEST GAPS).
+2. "Years of experience" → numeric only (e.g. "6") for short fields; one sentence for text fields.
+3. Yes/No questions → exactly "Yes" or "No" (add one brief reason only in a textarea).
+4. Work-authorization / sponsorship / citizenship / US-person / export-control / clearance / age / veteran / disability / gender / ethnicity → use the FACTUAL ANSWERS above verbatim in meaning.
+5. Consent/agreement/certification questions (background check, drug test, data/GDPR, "I certify/agree/acknowledge") → answer affirmatively per the consent stance ("Yes"/"I agree"/"I certify").
+6. Salary/compensation → follow the Compensation preference (range/"competitive"/"negotiable"); never output a low hourly rate.
+7. "describe your experience"/knowledge → 2–4 sentences from her real resume (SPC, GMP, wafer inspection, metrology, photolithography, clean room). Do NOT invent.
+8. When options are provided, the answer MUST be copied exactly from one of the options.
+9. Keep proportional to maxLength. No filler. Return ONLY valid JSON.
+10. Confidence: ALWAYS "high" for consent/agreement/certification/acknowledgment questions, and for anything covered by the FACTUAL ANSWERS or PREFERENCES above (work-auth, sponsorship, citizenship, US-person/export-control, clearance, age, veteran, disability, gender, ethnicity, years, salary, relocation, availability) — these are policy/fact, NOT guesses, even when the question text is long legalese. Use "low" ONLY for open-ended experiential/knowledge questions you are genuinely unsure about.`;
 
         const questionList = questions.map((q, i) => {
           const parts = [`Q${i + 1}: "${q.label}"`];
@@ -555,7 +581,7 @@ ANSWERING RULES:
 `Job: ${title} at ${company}
 
 Answer each question below for the candidate's application. Return a JSON array with one object per question:
-[{"label":"<exact question label>","answer":"<your answer>"},...]
+[{"label":"<exact question label>","answer":"<your answer>","confidence":"high|low"},...]
 
 Questions:
 ${questionList}`;

@@ -1209,6 +1209,12 @@ function pjaFillCombobox(input, value, key) {
       match = opts.find(o => /not required|will not require|no.*will not/i.test(o.textContent));
     if (!match && key === 'workAuth' && isYes)
       match = opts.find(o => /authorized/i.test(o.textContent) && !/not authorized/i.test(o.textContent));
+    // Affirmative-consent fallback: "I agree"/"Yes"/"I certify"/"acknowledge"/"accept" should
+    // match whatever affirmative wording a consent/certification dropdown actually uses.
+    if (!match && /^(yes|i agree|agree|i certify|certify|i acknowledge|acknowledge|i accept|accept|i consent|consent|confirm)\b/i.test(lv)) {
+      match = opts.find(o => /\b(yes|agree|accept|acknowledge|certif|consent|confirm|i have read|i understand)\b/i.test(o.textContent) && !/\b(no|do not|don'?t|decline|disagree)\b/i.test(o.textContent));
+      if (!match && opts.length <= 2) match = opts.find(o => !/^\s*no\b|decline|do not|disagree/i.test(o.textContent.trim()));
+    }
     if (!match && lv.length > 3)
       match = opts.find(o => o.textContent.trim().toLowerCase().includes(lv));
     // State name → abbreviation (e.g. "California" → "CA")

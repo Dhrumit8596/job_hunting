@@ -1741,9 +1741,12 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   // msg.payload = { questions: [{label, type, maxLength, options}], jobContext: {title,company} }
   if (msg.type === 'ANSWER_QUESTIONS') {
     (async () => {
-      // Read profile from storage once — used by both dev-server path and API fallback
+      // Read profile + high-level prefs from storage once — used by both dev-server path and API fallback
       const profile = await new Promise(resolve =>
         chrome.storage.local.get('pja_profile', r => resolve(r.pja_profile || {}))
+      );
+      const prefs = await new Promise(resolve =>
+        chrome.storage.local.get('pja_prefs', r => resolve(r.pja_prefs || {}))
       );
 
       // Helper: persist AI-generated answers into pja_answers bank
@@ -1774,7 +1777,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
           const resp = await fetch(`${DEV_SERVER}/answer-questions`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ ...msg.payload, profile })
+            body: JSON.stringify({ ...msg.payload, profile, prefs })
           });
           if (!resp.ok) throw new Error(`Dev server ${resp.status}`);
           const result = await resp.json();

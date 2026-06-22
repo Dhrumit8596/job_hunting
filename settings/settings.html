@@ -141,6 +141,23 @@
     </div>
   </div>
 
+  <!-- Application Preferences (high-level; power the AI auto-answerer) -->
+  <div class="card">
+    <h2>Application Preferences</h2>
+    <p class="card-desc">A few high-level answers the AI uses to auto-fill screening questions across job applications. You won't be asked these per-application.</p>
+    <div class="field-grid">
+      <div class="form-group full"><label>Compensation</label><input id="pref-compensation" placeholder="Use posted range; otherwise 'competitive'"></div>
+      <div class="form-group full"><label>Work mode</label><input id="pref-workMode" placeholder="Open to onsite or hybrid"></div>
+      <div class="form-group full"><label>Relocation</label><input id="pref-relocation" placeholder="Willing to relocate anywhere in the US"></div>
+      <div class="form-group"><label>Availability / start</label><input id="pref-startDate" placeholder="~2 weeks"></div>
+      <div class="form-group full"><label>Consent stance</label><input id="pref-screeningStance" placeholder="Auto-consent to standard checks; answer factually"></div>
+    </div>
+    <div class="btn-row">
+      <button class="btn btn-primary" id="btn-save-prefs">Save Preferences</button>
+      <span class="status-msg" id="prefs-status"></span>
+    </div>
+  </div>
+
   <!-- Resume Upload -->
   <div class="card">
     <h2>Resume</h2>

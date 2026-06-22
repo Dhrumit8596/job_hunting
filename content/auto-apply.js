@@ -386,7 +386,7 @@ function pjaAutoCheckConsent() {
       || cb.getAttribute('aria-label')
       || cb.closest('label')?.textContent?.toLowerCase()
       || '';
-    if (/\bi (understand|acknowledge|agree|accept|confirm|consent)\b|i have read|terms and conditions|privacy policy|eeo|equal opportunity|background check consent|data.*processing|ai tool|automated/i.test(lbl)) {
+    if (/\bi (understand|acknowledge|agree|accept|confirm|consent|certify|attest|authorize)\b|i have read|certify that|to the best of my knowledge|terms and conditions|privacy policy|eeo|equal opportunity|background check consent|data.*(processing|privacy)|gdpr|ai tool|automated/i.test(lbl)) {
       cb.checked = true;
       cb.dispatchEvent(new Event('change', { bubbles: true }));
       cb.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
@@ -399,9 +399,11 @@ function pjaAutoCheckConsent() {
 // because they are type=number or unlabeled comboboxes.
 function pjaFillRequiredComboboxFallback(profile, answers) {
   const visible = el => !!el.offsetParent;
+  // Include ALL visible empty role=combobox inputs (not just [required] ones) — Greenhouse/Lever
+  // often mark required on a wrapper, not the input. Filling is still gated below by label
+  // patterns / answer-bank, so unmatched comboboxes (country, "how did you hear") are left alone.
   const combos = Array.from(document.querySelectorAll(
-    'input[role=combobox][required], input[role=combobox][aria-required="true"], ' +
-    'input[required][list], input[aria-required="true"][list]'
+    'input[role=combobox], input[required][list], input[aria-required="true"][list]'
   )).filter(el => visible(el) && !(el.value && el.value.trim()));
 
   for (const el of combos) {

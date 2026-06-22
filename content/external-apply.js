@@ -270,8 +270,14 @@
             if (typeof pjaFillRequiredRadioFallback === 'function') pjaFillRequiredRadioFallback();
             if (typeof pjaFillRequiredSelectFallback === 'function') pjaFillRequiredSelectFallback();
             if (typeof pjaAutoCheckConsent === 'function') pjaAutoCheckConsent();
+            if (typeof pjaFillRequiredComboboxFallback === 'function') pjaFillRequiredComboboxFallback(profile, answers);
             await sleep(500);
-            const missing2 = findMissingRequired();
+            let missing2 = findMissingRequired();
+            if (missing2.length) {
+              await pjaAnswerRequiredViaAI(job);
+              await sleep(600);
+              missing2 = findMissingRequired();
+            }
             if (missing2.length) {
               await saveMissingQuestions(missing2, job);
               await recordResult(job, { success: false, reason: 'missing_required', fields: missing2.map(m => m.label) });
@@ -549,8 +555,14 @@
         pjaFillRequiredComboboxFallback(profile, answers);
         await sleep(400);
         hardMissing = findMissingRequired().filter(m => m.type !== 'wd_selectinput');
-        if (hardMissing.length) { await addDbg('[ext] step-loop break: hardMissing(after refill)=' + hardMissing.map(m=>m.label).join('|')); break; }
-        await addDbg('[ext] re-fill cleared hardMissing, continuing');
+        // Still-missing required fields → answer them with AI (profile + resume + prefs), then re-check.
+        if (hardMissing.length) {
+          await pjaAnswerRequiredViaAI(job);
+          await sleep(600);
+          hardMissing = findMissingRequired().filter(m => m.type !== 'wd_selectinput');
+        }
+        if (hardMissing.length) { await addDbg('[ext] step-loop break: hardMissing(after AI)=' + hardMissing.map(m=>m.label).join('|')); break; }
+        await addDbg('[ext] re-fill+AI cleared hardMissing, continuing');
       }
       // If WD selectinput fields are missing, note the step text to detect if Workday blocks us.
       const stepTextBefore = (document.body.innerText.match(/current step (\d+)/i)?.[1] || '');
@@ -811,8 +823,15 @@
       arr.push('[ext] pre-check aids: ' + wdAids.slice(0, 200));
       chrome.storage.local.set({ pja_dbg: arr }, r);
     }));
-    const missing = findMissingRequired();
-    const hardMissing = missing.filter(m => m.type !== 'wd_selectinput');
+    let missing = findMissingRequired();
+    let hardMissing = missing.filter(m => m.type !== 'wd_selectinput');
+    // Answer any still-missing required fields with AI (profile + resume + prefs), then re-check.
+    if (hardMissing.length) {
+      await pjaAnswerRequiredViaAI(job);
+      await sleep(600);
+      missing = findMissingRequired();
+      hardMissing = missing.filter(m => m.type !== 'wd_selectinput');
+    }
     if (hardMissing.length) {
       console.log('PJA ext-apply: missing_required, fields:', hardMissing.map(m => m.label).join('; '));
       sessionStorage.setItem('pja_last_action', 'recordResult:missing_required:' + job.company);
@@ -1945,6 +1964,130 @@
     }
 
     return missing;
+  }
+
+  // PURE: pick the AI answer for a field label. Matches by normalized label and gates on
+  // confidence — returns the trimmed answer string, or null (no match / empty / low-confidence,
+  // so the field stays unfilled and surfaces as missing rather than a guessed value).
+  // Policy/factual questions (consent, certification, work-auth, sponsorship, citizenship,
+  // EEO, relocation, etc.) are pref-driven answers we always want applied — do NOT gate them
+  // on the model's confidence (it hedges on long legalese). Confidence gating applies only to
+  // open-ended experiential/knowledge questions, where a low-confidence guess is undesirable.
+  // Decide the value to apply from a single AI answer object for `label`.
+  function pjaAnswerValue(label, a) {
+    if (!a || a.answer == null) return null;
+    const ans = String(a.answer).trim();
+    if (!ans) return null;
+    const isPolicy = /consent|certif|acknowledge|\bi agree\b|terms|gdpr|data (processing|privacy|protection)|authoriz|eligible to work|legally (authorized|entitled|able)|right to work|require.*sponsor|sponsorship|\bcitizen|permanent resident|export control|\bitar\b|\bear\b|clearance|18 (years|or older)|over 18|veteran|disab|gender|\bsex\b|ethnic|\brace\b|hispanic|reloca|background check|drug (test|screen|screening)|willing to/i.test(label || '');
+    if (isPolicy) return ans;                                  // pref-driven → always apply
+    if (String(a.confidence).toLowerCase() === 'low') return null; // experiential guess → skip
+    return ans;
+  }
+  // Label-keyed lookup (used by unit tests + as the preferred match).
+  function pjaSelectAiAnswer(label, aiAnswers) {
+    const norm = s => (s || '').toLowerCase().replace(/\s+/g, ' ').trim();
+    const want = norm(label);
+    return pjaAnswerValue(label, (aiAnswers || []).find(x => norm(x.label) === want));
+  }
+  if (typeof window !== 'undefined') { window.pjaSelectAiAnswer = pjaSelectAiAnswer; window.pjaAnswerValue = pjaAnswerValue; }
+
+  // Collect required-but-empty answerable fields WITH element refs + enriched options,
+  // so they can be routed to the AI answerer and the answers applied to the right control.
+  function collectRequiredEmptyFields() {
+    const out = [];
+    const seen = new Set();
+    for (const el of pjaQueryAllExt(
+      'input[required]:not([type=hidden]):not([type=file]):not([type=checkbox]):not([type=radio]),' +
+      'select[required], textarea[required],' +
+      '[aria-required="true"]:not([type=hidden]):not([type=file])'
+    )) {
+      if (!el.offsetParent && el.getBoundingClientRect().width === 0) continue;
+      const tag = el.tagName.toLowerCase();
+      const role = (el.getAttribute('role') || '').toLowerCase();
+      if (!['input','select','textarea'].includes(tag) && !['combobox','listbox','textbox'].includes(role)) continue;
+      const container = el.closest('[class*="upload"],[class*="resume"],[class*="file-input"],[class*="attach"]');
+      if (container && container.querySelector('input[type="file"]')) continue;
+      if (el.getAttribute('data-uxi-widget-type') === 'selectinput') continue; // WD typeahead handled elsewhere
+      let val = (el.value || '').trim();
+      if (!val && role === 'combobox') {
+        const rs = el.closest('[class*="select__container"],[class*="select "]') || el.parentElement?.parentElement?.parentElement;
+        const sv = rs?.querySelector('[class*="single-value"],[class*="singleValue"]');
+        if (sv?.textContent?.trim()) val = sv.textContent.trim();
+      }
+      if (val && !/^select( an option| \.\.\.|\.\.\.)?$/i.test(val)) continue;
+      const label = getLabelFor(el);
+      if (!label || /^resume|^cv\b|curriculum vitae/i.test(label.trim()) || seen.has(label.toLowerCase())) continue;
+      seen.add(label.toLowerCase());
+      out.push({
+        el, label,
+        type: el.tagName === 'SELECT' ? 'select'
+            : role === 'combobox' ? 'combobox'
+            : el.tagName === 'TEXTAREA' ? 'textarea' : 'text',
+        options: el.tagName === 'SELECT'
+          ? Array.from(el.options).map(o => o.text.trim()).filter(t => t && !/^select/i.test(t)) : [],
+        maxLength: parseInt(el.getAttribute('maxlength') || '0', 10) || 0,
+      });
+    }
+    // Required radio groups (collect option labels + the group's radios)
+    const groups = {};
+    for (const r of pjaQueryAllExt('input[type=radio][required], input[type=radio][aria-required="true"]')) {
+      if (!r.offsetParent) continue;
+      const name = r.name || r.getAttribute('aria-labelledby') || '';
+      if (!name || groups[name]) continue;
+      const root = r.getRootNode() || document;
+      const radios = Array.from(root.querySelectorAll(`input[type=radio][name="${CSS.escape(name)}"]`));
+      if (radios.some(x => x.checked)) { groups[name] = true; continue; }
+      groups[name] = true;
+      const label = getLabelFor(r) || name;
+      if (seen.has(label.toLowerCase())) continue;
+      seen.add(label.toLowerCase());
+      out.push({ el: r, radios, label, type: 'radio',
+        options: radios.map(x => getLabelFor(x) || x.value).filter(Boolean), maxLength: 0 });
+    }
+    return out;
+  }
+
+  // Route still-empty required fields to the AI answerer (background ANSWER_QUESTIONS ->
+  // dev-server /answer-questions using profile + resume + pja_prefs) and apply the answers.
+  // Honest by construction (prompt forbids fabricating skills she lacks). Low-confidence
+  // answers are left unfilled (so they surface as missing rather than guessed).
+  async function pjaAnswerRequiredViaAI(job) {
+    const fields = collectRequiredEmptyFields();
+    if (!fields.length) return { applied: 0, asked: 0 };
+    const questions = fields.map(f => ({ label: f.label, type: f.type, options: f.options || [], maxLength: f.maxLength || 0 }));
+    const dbg = m => new Promise(r => chrome.storage.local.get('pja_dbg', d => { const a=(d.pja_dbg||[]).slice(-19); a.push(m); chrome.storage.local.set({pja_dbg:a}, r); }));
+    await dbg('[ai] asking ' + questions.length + ' req Q: ' + questions.map(q=>q.label.slice(0,22)).join(' | ').slice(0,150));
+    const resp = await new Promise(resolve => {
+      try {
+        chrome.runtime.sendMessage({ type: 'ANSWER_QUESTIONS', payload: { questions, jobContext: { title: job.title || '', company: job.company || '' } } },
+          r => { if (chrome.runtime.lastError) resolve(null); else resolve(r); });
+      } catch (_) { resolve(null); }
+    });
+    if (!resp || !resp.success || !Array.isArray(resp.answers)) {
+      await dbg('[ai] no answers: ' + (resp && resp.error || 'null'));
+      return { applied: 0, asked: questions.length };
+    }
+    const norm = s => (s || '').toLowerCase().replace(/\s+/g, ' ').trim();
+    let applied = 0, low = 0;
+    for (let i = 0; i < fields.length; i++) {
+      const f = fields[i];
+      // Prefer exact label match; fall back to positional (dev-server returns answers in
+      // question order — robust when the model reworords/truncates long legalese labels).
+      const a = resp.answers.find(x => norm(x.label) === norm(f.label)) || resp.answers[i];
+      const ans = pjaAnswerValue(f.label, a);
+      if (!ans) { low++; continue; }
+      try {
+        if (f.type === 'select' && typeof pjaFillSelect === 'function') pjaFillSelect(f.el, ans);
+        else if (f.type === 'combobox' && typeof pjaFillCombobox === 'function') pjaFillCombobox(f.el, ans);
+        else if (f.type === 'radio' && typeof pjaSelectRadio === 'function') pjaSelectRadio(f.radios || [], ans);
+        else if (typeof pjaFillTextViaFiber === 'function') pjaFillTextViaFiber(f.el, ans);
+        else if (typeof pjaSetNative === 'function') pjaSetNative(f.el, ans);
+        applied++;
+      } catch (_) {}
+      await sleep(250);
+    }
+    await dbg('[ai] applied=' + applied + ' low=' + low + ' of ' + questions.length);
+    return { applied, asked: questions.length, low };
   }
 
   function getLabelFor(el) {

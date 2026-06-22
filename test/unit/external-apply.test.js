@@ -62,4 +62,30 @@ module.exports = (t) => {
   // --- pjaPickAnswerOption: plain includes match (case-insensitive) ---
   t.eq(w.pjaPickAnswerOption('No', ['Yes', 'No'], P), 'No', 'plain Yes/No');
   t.eq(w.pjaPickAnswerOption('I AM NOT A VETERAN', ['I am a protected veteran', 'I AM NOT A VETERAN'], P), 'I AM NOT A VETERAN', 'plain caps match');
+
+  // --- pjaSelectAiAnswer: label-match + confidence gating (inline AI answerer) ---
+  const ai = [
+    { label: 'Are you legally authorized to work in the US?', answer: 'Yes', confidence: 'high' },
+    { label: 'Highest level of education', answer: 'Bachelor', confidence: 'low' },
+    { label: 'Desired salary', answer: '', confidence: 'high' },
+    { label: 'Willing to relocate?', answer: '  Yes  ', confidence: 'high' },
+  ];
+  t.eq(w.pjaSelectAiAnswer('are you legally authorized to work in the us?', ai), 'Yes', 'AI: normalized label match');
+  t.eq(w.pjaSelectAiAnswer('Are You Legally Authorized To Work In The US?', ai), 'Yes', 'AI: case-insensitive match');
+  t.eq(w.pjaSelectAiAnswer('Highest level of education', ai), null, 'AI: low-confidence EXPERIENTIAL -> null (left unfilled)');
+  // policy/consent/factual questions bypass confidence gating (pref-driven, always applied)
+  const aiPolicy = [
+    { label: 'I certify that the information provided is correct', answer: 'I agree', confidence: 'low' },
+    { label: 'Are you legally authorized to work in the country?', answer: 'Yes', confidence: 'low' },
+    { label: 'GDPR data processing consent', answer: 'I agree', confidence: 'low' },
+    { label: 'Describe your hardest debugging challenge', answer: 'Once I…', confidence: 'low' },
+  ];
+  t.eq(w.pjaSelectAiAnswer('I certify that the information provided is correct', aiPolicy), 'I agree', 'AI: low-conf CERTIFICATION still applied (policy)');
+  t.eq(w.pjaSelectAiAnswer('Are you legally authorized to work in the country?', aiPolicy), 'Yes', 'AI: low-conf WORK-AUTH still applied (policy)');
+  t.eq(w.pjaSelectAiAnswer('GDPR data processing consent', aiPolicy), 'I agree', 'AI: low-conf GDPR consent still applied (policy)');
+  t.eq(w.pjaSelectAiAnswer('Describe your hardest debugging challenge', aiPolicy), null, 'AI: low-conf EXPERIENTIAL still gated -> null');
+  t.eq(w.pjaSelectAiAnswer('Desired salary', ai), null, 'AI: empty answer -> null');
+  t.eq(w.pjaSelectAiAnswer('Not asked', ai), null, 'AI: no matching answer -> null');
+  t.eq(w.pjaSelectAiAnswer('Willing to relocate?', ai), 'Yes', 'AI: trims whitespace');
+  t.eq(w.pjaSelectAiAnswer('x', []), null, 'AI: empty answer set -> null');
 };

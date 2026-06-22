@@ -89,6 +89,23 @@ document.getElementById('btn-save-profile').addEventListener('click', () => {
   });
 });
 
+// ── Application Preferences (pja_prefs) ─────────────────────────────────────────
+const PREF_FIELDS = ['compensation', 'workMode', 'relocation', 'startDate', 'screeningStance'];
+chrome.storage.local.get('pja_prefs', r => {
+  const prefs = r.pja_prefs || {};
+  PREF_FIELDS.forEach(k => { const el = document.getElementById('pref-' + k); if (el && prefs[k]) el.value = prefs[k]; });
+});
+const btnSavePrefs = document.getElementById('btn-save-prefs');
+if (btnSavePrefs) btnSavePrefs.addEventListener('click', () => {
+  chrome.storage.local.get('pja_prefs', r => {
+    const prefs = r.pja_prefs || {};
+    PREF_FIELDS.forEach(k => { const el = document.getElementById('pref-' + k); if (el) prefs[k] = el.value.trim(); });
+    prefs.updatedAt = new Date().toISOString().slice(0, 10);
+    chrome.storage.local.set({ pja_prefs: prefs }, () =>
+      showStatus(document.getElementById('prefs-status'), '✓ Preferences saved', 'success'));
+  });
+});
+
 // ── Resume Upload ─────────────────────────────────────────────────────────────
 const resumeStatus  = document.getElementById('resume-status');
 const resumeCurrent = document.getElementById('resume-current');
