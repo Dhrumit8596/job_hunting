@@ -83,7 +83,15 @@
           queue.results.applied.push({ ...queue.jobs[myIdx], appliedAt: Date.now(), note: 'pre-nav-handled' });
           queue.currentIndex = myIdx + 1;
           if (queue.currentIndex >= queue.jobs.length) queue.status = 'done';
-          chrome.storage.local.set({ pja_ext_queue: queue }, () => navigateBack(job));
+          // Durable-log fix: this submit-navigated success never ran recordResult's log write,
+          // so persist it here too (else sourcing dedupe + the confirmed count under-count).
+          chrome.storage.local.get('pja_applied_log', ld => {
+            const log = Array.isArray(ld.pja_applied_log) ? ld.pja_applied_log : [];
+            const nz = s => (s || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+            const k = nz(job.company) + '::' + nz(job.title);
+            if (!log.some(e => nz(e.company) + '::' + nz(e.title) === k)) log.push({ company: job.company, title: job.title, appliedAt: Date.now() });
+            chrome.storage.local.set({ pja_applied_log: log, pja_ext_queue: queue }, () => navigateBack(job));
+          });
         } else if (queue.status === 'applying') {
           console.log('PJA ext-apply: same-run handled, queue already advanced, calling navigateBack');
           navigateBack(job);

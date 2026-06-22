@@ -64,4 +64,18 @@ module.exports = (t) => {
   const w2 = load('<!DOCTYPE html><html><body><div>no modal here</div></body></html>');
   t.eq(w2.__pjaGetCurrentModal(), null, 'EA: no modal → null');
   t.eq(w2.__pjaModalBtns().length, 0, 'EA: no modal → no buttons');
+
+  // --- mid-refresh resilience: modal-state classification (double-submit guard) ---
+  const st1 = w.__pjaEasyApplyState(modal);
+  t.eq(st1.success, false, 'EA-state: questions step is not success');
+  // submit-ready step
+  const wSub = load('<!DOCTYPE html><html><body><div class="jobs-easy-apply-modal" role="dialog"><h3>Review your application</h3><button>Submit application</button></div></body></html>');
+  const stSub = wSub.__pjaEasyApplyState(wSub.__pjaGetCurrentModal());
+  t.eq(stSub.submitReady, true, 'EA-state: detects submit-ready');
+  t.eq(stSub.success, false, 'EA-state: submit-ready is not success');
+  // post-submit confirmation (mid-refresh case) → success, so we DON'T re-submit
+  const wOk = load('<!DOCTYPE html><html><body><div class="jobs-easy-apply-modal" role="dialog"><h3>Application sent</h3><p>Your application was sent to Acme</p><button>Done</button></div></body></html>');
+  const stOk = wOk.__pjaEasyApplyState(wOk.__pjaGetCurrentModal());
+  t.eq(stOk.success, true, 'EA-state: post-submit confirmation → success (double-submit guard)');
+  t.eq(w2.__pjaEasyApplyState(null).open, false, 'EA-state: no modal → not open');
 };

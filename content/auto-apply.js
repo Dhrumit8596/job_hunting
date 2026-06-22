@@ -62,6 +62,21 @@ function pjaModalBtns() {
     .map(b => b.textContent.trim()).filter(Boolean);
 }
 
+// Classify the current Easy Apply modal state — used for mid-refresh resilience: if LinkedIn
+// reloads mid-flow and the modal comes back showing a post-submit confirmation, we must record
+// success and NOT click Submit again (double-submit guard). Pure-ish (reads the given modal root).
+function pjaEasyApplyState(modal) {
+  if (!modal || !modal.root) return { open: false, success: false, submitReady: false, heading: '' };
+  const root = modal.root;
+  const heading = (root.querySelector('h3, h2')?.textContent || '').trim();
+  const text = (root.textContent || '');
+  const btns = Array.from(root.querySelectorAll('button')).map(b => (b.textContent || '').trim());
+  const success = /application sent|your application was sent|application submitted|done!|premium career/i.test(text)
+    || /sent|submitted|success|thank/i.test(heading);
+  const submitReady = btns.some(b => /^submit application$/i.test(b));
+  return { open: true, success, submitReady, heading, buttons: btns };
+}
+
 function pjaClickInModal(label) {
   const m = pjaGetCurrentModal();
   if (!m) return false;
@@ -473,6 +488,10 @@ async function pjaAutoApplyOne(job, profile, answers, onStatus) {
     const modal = pjaGetCurrentModal();
     if (!modal) return { success: false, reason: 'modal_closed' };
 
+    // Mid-refresh double-submit guard (same as pjaApplyOnCurrentPage).
+    const eaSt = pjaEasyApplyState(modal);
+    if (eaSt.success) { pjaDismissModal(); return { success: true, reason: 'applied_resumed' }; }
+
     const heading = pjaModalHeading() || `Step ${step + 1}`;
     onStatus(`${title}: ${heading}…`);
 
@@ -823,6 +842,11 @@ async function pjaApplyOnCurrentPage(job, profile, answers, onStatus) {
     const modal = pjaGetCurrentModal();
     if (!modal) return { success: false, reason: 'modal_closed' };
 
+    // Mid-refresh double-submit guard: if the modal reloaded into a post-submit confirmation,
+    // record success WITHOUT clicking Submit again.
+    const eaState = pjaEasyApplyState(modal);
+    if (eaState.success) { pjaTrace('resume: success state detected, not re-submitting'); pjaDismissModal(); return { success: true, reason: 'applied_resumed' }; }
+
     const heading = pjaModalHeading() || `Step ${step + 1}`;
     pjaTrace('step' + step + ' heading=' + heading.slice(0, 25));
     onStatus(`${title}: ${heading}…`);
@@ -1036,3 +1060,4 @@ window.__pjaExternalApplyOnCurrentPage = pjaExternalApplyOnCurrentPage;
 window.__pjaModalHeading               = pjaModalHeading;
 window.__pjaModalBtns                  = pjaModalBtns;
 window.__pjaEmptyRequiredFields        = pjaEmptyRequiredFields;
+window.__pjaEasyApplyState             = pjaEasyApplyState;
