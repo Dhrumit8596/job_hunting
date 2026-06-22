@@ -90,6 +90,12 @@ module.exports = (t) => {
   const levJob = lever.normalize({ id: 'abc', text: 'Equipment Engineer', categories: { location: 'Alameda, CA' }, hostedUrl: 'https://jobs.lever.co/acme/abc' }, { name: 'Acme', slug: 'acme' });
   t.eq(levJob.applyUrl, 'https://jobs.lever.co/acme/abc/apply', 'lever.normalize: applyUrl gets /apply');
   t.eq(levJob.location, 'Alameda, CA', 'lever.normalize: location');
+  const linkedin = R('adapters/linkedin');
+  const liJob = linkedin.normalize({ jobId: '4430362420', title: 'Quality Engineer', company: 'Akkodis', location: 'Torrance, CA', isEasyApply: true }, { name: 'LinkedIn' });
+  t.eq(liJob.id, '4430362420', 'linkedin.normalize: jobId');
+  t.eq(liJob.applyUrl, 'https://www.linkedin.com/jobs/view/4430362420/', 'linkedin.normalize: view URL');
+  t.eq(liJob.ats, 'linkedin', 'linkedin.normalize: ats');
+  t.eq(liJob.isEasyApply, true, 'linkedin.normalize: easyApply flag');
 
   // --- tnAdjustScore: down-weight gray-TN senior titles ---
   t.eq(tnAdjustScore('Senior Quality Engineer', 88), 88, 'tnAdjust: normal title unchanged');

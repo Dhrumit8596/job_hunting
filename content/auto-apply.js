@@ -1032,3 +1032,7 @@ window.__pjaAutoApplyBatch             = pjaAutoApplyBatch;
 window.__pjaAutoSearchURL              = PJA_AUTO_SEARCH_URL;
 window.__pjaApplyOnCurrentPage         = pjaApplyOnCurrentPage;
 window.__pjaExternalApplyOnCurrentPage = pjaExternalApplyOnCurrentPage;
+// Testable Easy Apply modal helpers (used by unit tests + internally).
+window.__pjaModalHeading               = pjaModalHeading;
+window.__pjaModalBtns                  = pjaModalBtns;
+window.__pjaEmptyRequiredFields        = pjaEmptyRequiredFields;

@@ -4,9 +4,10 @@
 const greenhouse = require('./greenhouse');
 const lever = require('./lever');
 const workday = require('./workday');
-// Phase 2: linkedin (via the extension scraper), icims, etc.
+const linkedin = require('./linkedin');
+// Phase 2: icims, etc.
 
-const ADAPTERS = { greenhouse, lever, workday };
+const ADAPTERS = { greenhouse, lever, workday, linkedin };
 
 function getAdapter(ats) {
   return ADAPTERS[String(ats || '').toLowerCase()] || null;
