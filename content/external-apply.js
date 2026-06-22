@@ -143,6 +143,14 @@
   async function runExternalApply(job, rawAnswers) {
     try {
     sessionStorage.setItem('pja_last_action', 'runExternalApply:' + job.company);
+    // Stall watchdog: if this job neither submits nor skips within 4 min, force-advance the
+    // queue so one hung page can't block an unattended batch. On normal completion navigateBack
+    // navigates away and this timer dies with the page.
+    setTimeout(() => {
+      try { sessionStorage.setItem('pja_last_action', 'watchdog_timeout:' + job.company); } catch (_) {}
+      try { recordResult(job, { success: false, reason: 'watchdog_timeout' }).then(() => navigateBack(job), () => navigateBack(job)); }
+      catch (_) { try { navigateBack(job); } catch (__) {} }
+    }, 240000);
     await sleep(1500); // let dynamic forms settle
 
     // Fall back to stored profile/answers if the job object doesn't include them
