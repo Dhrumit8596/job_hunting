@@ -72,7 +72,7 @@ module.exports = (t) => {
   ];
   t.eq(w.pjaSelectAiAnswer('are you legally authorized to work in the us?', ai), 'Yes', 'AI: normalized label match');
   t.eq(w.pjaSelectAiAnswer('Are You Legally Authorized To Work In The US?', ai), 'Yes', 'AI: case-insensitive match');
-  t.eq(w.pjaSelectAiAnswer('Highest level of education', ai), null, 'AI: low-confidence EXPERIENTIAL -> null (left unfilled)');
+  t.eq(w.pjaSelectAiAnswer('Highest level of education', ai), 'Bachelor', 'AI: education is policy -> applied even at low confidence');
   // policy/consent/factual questions bypass confidence gating (pref-driven, always applied)
   const aiPolicy = [
     { label: 'I certify that the information provided is correct', answer: 'I agree', confidence: 'low' },
@@ -88,4 +88,16 @@ module.exports = (t) => {
   t.eq(w.pjaSelectAiAnswer('Not asked', ai), null, 'AI: no matching answer -> null');
   t.eq(w.pjaSelectAiAnswer('Willing to relocate?', ai), 'Yes', 'AI: trims whitespace');
   t.eq(w.pjaSelectAiAnswer('x', []), null, 'AI: empty answer set -> null');
+  // education/diploma is policy (factual from her degree) — applied even at low confidence
+  t.eq(w.pjaSelectAiAnswer('Do you have at least a high school diploma or GED?',
+    [{ label: 'Do you have at least a high school diploma or GED?', answer: 'Yes', confidence: 'low' }]),
+    'Yes', 'AI: low-conf DIPLOMA still applied (policy)');
+
+  // --- pjaIsGarbageLabel: never send junk labels to the AI ---
+  t.eq(w.pjaIsGarbageLabel('yes'), true, 'garbage: "yes"');
+  t.eq(w.pjaIsGarbageLabel('No'), true, 'garbage: "No"');
+  t.eq(w.pjaIsGarbageLabel('Select...'), true, 'garbage: "Select..."');
+  t.eq(w.pjaIsGarbageLabel('--'), true, 'garbage: punctuation only');
+  t.eq(w.pjaIsGarbageLabel('Are you legally authorized to work?'), false, 'real question kept');
+  t.eq(w.pjaIsGarbageLabel('Highest level of education'), false, 'real label kept');
 };

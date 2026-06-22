@@ -1978,7 +1978,7 @@
     if (!a || a.answer == null) return null;
     const ans = String(a.answer).trim();
     if (!ans) return null;
-    const isPolicy = /consent|certif|acknowledge|\bi agree\b|terms|gdpr|data (processing|privacy|protection)|authoriz|eligible to work|legally (authorized|entitled|able)|right to work|require.*sponsor|sponsorship|\bcitizen|permanent resident|export control|\bitar\b|\bear\b|clearance|18 (years|or older)|over 18|veteran|disab|gender|\bsex\b|ethnic|\brace\b|hispanic|reloca|background check|drug (test|screen|screening)|willing to/i.test(label || '');
+    const isPolicy = /consent|certif|acknowledge|\bi agree\b|terms|gdpr|data (processing|privacy|protection)|authoriz|eligible to work|legally (authorized|entitled|able)|right to work|require.*sponsor|sponsorship|\bcitizen|permanent resident|export control|\bitar\b|\bear\b|clearance|18 (years|or older)|over 18|veteran|disab|gender|\bsex\b|ethnic|\brace\b|hispanic|reloca|background check|drug (test|screen|screening)|willing to|diploma|\bged\b|\bdegree\b|education|high school|bachelor/i.test(label || '');
     if (isPolicy) return ans;                                  // pref-driven → always apply
     if (String(a.confidence).toLowerCase() === 'low') return null; // experiential guess → skip
     return ans;
@@ -1990,6 +1990,16 @@
     return pjaAnswerValue(label, (aiAnswers || []).find(x => norm(x.label) === want));
   }
   if (typeof window !== 'undefined') { window.pjaSelectAiAnswer = pjaSelectAiAnswer; window.pjaAnswerValue = pjaAnswerValue; }
+
+  // A label too short/garbage to be a real question (e.g. "yes", a stray radio-option label,
+  // a bare placeholder). Sending these to the AI confuses it into returning prose, not JSON.
+  function pjaIsGarbageLabel(label) {
+    const nl = (label || '').trim().toLowerCase();
+    if (/^(yes|no|n\/a|na|true|false|select|select\.\.\.|select an option|choose|--|\.\.\.|other)$/.test(nl)) return true;
+    if (nl.replace(/[^a-z0-9]/g, '').length < 3) return true; // essentially no content
+    return false;
+  }
+  if (typeof window !== 'undefined') window.pjaIsGarbageLabel = pjaIsGarbageLabel;
 
   // Collect required-but-empty answerable fields WITH element refs + enriched options,
   // so they can be routed to the AI answerer and the answers applied to the right control.
@@ -2016,7 +2026,7 @@
       }
       if (val && !/^select( an option| \.\.\.|\.\.\.)?$/i.test(val)) continue;
       const label = getLabelFor(el);
-      if (!label || /^resume|^cv\b|curriculum vitae/i.test(label.trim()) || seen.has(label.toLowerCase())) continue;
+      if (!label || /^resume|^cv\b|curriculum vitae/i.test(label.trim()) || pjaIsGarbageLabel(label) || seen.has(label.toLowerCase())) continue;
       seen.add(label.toLowerCase());
       out.push({
         el, label,
@@ -2039,7 +2049,7 @@
       if (radios.some(x => x.checked)) { groups[name] = true; continue; }
       groups[name] = true;
       const label = getLabelFor(r) || name;
-      if (seen.has(label.toLowerCase())) continue;
+      if (pjaIsGarbageLabel(label) || seen.has(label.toLowerCase())) continue;
       seen.add(label.toLowerCase());
       out.push({ el: r, radios, label, type: 'radio',
         options: radios.map(x => getLabelFor(x) || x.value).filter(Boolean), maxLength: 0 });
@@ -2091,6 +2101,15 @@
   }
 
   function getLabelFor(el) {
+    // Lever custom-question (cards[uuid][fieldN]): the real question is the card's
+    // .application-label, not the radio/checkbox option's own "Yes"/"No" label. Each
+    // sub-field has its own .application-question ancestor, so this stays distinct per field.
+    const aq = el.closest && el.closest('.application-question');
+    if (aq) {
+      const ql = aq.querySelector('.application-label, .text');
+      const qt = ql && ql.textContent.trim();
+      if (qt) return qt.replace(/[✱*]+\s*$/, '').trim();
+    }
     if (typeof pjaGetLabel === 'function') return pjaGetLabel(el);
     if (el.id) {
       const lbl = document.querySelector(`label[for="${CSS.escape(el.id)}"]`);

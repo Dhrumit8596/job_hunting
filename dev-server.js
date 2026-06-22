@@ -561,7 +561,7 @@ ANSWERING RULES:
 6. Salary/compensation → follow the Compensation preference (range/"competitive"/"negotiable"); never output a low hourly rate.
 7. "describe your experience"/knowledge → 2–4 sentences from her real resume (SPC, GMP, wafer inspection, metrology, photolithography, clean room). Do NOT invent.
 8. When options are provided, the answer MUST be copied exactly from one of the options.
-9. Keep proportional to maxLength. No filler. Return ONLY valid JSON.
+9. Keep proportional to maxLength. No filler. Output ONLY the JSON array — one object per question, in order. NEVER ask for clarification or write prose: if a question is unclear/malformed, still include it with your best reasonable answer and confidence "low".
 10. Confidence: ALWAYS "high" for consent/agreement/certification/acknowledgment questions, and for anything covered by the FACTUAL ANSWERS or PREFERENCES above (work-auth, sponsorship, citizenship, US-person/export-control, clearance, age, veteran, disability, gender, ethnicity, years, salary, relocation, availability) — these are policy/fact, NOT guesses, even when the question text is long legalese. Use "low" ONLY for open-ended experiential/knowledge questions you are genuinely unsure about.`;
 
         const questionList = questions.map((q, i) => {
@@ -589,8 +589,15 @@ ${questionList}`;
         const raw = await runClaudeWithSystemPrompt(ANSWER_SYSTEM_PROMPT, userPrompt);
         const start = raw.indexOf('[');
         const end   = raw.lastIndexOf(']');
-        if (start === -1 || end === -1) throw new Error('No JSON array in response: ' + raw.slice(0, 120));
-        const answers = JSON.parse(raw.slice(start, end + 1));
+        let answers = [];
+        if (start !== -1 && end !== -1) {
+          try { answers = JSON.parse(raw.slice(start, end + 1)); } catch (_) { answers = []; }
+        }
+        // Resilient: if the model returned prose instead of JSON, respond success with no
+        // answers (the caller leaves those fields unfilled) rather than erroring — a 500 makes
+        // background.js fall back to the (often unconfigured) direct API path.
+        if (!Array.isArray(answers)) answers = [];
+        if (!answers.length) console.log(`(no parseable answers; raw="${raw.slice(0, 80).replace(/\n/g, ' ')}")`);
 
         console.log(`done (${Date.now() - t0}ms) answered=${answers.length}`);
         res.writeHead(200, CORS);
