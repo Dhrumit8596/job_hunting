@@ -360,6 +360,46 @@
       "ats": "greenhouse",
       "slug": "freenome",
       "name": "Freenome"
+    },
+    {
+      "ats": "greenhouse",
+      "slug": "harbingermotors",
+      "name": "Harbinger"
+    },
+    {
+      "ats": "greenhouse",
+      "slug": "altoslabs",
+      "name": "Altos Labs"
+    },
+    {
+      "ats": "greenhouse",
+      "slug": "xometry",
+      "name": "Xometry"
+    },
+    {
+      "ats": "greenhouse",
+      "slug": "skyryse",
+      "name": "placeholder7"
+    },
+    {
+      "ats": "greenhouse",
+      "slug": "glydways",
+      "name": "Glydways"
+    },
+    {
+      "ats": "greenhouse",
+      "slug": "fictiv",
+      "name": "Fictiv"
+    },
+    {
+      "ats": "greenhouse",
+      "slug": "locusrobotics",
+      "name": "Locus Robotics"
+    },
+    {
+      "ats": "greenhouse",
+      "slug": "markforged",
+      "name": "Markforged"
     }
   ]
 }

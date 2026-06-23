@@ -23,7 +23,7 @@ const ITAR_EXCLUDE = /\b(itar|ear|export control|export-control|us person|u\.s\.
 // Oklo). Matched as a substring of the company name. Tunable — add names as we find them.
 const COMPANY_EXPORT_BLOCK = [
   // named EAR / export-control firms ("Cerebras/Oklo type" — AI accelerators + nuclear + space)
-  'cerebras', 'oklo', 'sambanova', 'lightmatter', 'groq', 'astranis', 'rivos',
+  'cerebras', 'oklo', 'sambanova', 'lightmatter', 'groq', 'astranis', 'rivos', 'skyryse',
   // defense / defense-tech primes (US-person required)
   'anduril', 'palantir', 'raytheon', 'rtx', 'lockheed', 'northrop', 'boeing',
   'general dynamics', 'l3harris', 'l3 harris', 'bae systems', 'sierra nevada',
