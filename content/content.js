@@ -432,6 +432,24 @@ select.pcw-input{cursor:pointer}
         const answers = answersResp?.answers || {};
         const count = pjaFillForm(resp.profile, answers);
 
+        // If an Easy Apply modal is open, run the FULL shared answerer on it (radio/select/
+        // combobox/checkbox-group fallbacks + the AI answerer) so screening questions get
+        // answered — same path external-apply uses. Lets a hybrid flow (extension fills +
+        // OS-level trusted Next/Submit clicks) complete Easy Apply without the extension's CDP.
+        const eaModal = (typeof window.__pjaGetCurrentModal === 'function') ? window.__pjaGetCurrentModal() : null;
+        if (eaModal && eaModal.root) {
+          try { if (typeof pjaFillRequiredRadioFallback === 'function') pjaFillRequiredRadioFallback(); } catch (_) {}
+          try { if (typeof pjaFillRequiredSelectFallback === 'function') pjaFillRequiredSelectFallback(); } catch (_) {}
+          try { if (typeof pjaFillRequiredComboboxFallback === 'function') pjaFillRequiredComboboxFallback(resp.profile, answers); } catch (_) {}
+          try { if (typeof pjaAutoCheckConsent === 'function') pjaAutoCheckConsent(); } catch (_) {}
+          try {
+            if (typeof window.pjaAnswerRequiredViaAI === 'function') {
+              const jc = currentJobData ? { title: currentJobData.title, company: currentJobData.company } : { title: '', company: '' };
+              window.pjaAnswerRequiredViaAI(jc, eaModal.root);
+            }
+          } catch (_) {}
+        }
+
         const s = shadow;
         const resultEl = s?.getElementById('pja-fill-result');
 
@@ -742,6 +760,25 @@ select.pcw-input{cursor:pointer}
       const r = queue.results;
       if (result.success) {
         r.applied.push(job);
+        // Durable applied-log: EA applies were previously absent from pja_applied_log (only
+        // external/api wrote it), so they escaped dedupe + the confirmed-count verification.
+        // Idempotent by company::title, channel-tagged 'easy-apply', enriched for verification.
+        try {
+          chrome.storage.local.get('pja_applied_log', d => {
+            const log = Array.isArray(d.pja_applied_log) ? d.pja_applied_log : [];
+            const nz = s => (s || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+            const key = nz(job.company) + '::' + nz(job.title);
+            if (!log.some(e => nz(e.company) + '::' + nz(e.title) === key)) {
+              log.push({
+                company: job.company, title: job.title, jobId: job.jobId || null,
+                applyUrl: `https://www.linkedin.com/jobs/view/${job.jobId}/`,
+                location: job.location || null, channel: 'easy-apply',
+                status: 'applied', reason: 'easy_apply', confirmedEmail: false, appliedAt: Date.now()
+              });
+              chrome.storage.local.set({ pja_applied_log: log });
+            }
+          });
+        } catch(e) {}
         try {
           chrome.runtime.sendMessage({ type: 'SAVE_JOB', payload: {
             id: 'job_' + Date.now() + '_' + Math.random().toString(36).slice(2, 8),

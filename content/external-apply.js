@@ -83,14 +83,11 @@
           queue.results.applied.push({ ...queue.jobs[myIdx], appliedAt: Date.now(), note: 'pre-nav-handled' });
           queue.currentIndex = myIdx + 1;
           if (queue.currentIndex >= queue.jobs.length) queue.status = 'done';
-          // Durable-log fix: this submit-navigated success never ran recordResult's log write,
-          // so persist it here too (else sourcing dedupe + the confirmed count under-count).
-          chrome.storage.local.get('pja_applied_log', ld => {
-            const log = Array.isArray(ld.pja_applied_log) ? ld.pja_applied_log : [];
-            const nz = s => (s || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
-            const k = nz(job.company) + '::' + nz(job.title);
-            if (!log.some(e => nz(e.company) + '::' + nz(e.title) === k)) log.push({ company: job.company, title: job.title, appliedAt: Date.now() });
-            chrome.storage.local.set({ pja_applied_log: log, pja_ext_queue: queue }, () => navigateBack(job));
+          // Durable-log fix: this submit-navigated success never ran recordResult's log write.
+          // Upgrade the optimistic 'submitting' pre-write (or create it) to 'applied' via the
+          // shared idempotent writer, then persist the advanced queue and navigate on.
+          pjaWriteAppliedLog(job, { status: 'applied', reason: 'pre-nav-handled' }).then(() => {
+            chrome.storage.local.set({ pja_ext_queue: queue }, () => navigateBack(job));
           });
         } else if (queue.status === 'applying') {
           console.log('PJA ext-apply: same-run handled, queue already advanced, calling navigateBack');
@@ -931,6 +928,11 @@
     // so content.js resumeExtApplyOnLoad can still advance the queue via _handled flag
     job._handled = true;
     try { await new Promise(r => chrome.storage.local.set({ pja_ext_current: job }, r)); } catch(_) {}
+    // Optimistic durable-log pre-write: we've passed validation + found the submit button, so
+    // record 'submitting' BEFORE the click. If the submit navigates away and kills this script
+    // (the Greenhouse under-count case), the entry already exists; the post-submit success path
+    // and the resume path both upgrade it to 'applied'. Idempotent, so no duplicate.
+    try { await pjaWriteAppliedLog(job, { status: 'submitting', reason: 'submit_clicked' }); } catch(_) {}
 
     console.log('PJA ext-apply: clicking submit:', submitBtn.textContent.trim().slice(0,40));
     sessionStorage.setItem('pja_last_action', 'submit_clicked:' + job.company);
@@ -2257,6 +2259,52 @@
     });
   }
 
+  // Durable applied-log writer: idempotent by company::title, and MERGES on re-write so an
+  // optimistic 'submitting' pre-write at submit-click can be upgraded to 'applied' on
+  // confirmation. This fixes the under-count where a submit-navigation (e.g. Greenhouse
+  // redirect) killed the content script before recordResult's log write ran. Each record is
+  // enriched with jobId/applyUrl/location/channel/url + a confirmedEmail flag so a later
+  // verification pass (or a human) can reconcile against the inbox in one click.
+  // status precedence: applied > submitting > skipped (never downgraded on merge).
+  function pjaWriteAppliedLog(job, fields) {
+    fields = fields || {};
+    return new Promise(resolve => {
+      try {
+        chrome.storage.local.get('pja_applied_log', d => {
+          const log = Array.isArray(d.pja_applied_log) ? d.pja_applied_log : [];
+          const nz = s => (s || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+          const key = nz(job.company) + '::' + nz(job.title);
+          const RANK = { skipped: 0, submitting: 1, applied: 2 };
+          const incomingStatus = fields.status || 'applied';
+          const existing = log.find(e => nz(e.company) + '::' + nz(e.title) === key);
+          if (existing) {
+            if ((RANK[incomingStatus] ?? 1) >= (RANK[existing.status] ?? 1)) existing.status = incomingStatus;
+            if (fields.reason) existing.reason = fields.reason;
+            // fill any enrichment fields we didn't have before
+            const enr = { jobId: job.jobId || job.id, applyUrl: job.applyUrl, location: job.location, channel: job.channel || job.ats };
+            for (const k in enr) { if (enr[k] != null && existing[k] == null) existing[k] = enr[k]; }
+            existing.updatedAt = Date.now();
+          } else {
+            log.push({
+              company: job.company, title: job.title,
+              jobId: job.jobId || job.id || null,
+              applyUrl: job.applyUrl || null,
+              location: job.location || null,
+              channel: job.channel || job.ats || 'external',
+              url: (typeof location !== 'undefined' ? location.href.slice(0, 200) : null),
+              status: incomingStatus,
+              reason: fields.reason || null,
+              confirmedEmail: false,
+              appliedAt: Date.now()
+            });
+          }
+          chrome.storage.local.set({ pja_applied_log: log }, () => resolve(log));
+        });
+      } catch (_) { resolve(null); }
+    });
+  }
+  if (typeof window !== 'undefined') window.pjaWriteAppliedLog = pjaWriteAppliedLog;
+
   async function recordResult(job, result) {
     console.log('PJA ext-apply RESULT:', job.company, result.success ? '✓ APPLIED' : '✗ SKIP:', result.reason || '', result.fields?.join('; ') || '');
     // Mark job as handled so we don't re-process on reload
@@ -2266,15 +2314,7 @@
     // Bug2 fix: persist successful applies to a DURABLE log (pja_ext_queue gets overwritten each
     // run, so sourcing dedupe needs this to avoid re-surfacing already-applied roles).
     if (result.success) {
-      await new Promise(resolve => chrome.storage.local.get('pja_applied_log', d => {
-        const log = Array.isArray(d.pja_applied_log) ? d.pja_applied_log : [];
-        const norm = s => (s || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
-        const k = norm(job.company) + '::' + norm(job.title);
-        if (!log.some(e => norm(e.company) + '::' + norm(e.title) === k)) {
-          log.push({ company: job.company, title: job.title, appliedAt: Date.now() });
-        }
-        chrome.storage.local.set({ pja_applied_log: log }, resolve);
-      }));
+      await pjaWriteAppliedLog(job, { status: 'applied', reason: result.reason });
     }
 
     return new Promise(resolve => {
