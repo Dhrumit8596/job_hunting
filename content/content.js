@@ -14,6 +14,18 @@ if (!window.__pjaMsgListenerAdded) {
       sendResponse({ ok: true });
     }
   });
+
+  // Tightly-scoped page→storage bridge: lets a page-world script (which has no chrome.storage)
+  // hand the content script LinkedIn voyager-resolved apply data to stash for the sourcing
+  // pipeline. ONLY accepts the single pja_voyager_ext key, and only an array payload.
+  window.addEventListener('pja_bridge_store', (e) => {
+    try {
+      const d = e && e.detail;
+      if (d && d.key === 'pja_voyager_ext' && Array.isArray(d.value)) {
+        chrome.storage.local.set({ pja_voyager_ext: d.value.slice(0, 200) });
+      }
+    } catch (_) {}
+  });
 }
 
 (function () {
