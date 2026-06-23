@@ -1379,17 +1379,20 @@ function pjaFillCombobox(input, value, key) {
   // Open the flyout — fire full mouse sequence on select__control (the outer clickable div).
   // Background: react-select's onMouseDown is on the container, not the inner input.
   const openFlyout = () => {
-    // react-select (selectCtrl present) manages its own input state and shows all options
-    // on open — native value-setting interferes with it. Only type-to-filter for non-
-    // react-select autocompletes (e.g. plain Greenhouse/custom widgets).
-    if (isAutocomplete && !selectCtrl) {
-      typeToFilter(value);
-    }
     if (selectCtrl) {
+      // Open the react-select control (its onMouseDown is on this div, not the inner input).
       ['mouseover','mouseenter','mousemove','mousedown','mouseup','click'].forEach(type =>
         selectCtrl.dispatchEvent(new MouseEvent(type, { bubbles: true, cancelable: true, button: 0, buttons: 1 }))
       );
-    } else if (toggleBtn && !isAutocomplete) {
+      // ASYNC react-selects (e.g. Greenhouse School/Degree/Discipline) show NO options until the
+      // query is typed — so type even though react-select owns the input. Native value-setter +
+      // InputEvent IS picked up by react-select and loads the filtered/async options. (Verified
+      // live: typing surfaces the matching option, which doSelect then clicks.) For non-async
+      // react-selects this merely filters to the value, which is harmless.
+      if (isAutocomplete) typeToFilter(value);
+    } else if (isAutocomplete) {
+      typeToFilter(value);
+    } else if (toggleBtn) {
       toggleBtn.click();
     } else {
       input.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true }));

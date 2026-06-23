@@ -61,10 +61,27 @@ module.exports = async (t) => {
   const c3 = makeCombobox(w, 'ref', ['Indeed', 'Job board or social media', 'Company website']);
   w.pjaFillCombobox(c3.input, 'LinkedIn', 'referralSource');
 
+  // react-select education combobox (Greenhouse School/Degree/Discipline): input wrapped in a
+  // .select__control. The fix types into it even though selectCtrl is present (async options).
+  // Verify the open+type+select path picks the matching option.
+  const rsInput = w.document.createElement('input');
+  rsInput.type = 'text'; rsInput.id = 'school--0'; rsInput.setAttribute('role', 'combobox'); rsInput.setAttribute('aria-autocomplete', 'list');
+  const ctrl = w.document.createElement('div'); ctrl.className = 'select__control';
+  ctrl.appendChild(rsInput); w.document.body.appendChild(ctrl);
+  const rsLb = w.document.createElement('div'); rsLb.id = 'react-select-school--0-listbox'; rsLb.setAttribute('role', 'listbox');
+  let rsClicked = null;
+  ['Stanford University', 'San Jose State University'].forEach(txt => {
+    const o = w.document.createElement('div'); o.setAttribute('role', 'option'); o.textContent = txt;
+    o.addEventListener('click', () => { rsClicked = txt; }); rsLb.appendChild(o);
+  });
+  w.document.body.appendChild(rsLb);
+  w.pjaFillCombobox(rsInput, 'San Jose State University', 'university');
+
   // the filler queues on window._pjaComboChain with ~700ms timers; wait it out
-  await sleep(2600);
+  await sleep(3200);
 
   t.eq(c1.clicked(), 'No, I will not require sponsorship', 'combobox: sponsorship=No clicks will-not-require');
   t.eq(c2.clicked(), 'I am authorized to work', 'combobox: workAuth=Yes clicks authorized (not sponsorship)');
   t.eq(c3.clicked(), 'Job board or social media', 'combobox: referralSource=LinkedIn maps to job-board/social');
+  t.eq(rsClicked, 'San Jose State University', 'combobox: react-select education (select__control) selects the matching school');
 };
