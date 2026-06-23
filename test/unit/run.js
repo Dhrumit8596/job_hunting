@@ -16,11 +16,16 @@ const t = {
 
 const dir = __dirname;
 const files = fs.readdirSync(dir).filter(f => f.endsWith('.test.js')).sort();
-for (const f of files) {
-  try { require(path.join(dir, f))(t); }
-  catch (e) { fail++; fails.push(`${f} threw: ${e.stack || e.message}`); }
-}
 
-console.log(`\n${pass} passed, ${fail} failed  (${files.length} test files)`);
-if (fail) { console.log('\nFAILURES:'); fails.forEach(x => console.log('  ✗ ' + x)); process.exit(1); }
-console.log('All green.');
+(async () => {
+  for (const f of files) {
+    // Tests export (t) => void | Promise<void>; await so async tests (timer-driven
+    // combobox/DOM flows) complete before we tally results.
+    try { await require(path.join(dir, f))(t); }
+    catch (e) { fail++; fails.push(`${f} threw: ${e.stack || e.message}`); }
+  }
+
+  console.log(`\n${pass} passed, ${fail} failed  (${files.length} test files)`);
+  if (fail) { console.log('\nFAILURES:'); fails.forEach(x => console.log('  ✗ ' + x)); process.exit(1); }
+  console.log('All green.');
+})();

@@ -372,17 +372,29 @@ function pjaFillSelect(select, value, key) {
   for (const opt of select.options) {
     const ot = opt.text.toLowerCase().trim();
     if (!ot || ['select','please select','choose','--'].includes(ot)) continue;
-    // BUG1+BUG7 fix: moved inverted conditions; key-aware 'not authorized' guard.
+    // BUG1 fix: sponsorship is semantically INVERTED vs work-authorization — an option that
+    // says it REQUIRES/needs sponsorship means "Yes-requires"; "will not / do not require"
+    // means "No". Handle the requireSponsorship key on its own so the sponsorship option text
+    // can never leak into the generic work-auth yes-branch (which previously let a work-auth
+    // 'Yes' select "I will require sponsorship"). The generic branch below no longer mentions
+    // sponsorship at all.
+    if (key === 'requireSponsorship') {
+      const saysRequire   = /\b(require|requires|need|needs)\b/.test(ot) && !/\bnot\b|\bno\b|won.?t|will not|do(es)? not|don.?t/.test(ot);
+      const saysNoSponsor = /\bnot (require|need)|will not|do(es)? not require|don.?t require|no sponsorship|not (require|need) sponsorship\b/.test(ot)
+                            || ot === 'no' || ot.startsWith('no,');
+      if (isYes && (ot === 'yes' || ot.startsWith('yes,') || saysRequire))   return pjaCommitSelect(select, opt.value);
+      if (isNo  && (ot === 'no'  || ot.startsWith('no,')  || saysNoSponsor)) return pjaCommitSelect(select, opt.value);
+      continue;
+    }
+    // BUG7 fix: key-aware 'not authorized' guard.
     // BUG4 fix: lv.length > 3 prevents 'no'/'yes' from substring-matching everything.
     const yesMatch = isYes && (
       ot === 'yes' || ot.startsWith('yes,') ||
       (ot.includes('authorized') && !ot.includes('not authorized')) ||
-      ot.includes('eligible') || ot.includes('i am authorized') ||
-      ot.includes('will require sponsorship') || ot === 'yes, i will require'
+      ot.includes('eligible') || ot.includes('i am authorized')
     );
     const noMatch = isNo && (
       ot === 'no' || ot.startsWith('no,') ||
-      ot === 'no, i will not require' ||
       ot.includes('not required') || ot.includes('will not require') ||
       (key === 'workAuth' && ot.includes('not authorized'))
     );
