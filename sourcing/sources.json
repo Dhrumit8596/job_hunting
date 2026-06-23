@@ -335,6 +335,31 @@
       "ats": "greenhouse",
       "slug": "flex",
       "name": "Flex"
+    },
+    {
+      "ats": "greenhouse",
+      "slug": "billiontoone",
+      "name": "BillionToOne"
+    },
+    {
+      "ats": "greenhouse",
+      "slug": "sesai",
+      "name": "SES AI"
+    },
+    {
+      "ats": "greenhouse",
+      "slug": "genedx",
+      "name": "GeneDx"
+    },
+    {
+      "ats": "greenhouse",
+      "slug": "outsetmedical",
+      "name": "Outset Medical"
+    },
+    {
+      "ats": "greenhouse",
+      "slug": "freenome",
+      "name": "Freenome"
     }
   ]
 }
