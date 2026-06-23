@@ -184,6 +184,26 @@
     ].join(','))?.textContent || '').trim();
   }
 
+  // Decode LinkedIn's offsite "Apply" wrapper (linkedin.com/safety/go/?url=<encoded ATS url>)
+  // into the real ATS application URL, so a LinkedIn-sourced EXTERNAL job can be applied via the
+  // same external-apply pipeline. Returns the decoded URL, or null if not resolvable/offsite.
+  function pjaDecodeApplyUrl(href) {
+    if (!href) return null;
+    const m = String(href).match(/[?&]url=([^&]+)/);
+    if (/\/safety\/go/i.test(href) && m) { try { return decodeURIComponent(m[1]); } catch (_) { return null; } }
+    if (/^https?:\/\//i.test(href) && !/linkedin\.com/i.test(href)) return href; // already direct offsite
+    return null;
+  }
+
+  // Read the detail-panel "Apply" control's resolved offsite ATS URL (external jobs only; Easy
+  // Apply has no offsite link). Used to capture a real applyUrl during the scan.
+  function getDetailPanelApplyUrl() {
+    const a = Array.from(document.querySelectorAll('a')).find(e =>
+      /^apply$/i.test((e.textContent || '').trim()) &&
+      /safety\/go|^https?:\/\/(?!www\.linkedin)/i.test(e.getAttribute('href') || ''));
+    return a ? pjaDecodeApplyUrl(a.getAttribute('href')) : null;
+  }
+
   // ── Inject floating scanner widget ────────────────────────────────────────
   // LinkedIn is a React SPA that can fully replace document.body children on
   // navigation. A simple getElementById guard only prevents double-injection
@@ -352,11 +372,15 @@
           // Free pre-filter: need at least one keyword in title/company/desc.
           if (keywordScore(meta.title + ' ' + meta.company) + keywordScore(description) === 0 && description.length < 50) continue;
 
+          // Capture the real offsite ATS apply URL for external jobs (decoded from LinkedIn's
+          // safety-go wrapper), so LinkedIn-sourced external roles are applyable via external-apply.
+          const externalApplyUrl = meta.isEasyApply ? null : getDetailPanelApplyUrl();
           jobsToScore.push({
             id: meta.jobId, url: meta.applyUrl,
             title: getDetailPanelTitle() || meta.title,
             company: getDetailPanelCompany() || meta.company,
             location: meta.location, isEasyApply: meta.isEasyApply,
+            applyUrl: externalApplyUrl || meta.applyUrl, externalApplyUrl: externalApplyUrl || null,
             description: description.slice(0, 3000), scrapedAt: Date.now(), status: 'scoring'
           });
           scoredCount++;
@@ -432,6 +456,7 @@
   if (typeof window !== 'undefined') {
     window.pjaExtractCardMeta = extractCardMeta;
     window.pjaAccumulateRenderedCards = accumulateRenderedCards;
+    window.pjaDecodeApplyUrl = pjaDecodeApplyUrl;
   }
 
   // ── Init ───────────────────────────────────────────────────────────────────

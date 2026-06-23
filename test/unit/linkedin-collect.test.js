@@ -77,4 +77,13 @@ module.exports = (t) => {
   const added = w.pjaAccumulateRenderedCards(map);
   t.eq(added, 0, 'collect: re-seeing cards adds no duplicates');
   t.eq(map.size, before, 'collect: size stable on duplicate pass');
+
+  // --- apply-URL decode (LinkedIn safety-go wrapper -> real ATS URL) ---
+  t.ok(typeof w.pjaDecodeApplyUrl === 'function', 'decode: pjaDecodeApplyUrl exported');
+  t.eq(w.pjaDecodeApplyUrl('https://www.linkedin.com/safety/go/?url=https%3A%2F%2Fgrnh.se%2F9tamd08z8us&trk=x'),
+    'https://grnh.se/9tamd08z8us', 'decode: extracts + decodes the offsite ATS url from safety-go');
+  t.eq(w.pjaDecodeApplyUrl('https://boards.greenhouse.io/acme/jobs/123'),
+    'https://boards.greenhouse.io/acme/jobs/123', 'decode: passes through a direct offsite URL');
+  t.eq(w.pjaDecodeApplyUrl('https://www.linkedin.com/jobs/view/123/'), null, 'decode: LinkedIn (Easy Apply / internal) -> null');
+  t.eq(w.pjaDecodeApplyUrl(''), null, 'decode: empty -> null');
 };
