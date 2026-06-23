@@ -148,14 +148,16 @@
   async function runExternalApply(job, rawAnswers) {
     try {
     sessionStorage.setItem('pja_last_action', 'runExternalApply:' + job.company);
-    // Stall watchdog: if this job neither submits nor skips within 4 min, force-advance the
+    // Stall watchdog: if this job neither submits nor skips within the window, force-advance the
     // queue so one hung page can't block an unattended batch. On normal completion navigateBack
-    // navigates away and this timer dies with the page.
+    // navigates away and this timer dies with the page. Raised 4min→7min: forms with many
+    // AI-answered screening questions (each a dev-server round-trip ~3-5s) + combobox retries
+    // legitimately need longer than 4min, and were being force-skipped mid-fill (watchdog_timeout).
     setTimeout(() => {
       try { sessionStorage.setItem('pja_last_action', 'watchdog_timeout:' + job.company); } catch (_) {}
       try { recordResult(job, { success: false, reason: 'watchdog_timeout' }).then(() => navigateBack(job), () => navigateBack(job)); }
       catch (_) { try { navigateBack(job); } catch (__) {} }
-    }, 240000);
+    }, 420000);
     await sleep(1500); // let dynamic forms settle
 
     // Fall back to stored profile/answers if the job object doesn't include them
