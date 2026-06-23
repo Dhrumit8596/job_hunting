@@ -41,6 +41,13 @@ module.exports = (t) => {
   t.eq(isItarExcluded('Process Engineer (US Person required, ITAR)'), true, 'itar: blocked');
   t.eq(isItarExcluded('Process Engineer'), false, 'itar: clean');
 
+  // --- filter: company-level export-control blocklist (Cerebras/Oklo type) ---
+  const { isExportControlledCompany } = R('filter');
+  t.eq(isExportControlledCompany('Cerebras Systems'), true, 'export-co: Cerebras blocked');
+  t.eq(isExportControlledCompany('Oklo Inc.'), true, 'export-co: Oklo blocked');
+  t.eq(isExportControlledCompany('Lockheed Martin'), true, 'export-co: defense prime blocked');
+  t.eq(isExportControlledCompany('Penumbra'), false, 'export-co: clean medical company passes');
+
   // --- filterJobs integration ---
   const raw = [
     makeJob({ id: 1, title: 'Quality Engineer', company: 'A', location: 'Fremont, CA' }),
@@ -48,8 +55,9 @@ module.exports = (t) => {
     makeJob({ id: 3, title: 'Process Engineer', company: 'B', location: 'Austin, TX' }),
     makeJob({ id: 4, title: 'Equipment Engineer', company: 'C', location: 'Remote - US', remote: true }),
     makeJob({ id: 5, title: 'Software Engineer', company: 'D', location: 'San Jose, CA' }),
+    makeJob({ id: 6, title: 'Quality Engineer', company: 'Cerebras Systems', location: 'Sunnyvale, CA' }),
   ];
-  t.eq(filterJobs(raw).map(x => x.id), ['1', '4'], 'filterJobs: keeps eligible eng + CA/remote only');
+  t.eq(filterJobs(raw).map(x => x.id), ['1', '4'], 'filterJobs: keeps eligible CA/remote eng, drops export-controlled company (6)');
 
   // --- dedupe ---
   t.eq(jobKey({ company: 'Twist Bioscience', title: 'Equipment Engineer' }),

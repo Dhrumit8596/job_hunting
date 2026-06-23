@@ -943,20 +943,17 @@
     // Greenhouse SPA shows a brief confirmation then navigates away, so a
     // single check after N seconds misses it. Also treat URL change or form
     // disappearance as success signals (redirect = submission went through).
-    const SUCCESS_RE = /thank you|your application|received|submitted|confirmation|successfully|application complete|we.ll be in touch|we will be in touch|application has been|application was|you.ve applied|you have applied|great.*applied|applied successfully|submission.*complete|application.*sent/i;
     let success = false;
     for (let i = 0; i < 20; i++) {
       await sleep(400);
-      const text = document.body.innerText;
-      if (SUCCESS_RE.test(text)) { success = true; break; }
-      // URL changed away from the apply page → form was submitted + redirect happened
-      if (location.href !== preSubmitUrl && !/jobs\//.test(location.pathname.replace(preSubmitUrl.replace(/.*\/jobs\//, ''), ''))) {
-        success = true; break;
-      }
-      // Submit button gone from DOM → SPA replaced the form (submission went through)
-      const stillHasSubmit = pjaQueryAllExt('button[type=submit], input[type=submit]')
-        .some(b => /submit/i.test(b.textContent + b.value));
-      if (!stillHasSubmit && i >= 2) { success = true; break; }
+      const hasSubmitButton = pjaQueryAllExt('button[type=submit], input[type=submit]')
+        .some(b => /submit/i.test((b.textContent || '') + (b.value || '')));
+      const hasFormFields = pjaQueryAllExt('form input, form select, form textarea')
+        .some(el => { try { const r = el.getBoundingClientRect(); return el.type !== 'hidden' && r.width > 0 && r.height > 0; } catch (_) { return el.type !== 'hidden'; } });
+      if (pjaIsSubmitSuccess({
+        text: document.body.innerText, title: document.title, url: location.href,
+        preSubmitUrl, hasSubmitButton, hasFormFields, iterations: i
+      })) { success = true; break; }
     }
     console.log('PJA ext-apply: post-submit success:', success, '| url:', location.href.slice(0,80), '| pageText snippet:', document.body.innerText.slice(0,120));
     sessionStorage.setItem('pja_last_action', 'recordResult:submit:' + (success ? 'applied' : 'unclear') + ':' + job.company);
@@ -2304,6 +2301,32 @@
     });
   }
   if (typeof window !== 'undefined') window.pjaWriteAppliedLog = pjaWriteAppliedLog;
+
+  // Pure post-submit success detector (testable). Tightened to cut false 'submit_unclear':
+  // broader confirmation phrasings + URL/title tokens, and a redirect only counts as success
+  // when the application form is actually GONE (avoids false positives from in-page re-renders).
+  const PJA_SUBMIT_SUCCESS_RE = /thank you|thanks for (applying|your (application|interest|submission))|your application|application (received|complete|completed|submitted|confirmed|has been (received|submitted|sent|completed)|was (received|submitted|sent))|we.?ve received|we have received|received your application|submitted successfully|applied successfully|you.?ve applied|you have applied|submission (complete|received|successful)|appreciate your (interest|application)|confirmation/i;
+  function pjaIsSubmitSuccess(snap) {
+    snap = snap || {};
+    const text = String(snap.text || ''), title = String(snap.title || ''), url = String(snap.url || '');
+    const preSubmitUrl = String(snap.preSubmitUrl || '');
+    const hasSubmitButton = snap.hasSubmitButton !== false;
+    const hasFormFields = snap.hasFormFields !== false;
+    const iterations = Number.isFinite(snap.iterations) ? snap.iterations : 99;
+    // 1. Confirmation text in title or body.
+    if (PJA_SUBMIT_SUCCESS_RE.test((title + ' ' + text).slice(0, 6000))) return true;
+    // 2. Landed on a confirmation/post-apply route.
+    if (/thank|confirm|success|submitted|post-?apply|application[-_]?(complete|received|confirmation|success)|\/applied\b/i.test(url)) return true;
+    // 3. Redirected to a DIFFERENT path AND the form is gone → submission went through + redirect.
+    if (url && preSubmitUrl && url !== preSubmitUrl) {
+      const pathOf = u => { try { return new URL(u).pathname; } catch (_) { return u; } };
+      if (pathOf(url) !== pathOf(preSubmitUrl) && !hasFormFields) return true;
+    }
+    // 4. SPA replaced the form in-place (submit button + fields both gone) after a couple polls.
+    if (!hasSubmitButton && !hasFormFields && iterations >= 2) return true;
+    return false;
+  }
+  if (typeof window !== 'undefined') window.pjaIsSubmitSuccess = pjaIsSubmitSuccess;
 
   async function recordResult(job, result) {
     console.log('PJA ext-apply RESULT:', job.company, result.success ? '✓ APPLIED' : '✗ SKIP:', result.reason || '', result.fields?.join('; ') || '');

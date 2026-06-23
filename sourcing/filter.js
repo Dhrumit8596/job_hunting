@@ -16,6 +16,26 @@ const CA_LOC = /\b(california|\bca\b|san jose|santa clara|sunnyvale|fremont|alam
 // Export-control / defense roles that block a TN (non-US-person) candidate.
 const ITAR_EXCLUDE = /\b(itar|ear|export control|export-control|us person|u\.s\. person|us citizen(ship)? required|security clearance|secret clearance|defense|aerospace & defense|dod\b|missile|munition|weapon)\b/i;
 
+// Company-level export-control / US-person-only blocklist. Some employers are export-controlled
+// at the COMPANY level (defense/aerospace/space/nuclear primes + specific EAR-restricted firms),
+// so a TN / non-US-person candidate is ineligible regardless of what the individual posting says
+// — the ITAR_EXCLUDE text regex misses these when the JD doesn't spell it out (e.g. Cerebras,
+// Oklo). Matched as a substring of the company name. Tunable — add names as we find them.
+const COMPANY_EXPORT_BLOCK = [
+  // named EAR / export-control firms seen in prior runs
+  'cerebras', 'oklo',
+  // defense / defense-tech primes (US-person required)
+  'anduril', 'palantir', 'raytheon', 'rtx', 'lockheed', 'northrop', 'boeing',
+  'general dynamics', 'l3harris', 'l3 harris', 'bae systems', 'sierra nevada',
+  'leidos', 'saic', 'draper', 'mitre', 'aerospace corporation', 'shield ai',
+  'epirus', 'hawkeye 360', 'saronic', 'true anomaly',
+  // space / launch (ITAR)
+  'spacex', 'blue origin', 'relativity space', 'rocket lab', 'firefly aerospace',
+  'ursa major', 'stoke space', 'varda', 'astra space', 'k2 space', 'apex space',
+  // nuclear / fusion (export-controlled, commonly US-person)
+  'kairos power', 'commonwealth fusion', 'helion energy', 'x-energy', 'terrapower', 'radiant nuclear',
+];
+
 function isEligibleTitle(title) {
   const t = String(title || '');
   return ELIGIBLE_TITLE.test(t) && !TITLE_EXCLUDE.test(t) && !DOMAIN_EXCLUDE.test(t);
@@ -36,12 +56,19 @@ function isItarExcluded(text) {
   return ITAR_EXCLUDE.test(String(text || ''));
 }
 
+function isExportControlledCompany(company) {
+  const c = String(company || '').toLowerCase();
+  return COMPANY_EXPORT_BLOCK.some(name => c.includes(name));
+}
+
 // Apply all filters. opts: { caOrRemoteOnly=true }
 function filterJobs(jobs, opts = {}) {
   const caOrRemoteOnly = opts.caOrRemoteOnly !== false;
   return jobs.filter(j => {
     if (!isEligibleTitle(j.title)) return false;
-    if (isItarExcluded(j.title)) return false;
+    // export-control: drop on company-level blocklist OR any ITAR/EAR text in title+company+desc
+    if (isExportControlledCompany(j.company)) return false;
+    if (isItarExcluded([j.title, j.company, j.description].filter(Boolean).join(' '))) return false;
     if (caOrRemoteOnly && !isEligibleLocation(j.location, j.remote)) return false;
     return true;
   });
@@ -59,4 +86,4 @@ function tnAdjustScore(title, score) {
   return s;
 }
 
-module.exports = { isEligibleTitle, isEligibleLocation, isItarExcluded, filterJobs, tnAdjustScore, ELIGIBLE_TITLE, TITLE_EXCLUDE };
+module.exports = { isEligibleTitle, isEligibleLocation, isItarExcluded, isExportControlledCompany, filterJobs, tnAdjustScore, ELIGIBLE_TITLE, TITLE_EXCLUDE, COMPANY_EXPORT_BLOCK };
