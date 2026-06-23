@@ -400,6 +400,16 @@
       "ats": "greenhouse",
       "slug": "markforged",
       "name": "Markforged"
+    },
+    {
+      "ats": "greenhouse",
+      "slug": "sweetgreen",
+      "name": "placeholder8"
+    },
+    {
+      "ats": "greenhouse",
+      "slug": "seurat",
+      "name": "Seurat"
     }
   ]
 }
