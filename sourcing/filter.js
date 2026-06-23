@@ -22,8 +22,8 @@ const ITAR_EXCLUDE = /\b(itar|ear|export control|export-control|us person|u\.s\.
 // — the ITAR_EXCLUDE text regex misses these when the JD doesn't spell it out (e.g. Cerebras,
 // Oklo). Matched as a substring of the company name. Tunable — add names as we find them.
 const COMPANY_EXPORT_BLOCK = [
-  // named EAR / export-control firms seen in prior runs
-  'cerebras', 'oklo',
+  // named EAR / export-control firms ("Cerebras/Oklo type" — AI accelerators + nuclear + space)
+  'cerebras', 'oklo', 'sambanova', 'lightmatter', 'groq', 'astranis', 'rivos',
   // defense / defense-tech primes (US-person required)
   'anduril', 'palantir', 'raytheon', 'rtx', 'lockheed', 'northrop', 'boeing',
   'general dynamics', 'l3harris', 'l3 harris', 'bae systems', 'sierra nevada',

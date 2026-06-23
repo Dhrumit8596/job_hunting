@@ -315,6 +315,26 @@
       "ats": "greenhouse",
       "slug": "seer",
       "name": "Seer"
+    },
+    {
+      "ats": "greenhouse",
+      "slug": "astranis",
+      "name": "Astranis (check)"
+    },
+    {
+      "ats": "greenhouse",
+      "slug": "lightmatter",
+      "name": "Lightmatter"
+    },
+    {
+      "ats": "greenhouse",
+      "slug": "sambanovasystems",
+      "name": "SambaNova"
+    },
+    {
+      "ats": "greenhouse",
+      "slug": "flex",
+      "name": "Flex"
     }
   ]
 }
