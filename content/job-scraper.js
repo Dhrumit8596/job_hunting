@@ -92,6 +92,44 @@
     ].join(','))?.textContent || '').trim();
   }
 
+  // LinkedIn marks Easy Apply in the card footer ("Easy Apply" + the LinkedIn glyph).
+  function isEasyApplyCard(card) {
+    return /easy apply/i.test(card.textContent || '');
+  }
+
+  // Card-level metadata (no detail-panel click needed) — what the sourcing pipeline needs.
+  function extractCardMeta(card) {
+    const jobId = getJobIdFromCard(card);
+    if (!jobId) return null;
+    return {
+      jobId,
+      title: getJobTitleFromCard(card) || '',
+      company: getJobCompanyFromCard(card) || '',
+      location: getJobLocationFromCard(card) || '',
+      applyUrl: `https://www.linkedin.com/jobs/view/${jobId}/`,
+      isEasyApply: isEasyApplyCard(card),
+    };
+  }
+
+  // Merge currently-rendered cards into an accumulator Map keyed by jobId. LinkedIn VIRTUALISES
+  // the list — cards above/below the viewport unmount — so a single snapshot only ever sees the
+  // ~7-card rendered window (the root cause of the old undercount). We must collect WHILE
+  // scrolling and accumulate. Returns the number of NEW cards added this call.
+  function accumulateRenderedCards(map) {
+    let added = 0;
+    for (const card of getJobCards()) {
+      const meta = extractCardMeta(card);
+      if (!meta) continue;
+      const existing = map.get(meta.jobId);
+      if (!existing) { map.set(meta.jobId, meta); added++; }
+      else {
+        for (const k of ['title', 'company', 'location']) if (!existing[k] && meta[k]) existing[k] = meta[k];
+        if (meta.isEasyApply) existing.isEasyApply = true;
+      }
+    }
+    return added;
+  }
+
   // ── Extract full description from the right-side detail panel ─────────────
   // LinkedIn's detail panel is loaded asynchronously after a card click.
   // Poll for content rather than using a fixed sleep so we react as soon as
@@ -249,26 +287,26 @@
   const SCROLL_SETTLE_MS  = 300;  // wait after each step for new cards to mount
   const SCROLL_MAX_PASSES = 30;   // safety cap (~12 000 px / 400 px ≈ 30 pages)
 
-  async function scrollToLoadAllCards() {
-    // Find the scrollable job-list container. LinkedIn uses a dedicated
-    // overflow:auto pane, NOT window scroll, for the left-hand list.
-    const listContainer = document.querySelector(
+  const SCROLL_MAX_PAGES = 4;     // results pages to walk (≈25/page → up to ~100 jobs)
+
+  function findListContainer() {
+    return document.querySelector(
       '[class*="jobs-search-results-list"], [class*="scaffold-layout__list-container"]'
-    ) || document.querySelector('.jobs-search-results__list');
+    ) || document.querySelector('.jobs-search-results__list') || null;
+  }
 
-    if (!listContainer) return; // fall back silently — window may be scrollable
-
-    let prevCount = 0;
-    for (let pass = 0; pass < SCROLL_MAX_PASSES; pass++) {
-      listContainer.scrollBy({ top: SCROLL_STEP_PX, behavior: 'smooth' });
-      await delay(SCROLL_SETTLE_MS);
-      const currentCount = getJobCards().length;
-      if (currentCount === prevCount) break; // no new cards loaded — we're at the end
-      prevCount = currentCount;
+  // Advance to the next results page (LinkedIn paginates ~25/page via an SPA control).
+  // Returns true if it advanced. Prefer the explicit next button, else a numbered page button.
+  async function goToNextPage() {
+    let next = document.querySelector(
+      '.jobs-search-pagination__button--next, button[aria-label="View next page"]'
+    );
+    if (!next) {
+      next = Array.from(document.querySelectorAll('button[aria-label]'))
+        .find(b => /next/i.test(b.getAttribute('aria-label') || '') && b.offsetParent !== null && !b.disabled);
     }
-    // Scroll back to top so the first card is visible when we start clicking
-    listContainer.scrollTo({ top: 0, behavior: 'instant' });
-    await delay(SCROLL_SETTLE_MS);
+    if (next && !next.disabled && next.offsetParent !== null) { next.click(); await delay(1400); return true; }
+    return false;
   }
 
   // ── Main scan flow ─────────────────────────────────────────────────────────
@@ -282,82 +320,70 @@
     const btn = document.getElementById('pja-scan-btn');
     if (btn) { btn.disabled = true; btn.textContent = 'Scanning…'; }
 
-    // Scroll through the list to force lazy-rendered cards into the DOM
-    // before we collect them. Without this we only see ~5–10 visible cards.
-    setStatus('Loading all job cards…');
-    await scrollToLoadAllCards();
+    // LinkedIn VIRTUALISES the list (cards unmount when scrolled past) and paginates ~25/page.
+    // So we walk each page top→bottom and, as cards render, BOTH accumulate their metadata (so
+    // the full set survives virtualisation — the old count-based scroll only ever saw ~7) AND
+    // click+score the ones not yet seen. cardMeta is the canonical full collected set.
+    setStatus('Loading + scanning jobs…');
+    const cardMeta = new Map();          // jobId → { jobId,title,company,location,applyUrl,isEasyApply }
+    const jobsToScore = [];
+    let scoredCount = 0;
 
-    const cards = getJobCards();
-    const total = cards.length;
+    for (let page = 0; page < SCROLL_MAX_PAGES; page++) {
+      const listContainer = findListContainer();
+      const scroller = listContainer || document.scrollingElement || document.documentElement;
+      if (listContainer) { listContainer.scrollTo({ top: 0, behavior: 'instant' }); await delay(SCROLL_SETTLE_MS); }
+      let stable = 0, lastTop = -1;
 
+      for (let pass = 0; pass < SCROLL_MAX_PASSES; pass++) {
+        for (const card of getJobCards()) {
+          const meta = extractCardMeta(card);
+          if (!meta) continue;
+          if (!cardMeta.has(meta.jobId)) cardMeta.set(meta.jobId, meta);
+          if (scannedThisSession.has(meta.jobId)) continue;   // score each job once
+          scannedThisSession.add(meta.jobId);
+          setStatus(`Scanning… ${cardMeta.size} found · ${scoredCount} scored`);
+          if (await checkCache(meta.jobId)) continue;
+
+          // Click the card to load its description into the detail panel (better fit scoring).
+          const link = card.querySelector('a[href*="/jobs/view/"]') || card.querySelector('a');
+          if (link) link.click();
+          const description = await waitForDetailPanelDescription();
+          // Free pre-filter: need at least one keyword in title/company/desc.
+          if (keywordScore(meta.title + ' ' + meta.company) + keywordScore(description) === 0 && description.length < 50) continue;
+
+          jobsToScore.push({
+            id: meta.jobId, url: meta.applyUrl,
+            title: getDetailPanelTitle() || meta.title,
+            company: getDetailPanelCompany() || meta.company,
+            location: meta.location, isEasyApply: meta.isEasyApply,
+            description: description.slice(0, 3000), scrapedAt: Date.now(), status: 'scoring'
+          });
+          scoredCount++;
+          if (jobsToScore.length >= 10) { await sendBatchToBackground(jobsToScore.splice(0, 10)); }
+        }
+
+        // Scroll one step and stop when we reach the bottom and the position holds (virtualised
+        // lists keep mounting as we go, so stop on bottom+stable rather than on count plateau).
+        if (listContainer) listContainer.scrollBy({ top: SCROLL_STEP_PX, behavior: 'instant' });
+        else window.scrollBy(0, SCROLL_STEP_PX);
+        await delay(SCROLL_SETTLE_MS);
+        const top = scroller.scrollTop;
+        const atBottom = top + scroller.clientHeight >= scroller.scrollHeight - 4;
+        if (Math.abs(top - lastTop) < 2) stable++; else stable = 0;
+        lastTop = top;
+        if (atBottom && stable >= 2) break;
+      }
+
+      if (!(await goToNextPage())) break;   // no more results pages
+    }
+
+    const total = cardMeta.size;
     if (total === 0) {
       setStatus('No job cards found. Try scrolling down first.');
       scanning = false;
       if (btn) { btn.disabled = false; btn.textContent = 'Scan Jobs'; }
       return;
-    }
-
-    setStatus(`Found ${total} jobs — scanning…`);
-    setProgress(0, total);
-
-    const jobsToScore = [];
-
-    for (let i = 0; i < cards.length; i++) {
-      const card = cards[i];
-      const jobId = getJobIdFromCard(card);
-      if (!jobId) continue;
-
-      // Skip jobs already seen this session or already in storage
-      if (scannedThisSession.has(jobId)) { setProgress(i + 1, total); continue; }
-      const cached = await checkCache(jobId);
-      if (cached) { scannedThisSession.add(jobId); setProgress(i + 1, total); continue; }
-      scannedThisSession.add(jobId);
-
-      // Get title + company from card
-      const title = getJobTitleFromCard(card) || document.title;
-      const company = getJobCompanyFromCard(card) || '';
-      const location = getJobLocationFromCard(card) || '';
-
-      // Quick title-level keyword check (free filter)
-      const titleScore = keywordScore(title + ' ' + company);
-
-      // Click the card to load full description in detail panel, then poll
-      // until content appears (up to DETAIL_POLL_TIMEOUT ms) instead of
-      // relying on a fixed 1200 ms sleep that frequently times out on slow
-      // connections and wastes time on fast ones.
-      const link = card.querySelector('a[href*="/jobs/view/"]') || card.querySelector('a');
-      if (link) {
-        link.click();
-      }
-
-      const description = await waitForDetailPanelDescription();
-      const descScore = keywordScore(description);
-
-      setProgress(i + 1, total);
-      setStatus(`Scanning ${i + 1}/${total}…`);
-
-      // Pre-filter: needs at least 1 keyword match
-      if (titleScore + descScore === 0 && description.length < 50) continue;
-
-      const jobUrl = `https://www.linkedin.com/jobs/view/${jobId}/`;
-
-      jobsToScore.push({
-        id: jobId,
-        url: jobUrl,
-        title: getDetailPanelTitle() || title,
-        company: getDetailPanelCompany() || company,
-        location,
-        description: description.slice(0, 3000),
-        scrapedAt: Date.now(),
-        status: 'scoring'
-      });
-
-      // Send batch of 10 to background for scoring
-      if (jobsToScore.length >= 10) {
-        const batch = jobsToScore.splice(0, 10);
-        setStatus(`Scoring batch… (${batch.length} jobs)`);
-        await sendBatchToBackground(batch);
-      }
     }
 
     // Send remaining
@@ -366,7 +392,7 @@
       await sendBatchToBackground(jobsToScore);
     }
 
-    setStatus('Scan complete!');
+    setStatus(`Scan complete — collected ${total} jobs.`);
     setProgress(total, total);
     if (btn) { btn.disabled = false; btn.textContent = 'Scan Again'; }
 
@@ -400,6 +426,12 @@
         resolve(undefined);
       }
     });
+  }
+
+  // Expose collection helpers for unit tests (virtualisation accumulation is the core fix).
+  if (typeof window !== 'undefined') {
+    window.pjaExtractCardMeta = extractCardMeta;
+    window.pjaAccumulateRenderedCards = accumulateRenderedCards;
   }
 
   // ── Init ───────────────────────────────────────────────────────────────────
