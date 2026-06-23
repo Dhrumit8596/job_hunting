@@ -102,7 +102,17 @@ module.exports = (t) => {
   t.eq(w.pjaDeterministicAnswer('Are you at least 18 years of age?'), 'Yes', 'det: 18+ -> Yes');
   t.eq(w.pjaDeterministicAnswer('How did you hear about us?'), 'LinkedIn', 'det: how-did-you-hear -> LinkedIn');
   t.eq(w.pjaDeterministicAnswer('What is the highest level of education you have completed?'), null, 'det: education -> null (AI handles)');
-  t.eq(w.pjaDeterministicAnswer('Describe your experience with SPC'), null, 'det: open-ended -> null');
+  t.eq(w.pjaDeterministicAnswer('Describe your experience with SPC'), null, 'det: open-ended "describe" -> null');
+
+  // --- experience screening: honest Yes for her domains, No for documented gaps, null otherwise ---
+  t.eq(w.pjaDeterministicAnswer('Do you have hands-on experience with cleanroom environments?'), 'Yes', 'det: cleanroom experience -> Yes (her domain)');
+  t.eq(w.pjaDeterministicAnswer('Do you have experience with wafer inspection and metrology?'), 'Yes', 'det: wafer/metrology -> Yes');
+  t.eq(w.pjaDeterministicAnswer('Are you familiar with SPC and root cause analysis?'), 'Yes', 'det: SPC -> Yes');
+  t.eq(w.pjaDeterministicAnswer('Do you have experience with FMEA?'), 'No', 'det: FMEA (gap) -> No');
+  t.eq(w.pjaDeterministicAnswer('Are you proficient in Python?'), 'No', 'det: Python (gap) -> No');
+  t.eq(w.pjaDeterministicAnswer('Do you have experience with ISO 13485?'), 'No', 'det: ISO13485 (gap) -> No');
+  t.eq(w.pjaDeterministicAnswer('How many years of experience do you have with quality engineering?'), null, 'det: "how many years" stays numeric -> null (not Yes)');
+  t.eq(w.pjaDeterministicAnswer('Do you have experience with injection molding?'), null, 'det: unknown domain -> null (AI decides, no fabrication)');
 
   // --- pjaIsGarbageLabel: never send junk labels to the AI ---
   t.eq(w.pjaIsGarbageLabel('yes'), true, 'garbage: "yes"');

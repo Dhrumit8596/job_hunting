@@ -2022,6 +2022,17 @@
     if (/willing to (relocate|travel|commute)|able to (relocate|commute|travel)|open to relocat/i.test(t)) return 'Yes';
     if (/background check|drug (test|screen)/i.test(t)) return 'Yes';
     if (/how did you hear|where did you (hear|find)|referral source|source of (this )?application/i.test(t)) return 'LinkedIn';
+    // Yes/No experience-screening — answer ONLY from her actual resume domains (honest, no
+    // fabrication): Yes for documented skills, No for documented gaps, else defer to the AI.
+    // Only fires on yes/no framings; excludes open-ended ("describe/explain/what") and numeric
+    // ("how many years") prompts, which the AI answerer / years-resolver handles.
+    if (!/how many|number of|years of|\byears\b|describe|explain|tell us|provide|\blist\b|what (is|are|was|were)|how (do|did|would|long)/i.test(t) &&
+        /do you have (hands.?on )?experience|have you (ever )?(used|worked with)|are you familiar( with)?|are you proficient|hands.?on experience (with|in)/i.test(t)) {
+      const LACKS = /\bfmea\b|\b8d\b|iso ?13485|optical metrolog|supplier audit|\bpython\b|\bcad\b|solidworks|programming|software (dev|engineer)|\bsql\b|machine learning|firmware/i;
+      if (LACKS.test(t)) return 'No';
+      const HAS = /quality|\bqa\b|\bqc\b|manufactur|metrolog|wafer|inspection|defect|thin film|photolith|cleanroom|\byield\b|\bgmp\b|\bspc\b|root cause|measurement|thickness|process (control|improvement)|semiconductor|production|assembly|calibrat|nonconform|\bcapa\b|document control|iso ?9001|continuous improvement|\b5s\b/i;
+      if (HAS.test(t)) return 'Yes';
+    }
     return null;
   }
   if (typeof window !== 'undefined') window.pjaDeterministicAnswer = pjaDeterministicAnswer;
