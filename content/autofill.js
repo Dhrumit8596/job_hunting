@@ -1291,6 +1291,31 @@ function pjaFillCombobox(input, value, key) {
     }
     if (!match && lv.length > 3)
       match = opts.find(o => o.textContent.trim().toLowerCase().includes(lv));
+    // Numeric-range options (e.g. years-of-experience dropdowns "0-3 years", "5-8 years",
+    // "12+ years"): a bare number like "6" never substring-matches a range, so pick the range
+    // that CONTAINS the value (6 → "5-8 years"). Uses profile.yearsExperience routed as the value.
+    if (!match && /^\d+$/.test(lv)) {
+      const n = parseInt(lv, 10);
+      match = opts.find(o => {
+        const txt = o.textContent.trim();
+        const plus = txt.match(/(\d+)\s*\+/);                       // "12+ years"
+        if (plus) return n >= parseInt(plus[1], 10);
+        const range = txt.match(/(\d+)\s*(?:-|–|—|to)\s*(\d+)/i);   // "5-8 years"
+        if (range) return n >= parseInt(range[1], 10) && n <= parseInt(range[2], 10);
+        return false;
+      });
+      // boundary fallback: if the value sits exactly on a shared edge (e.g. 5 with "3-5"+"5-8"),
+      // the first containing range above already wins; if nothing matched, take the highest
+      // range whose lower bound is ≤ n (so 20 → "12+ years").
+      if (!match) {
+        let best = null, bestLow = -1;
+        for (const o of opts) {
+          const m = o.textContent.match(/(\d+)/);
+          if (m) { const low = parseInt(m[1], 10); if (low <= n && low > bestLow) { bestLow = low; best = o; } }
+        }
+        match = best;
+      }
+    }
     // State name → abbreviation (e.g. "California" → "CA")
     if (!match) {
       const STATE_ABBR = {

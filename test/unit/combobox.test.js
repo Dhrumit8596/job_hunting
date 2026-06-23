@@ -77,11 +77,17 @@ module.exports = async (t) => {
   w.document.body.appendChild(rsLb);
   w.pjaFillCombobox(rsInput, 'San Jose State University', 'university');
 
+  // years-of-experience RANGE combobox: value "6" must pick the range containing it ("5-8 years"),
+  // not fail (a bare "6" substring-matches none of the ranges).
+  const c4 = makeCombobox(w, 'yrs', ['0-3 years', '3-5 years', '5-8 years', '8-12 years', '12+ years']);
+  w.pjaFillCombobox(c4.input, '6', 'yearsExperience');
+
   // the filler queues on window._pjaComboChain with ~700ms timers; wait it out
-  await sleep(3200);
+  await sleep(3800);
 
   t.eq(c1.clicked(), 'No, I will not require sponsorship', 'combobox: sponsorship=No clicks will-not-require');
   t.eq(c2.clicked(), 'I am authorized to work', 'combobox: workAuth=Yes clicks authorized (not sponsorship)');
   t.eq(c3.clicked(), 'Job board or social media', 'combobox: referralSource=LinkedIn maps to job-board/social');
   t.eq(rsClicked, 'San Jose State University', 'combobox: react-select education (select__control) selects the matching school');
+  t.eq(c4.clicked(), '5-8 years', 'combobox: years=6 picks the containing range (5-8 years)');
 };
