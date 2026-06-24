@@ -267,6 +267,15 @@ async function handleRequest(req, res) {
     return;
   }
 
+  // ── /close-job-tabs: close stray LinkedIn/ATS tabs (clears CDP contention before a clean run) ──
+  if (req.method === 'POST' && req.url === '/close-job-tabs') {
+    let pushed = 0;
+    for (const client of wsClients) { if (client.readyState === 1) { client.send(JSON.stringify({ cmd: 'closeJobTabs' })); pushed++; } }
+    res.writeHead(200, CORS); res.end(JSON.stringify({ ok: true, pushed }));
+    console.log(`[PJA] /close-job-tabs → ${pushed} client(s)`);
+    return;
+  }
+
   // ── /open-tab: open a URL in a new tab (kicks off external-apply on the first ATS page) ──
   if (req.method === 'POST' && req.url === '/open-tab') {
     let body = '';

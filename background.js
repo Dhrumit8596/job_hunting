@@ -117,6 +117,16 @@ if (DEV_MODE) {
                 };
                 chrome.tabs.onUpdated.addListener(onUpd);
               });
+            } else if (msg.cmd === 'closeJobTabs') {
+              // Close stray LinkedIn/ATS tabs left by prior runs so a fresh EA tab has the tab's
+              // single CDP slot to itself (stray tabs cause 'CDP timeout→synthetic' contention).
+              chrome.tabs.query({}, tabs => {
+                for (const t of tabs) {
+                  if (/linkedin\.com\/jobs|greenhouse\.io|lever\.co|ashbyhq\.com|paylocity\.com|jobvite\.com|smartrecruiters\.com|myworkdayjobs|icims\.com/i.test(t.url || '')) {
+                    try { chrome.tabs.remove(t.id); } catch (_) {}
+                  }
+                }
+              });
             } else if (msg.cmd === 'resolveAts') {
               // Resolve external ATS URLs for a batch of jobIds via the voyager API on a LinkedIn
               // tab (paced, account-safe). Writes externalApplyUrl back onto pja_shortlist entries.
