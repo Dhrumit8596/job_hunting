@@ -66,6 +66,37 @@ if (DEV_MODE) {
               });
             } else if (msg.cmd === 'openTab') {
               chrome.tabs.create({ url: msg.url });
+            } else if (msg.cmd === 'startEasyApply') {
+              // Backend-triggered Easy Apply: seed the EA queue into a fresh LinkedIn tab's
+              // sessionStorage, then reload so content.js resumeApplyOnLoad runs the auto-apply
+              // loop using the extension's OWN chrome.debugger trusted clicks. As long as no
+              // external CDP client (claude-in-chrome) is attached to this tab, the trusted
+              // clicks work. Monitor progress via /get-storage (pja_ea_lastresult / pja_applied_log).
+              const eaJobs = Array.isArray(msg.jobs) ? msg.jobs : [];
+              if (eaJobs.length) {
+                chrome.storage.local.get(['pja_profile', 'pja_answers'], d => {
+                  const queue = { status: 'applying', jobs: eaJobs, currentIndex: 0,
+                    results: { applied: [], skipped: [], errors: [] },
+                    profile: d.pja_profile || {}, answers: d.pja_answers || {} };
+                  // Open the /apply/ FAST PATH — renders the Easy Apply modal directly in regular
+                  // DOM (no slow detail panel, no flaky job-view anchor). pjaApplyOnCurrentPage
+                  // detects the pre-rendered modal and drives it.
+                  const firstUrl = 'https://www.linkedin.com/jobs/search/?f_AL=true&currentJobId=' + eaJobs[0].jobId;
+                  chrome.tabs.create({ url: firstUrl, active: true }, tab => {
+                    const onUpd = (tid, info) => {
+                      if (tid === tab.id && info.status === 'complete') {
+                        chrome.tabs.onUpdated.removeListener(onUpd);
+                        chrome.scripting.executeScript({
+                          target: { tabId: tab.id },
+                          func: q => { try { sessionStorage.setItem('pja_apply_queue', JSON.stringify(q)); location.reload(); } catch (e) {} },
+                          args: [queue],
+                        }).catch(() => {});
+                      }
+                    };
+                    chrome.tabs.onUpdated.addListener(onUpd);
+                  });
+                });
+              }
             } else if (msg.cmd === 'cdpDateTest') {
               const dbgLog = [];
               const origLog = console.log.bind(console);
