@@ -882,7 +882,10 @@ async function pjaApplyOnCurrentPage(job, profile, answers, onStatus) {
       }
     }
 
-    const btns = pjaModalBtns();
+    // The modal footer (Next/Review/Submit) can mount a beat after the step body renders, so a
+    // single read sometimes sees zero buttons → false 'unknown_buttons'. Retry until they appear.
+    let btns = pjaModalBtns();
+    for (let r = 0; r < 6 && btns.length === 0; r++) { await pjaAutoWait(800); btns = pjaModalBtns(); }
     pjaTrace('step' + step + ' resume=' + isResumeStep + ' btns=' + btns.join(',').slice(0, 40));
 
     if (btns.includes('Submit application')) {
