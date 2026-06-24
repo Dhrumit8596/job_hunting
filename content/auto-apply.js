@@ -294,7 +294,7 @@ function pjaScanQualifyingJobs() {
 // For required radio groups that pjaFillForm couldn't match to profile/answers,
 // apply sensible defaults based on the question text.
 
-function pjaFillRequiredRadioFallback() {
+function pjaFillRequiredRadioFallback(profile) {
   const m = pjaGetCurrentModal();
   const root = m ? m.root : document; // fall back to document on Greenhouse pages
 
@@ -309,6 +309,20 @@ function pjaFillRequiredRadioFallback() {
 
     const legendText = (fs.querySelector('legend')?.textContent || '').toLowerCase();
 
+    // Education-LEVEL pickers ("What is the highest level of education you have completed?") have
+    // degree-level OPTIONS (High school/GED, Associate, Bachelor's, Master's, Doctorate) — NOT
+    // Yes/No. The old /education/ → 'Yes' rule found no 'Yes' option and the group stayed empty →
+    // 'stuck' (the Penumbra blocker). Pick the option matching the candidate's actual degree.
+    if (/highest level of education|level of education|education.*(completed|attained|level)|degree.*completed/i.test(legendText)) {
+      const deg = String((profile && profile.degree) || '').toLowerCase();
+      const want = /phd|doctor/.test(deg) ? 'doctor' : /master/.test(deg) ? 'master'
+        : /bachelor/.test(deg) ? 'bachelor' : /associate/.test(deg) ? 'associate' : 'bachelor';
+      const opts = radios.map(r => ({ r, t: ((typeof pjaGetLabel === 'function' ? pjaGetLabel(r) : (r.getAttribute('aria-label') || '')) + ' ' + (r.value || '')).toLowerCase() }));
+      const pick = opts.find(o => o.t.includes(want))
+        || opts.find(o => /bachelor/.test(o.t)) || opts.find(o => /associate/.test(o.t)) || opts.find(o => /\bdegree\b/.test(o.t));
+      if (pick) { pjaClickRadio(pick.r); continue; }
+    }
+
     let defaultVal = null;
     if (/certif|licens|accreditat|credential|qualification/i.test(legendText)) {
       defaultVal = 'Yes'; // the candidate has ASQ/quality certifications and 6yrs quality experience
@@ -320,6 +334,10 @@ function pjaFillRequiredRadioFallback() {
       defaultVal = 'Yes';
     } else if (/sponsor/i.test(legendText)) {
       defaultVal = 'No';
+    } else if (/referred by|employee referral|referral from|were you referred/i.test(legendText)) {
+      defaultVal = 'No'; // not an employee referral
+    } else if (/federal government|u\.s\.? government|government employee/i.test(legendText)) {
+      defaultVal = 'No'; // never employed by the U.S. federal government
     } else if (/commut|onsite|on-site|on site|in.person|report to.*office|work.*office|hybrid/i.test(legendText)) {
       defaultVal = 'Yes';
     } else if (/willing|able|available|comfortable|open to/i.test(legendText)) {
@@ -561,7 +579,7 @@ async function pjaAutoApplyOne(job, profile, answers, onStatus) {
       pjaFillForm(profile, answers);
       await pjaAutoWait(600);
       // Fallback pass: fill any required radio groups / comboboxes autofill missed
-      pjaFillRequiredRadioFallback();
+      pjaFillRequiredRadioFallback(profile);
       if (typeof pjaFillRequiredComboboxFallback === 'function') pjaFillRequiredComboboxFallback(profile, answers);
       // Auto-check consent/acknowledgment checkboxes
       pjaAutoCheckConsent();
@@ -907,7 +925,7 @@ async function pjaApplyOnCurrentPage(job, profile, answers, onStatus) {
     if (!isResumeStep) {
       pjaFillForm(profile, answers);
       await pjaAutoWait(600);
-      pjaFillRequiredRadioFallback();
+      pjaFillRequiredRadioFallback(profile);
       pjaFillRequiredSelectFallback();
       if (typeof pjaFillRequiredComboboxFallback === 'function') pjaFillRequiredComboboxFallback(profile, answers);
       pjaAutoCheckConsent();
@@ -1123,5 +1141,6 @@ window.__pjaExternalApplyOnCurrentPage = pjaExternalApplyOnCurrentPage;
 // Testable Easy Apply modal helpers (used by unit tests + internally).
 window.__pjaModalHeading               = pjaModalHeading;
 window.__pjaModalBtns                  = pjaModalBtns;
+window.__pjaFillRequiredRadioFallback  = pjaFillRequiredRadioFallback;
 window.__pjaEmptyRequiredFields        = pjaEmptyRequiredFields;
 window.__pjaEasyApplyState             = pjaEasyApplyState;

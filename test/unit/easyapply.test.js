@@ -107,4 +107,34 @@ module.exports = (t) => {
   wFill.pjaFillForm({ email: 'q@e.com', firstName: 'Q' }, {});
   t.eq(wFill.document.getElementById('jobs-search-box-keyword-id-ember1').value, '', 'EA: pjaFillForm leaves the page search bar empty');
   t.eq(wFill.document.getElementById('global-nav-search-input').value, '', 'EA: pjaFillForm leaves the global nav search empty');
+
+  // --- education-LEVEL radio picker (the Penumbra 'stuck' blocker) ---
+  // The question has degree-level options, not Yes/No → pick the one matching profile.degree.
+  const wEdu = load(`<!DOCTYPE html><html><body>
+    <div class="jobs-easy-apply-modal" role="dialog"><h3>Additional Questions</h3>
+      <fieldset aria-required="true">
+        <legend>What is the highest level of education you have completed?</legend>
+        <label><input type="radio" name="edu" value="High school diploma or GED" required> High school diploma or GED</label>
+        <label><input type="radio" name="edu" value="Associate's degree"> Associate's degree</label>
+        <label><input type="radio" name="edu" value="Bachelor's degree"> Bachelor's degree</label>
+        <label><input type="radio" name="edu" value="Master's degree"> Master's degree</label>
+      </fieldset>
+    </div>
+  </body></html>`);
+  wEdu.__pjaFillRequiredRadioFallback({ degree: "Bachelor's Degree" });
+  const checkedEdu = Array.from(wEdu.document.querySelectorAll('input[name=edu]')).find(r => r.checked);
+  t.ok(checkedEdu && /bachelor/i.test(checkedEdu.value), 'EA: education-level radio selects the matching degree (Bachelor\'s), not Yes/No');
+
+  // --- referral radio → No (not an employee referral) ---
+  const wRef = load(`<!DOCTYPE html><html><body>
+    <div class="jobs-easy-apply-modal" role="dialog"><h3>Additional Questions</h3>
+      <fieldset aria-required="true"><legend>Were you referred by a Penumbra Employee?</legend>
+        <label><input type="radio" name="ref" value="Yes" required> Yes</label>
+        <label><input type="radio" name="ref" value="No"> No</label>
+      </fieldset>
+    </div>
+  </body></html>`);
+  wRef.__pjaFillRequiredRadioFallback({});
+  const checkedRef = Array.from(wRef.document.querySelectorAll('input[name=ref]')).find(r => r.checked);
+  t.ok(checkedRef && /no/i.test(checkedRef.value), 'EA: referral radio answers No');
 };
