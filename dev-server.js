@@ -563,6 +563,36 @@ BEST FITS (TN-eligible, score 85-95): Wafer Inspection/Metrology/Yield/Defect/Pr
     return;
   }
 
+  // ── /score-shortlist: concurrently score every unscored (fitScore==null) shortlist entry ──
+  // Used after FAST coverage scans (which collect placeholders only). Much faster than the scan's
+  // sequential per-batch scoring (scoreAll runs 4 chunks in parallel). Writes fitScore back.
+  if (req.method === 'POST' && req.url === '/score-shortlist') {
+    (async () => {
+      try {
+        const st = await getStorageFromExtension(['pja_shortlist']);
+        const list = (st && st.pja_shortlist) || [];
+        const unscored = list.filter(j => j && (j.fitScore == null) && (j.id || j.jobId));
+        if (unscored.length === 0) {
+          res.writeHead(200, CORS); res.end(JSON.stringify({ ok: true, scored: 0, total: list.length })); return;
+        }
+        const scored = await scoreAll(unscored.map(j => ({ id: j.id || j.jobId, title: j.title, company: j.company, location: j.location, description: j.description || '' })));
+        const byId = {};
+        for (const s of scored) byId[String(s.id)] = s.fitScore;
+        const merged = list.map(j => {
+          const id = String(j.id || j.jobId || '');
+          return (id in byId && byId[id] != null) ? { ...j, fitScore: byId[id], status: 'scored' } : j;
+        });
+        setStorageToExtension({ pja_shortlist: merged });
+        const got = Object.values(byId).filter(v => v != null).length;
+        res.writeHead(200, CORS); res.end(JSON.stringify({ ok: true, scored: got, requested: unscored.length, total: merged.length }));
+        console.log(`[PJA] /score-shortlist → scored ${got}/${unscored.length}`);
+      } catch (e) {
+        res.writeHead(500, CORS); res.end(JSON.stringify({ ok: false, error: e.message }));
+      }
+    })();
+    return;
+  }
+
   // ── /source: find roles across ATSes, fit-score, route to queue/shortlist ──
   // body: { threshold=70, queueLimit=0, write=true }
   //   queueLimit>0 → auto-queue that many top roles into pja_ext_queue (auto-submit).

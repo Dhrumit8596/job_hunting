@@ -17,7 +17,8 @@
     'gmp','iso 13485','fmea','lean six sigma','six sigma','photolithography','lithography',
     'optical metrology','8d','semiconductor','inspection','quality engineer','process engineer',
     'metrology engineer','manufacturing engineer','defect','fab','cvd','ald','etch','deposition',
-    'process control','quality assurance','quality management','iso 9001','process improvement'
+    'process control','quality assurance','quality management','iso 9001','process improvement',
+    'equipment','yield','failure analysis','reliability','test engineer','integration','process','quality'
   ];
 
   function keywordScore(text) {
@@ -418,7 +419,7 @@
             description: description.slice(0, 3000), scrapedAt: Date.now(), status: 'scoring'
           });
           scoredCount++;
-          if (jobsToScore.length >= 10) { await sendBatchToBackground(jobsToScore.splice(0, 10)); }
+          if (jobsToScore.length >= 10) { await sendBatchToBackground(jobsToScore.splice(0, 10), FAST); }
         }
 
         // Scroll one step and stop when we reach the bottom and the position holds (virtualised
@@ -447,7 +448,7 @@
     // Send remaining
     if (jobsToScore.length > 0) {
       setStatus(`Scoring final batch… (${jobsToScore.length} jobs)`);
-      await sendBatchToBackground(jobsToScore);
+      await sendBatchToBackground(jobsToScore, FAST);
     }
 
     // Coverage report: collected-vs-LinkedIn-reported, channel split. Appended (by query) to
@@ -487,13 +488,13 @@
     });
   }
 
-  function sendBatchToBackground(jobs) {
+  function sendBatchToBackground(jobs, collectOnly) {
     return new Promise(resolve => {
       // chrome.runtime.sendMessage throws synchronously (not via callback) when
       // the extension context is invalidated (e.g. after an extension update).
       // Without a try/catch the Promise never settles and the scan hangs forever.
       try {
-        chrome.runtime.sendMessage({ type: 'BATCH_SCORE_JOBS', jobs }, resp => {
+        chrome.runtime.sendMessage({ type: 'BATCH_SCORE_JOBS', jobs, collectOnly: !!collectOnly }, resp => {
           if (chrome.runtime.lastError) {
             console.warn('PJA batch error:', chrome.runtime.lastError.message);
           }

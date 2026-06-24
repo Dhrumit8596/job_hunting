@@ -1676,7 +1676,9 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
       const SKILL_KW = ['spc','metrology','wafer','thin film','clean room','cleanroom','gmp',
         'iso 13485','fmea','lean six sigma','six sigma','photolithography','optical metrology',
         '8d','semiconductor','inspection','quality engineer','process engineer','metrology engineer',
-        'manufacturing engineer','defect','fab','cvd','ald','etch','deposition','process control'];
+        'manufacturing engineer','defect','fab','cvd','ald','etch','deposition','process control',
+        'equipment engineer','yield','failure analysis','reliability engineer','integration engineer',
+        'process integration','cmp','lithography','test engineer','quality','process'];
 
       const candidates = jobs.filter(j => {
         if (shortlist.some(s => s.id === j.id)) return false; // already scored
@@ -1705,6 +1707,11 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
 
       // If concurrent batch already added everything, nothing left to score
       if (toScore.length === 0) { sendResponse({ success: true, added: 0 }); return; }
+
+      // COLLECT-ONLY (FAST coverage scan): placeholders are written above; skip the slow per-batch
+      // scoring here. The unscored entries (fitScore:null) are scored later in one concurrent pass
+      // via dev-server /score-shortlist. Returns immediately so the scan can keep paginating.
+      if (msg.collectOnly) { sendResponse({ success: true, added: toScore.length, collected: true }); return; }
 
       // BUG5 fix: DEV_MODE guard — non-dev path uses analyzeJob (Nano/Claude/template).
       if (!DEV_MODE) {
