@@ -109,7 +109,8 @@ if (DEV_MODE) {
                     setTimeout(() => {
                       chrome.scripting.executeScript({
                         target: { tabId: tab.id },
-                        func: () => { if (typeof window.__pjaStartScan === 'function') window.__pjaStartScan(); },
+                        func: (fast) => { if (typeof window.__pjaStartScan === 'function') window.__pjaStartScan({ fast }); },
+                        args: [!!msg.fast],
                       }).catch(() => {});
                     }, 4000);
                   }

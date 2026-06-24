@@ -307,12 +307,33 @@
   const SCROLL_SETTLE_MS  = 300;  // wait after each step for new cards to mount
   const SCROLL_MAX_PASSES = 30;   // safety cap (~12 000 px / 400 px ≈ 30 pages)
 
-  const SCROLL_MAX_PAGES = 4;     // results pages to walk (≈25/page → up to ~100 jobs)
+  // Walk ALL results pages for near-complete coverage (LinkedIn caps a query at ~40 pages /
+  // ~1000 results; a CA process-engineer variant is typically <500 = <20 pages). Stops early
+  // when goToNextPage() finds no next button.
+  const SCROLL_MAX_PAGES = 40;
 
   function findListContainer() {
     return document.querySelector(
       '[class*="jobs-search-results-list"], [class*="scaffold-layout__list-container"]'
     ) || document.querySelector('.jobs-search-results__list') || null;
+  }
+
+  // Read LinkedIn's REPORTED result count ("About 123 results" / "123 results") so a scan can
+  // report collected-vs-reported coverage. Returns a number or null.
+  function pjaReadResultCount() {
+    const sel = '.jobs-search-results-list__subtitle, .results-context-header__job-count, [class*="results-context-header"]';
+    let txt = '';
+    const el = document.querySelector(sel);
+    if (el) txt = el.textContent || '';
+    if (!/\d/.test(txt)) {
+      // Fallback: scan small header spans near the top for "N results".
+      const cand = Array.from(document.querySelectorAll('h1, h2, span, div'))
+        .map(e => (e.textContent || '').trim())
+        .find(t => t.length < 40 && /\b[\d,]+\+?\s+results?\b/i.test(t));
+      if (cand) txt = cand;
+    }
+    const m = txt.replace(/,/g, '').match(/([\d]+)\+?\s*results?/i);
+    return m ? parseInt(m[1], 10) : null;
   }
 
   // Advance to the next results page (LinkedIn paginates ~25/page via an SPA control).
@@ -333,9 +354,13 @@
   let scanning = false;
   const scannedThisSession = new Set(); // prevents re-sending same job in one page session
 
-  async function startScan() {
+  async function startScan(opts) {
     if (scanning) return;
     scanning = true;
+    // FAST coverage mode: collect card metadata + channel + score by TITLE only — skip the
+    // per-card detail-panel click. Lets one run walk all pages across many query variants without
+    // hammering the account. External ATS URLs are resolved later, only for the top candidates.
+    const FAST = !!(opts && opts.fast);
 
     const btn = document.getElementById('pja-scan-btn');
     if (btn) { btn.disabled = true; btn.textContent = 'Scanning…'; }
@@ -365,22 +390,31 @@
           setStatus(`Scanning… ${cardMeta.size} found · ${scoredCount} scored`);
           if (await checkCache(meta.jobId)) continue;
 
-          // Click the card to load its description into the detail panel (better fit scoring).
-          const link = card.querySelector('a[href*="/jobs/view/"]') || card.querySelector('a');
-          if (link) link.click();
-          const description = await waitForDetailPanelDescription();
-          // Free pre-filter: need at least one keyword in title/company/desc.
-          if (keywordScore(meta.title + ' ' + meta.company) + keywordScore(description) === 0 && description.length < 50) continue;
-
-          // Capture the real offsite ATS apply URL for external jobs (decoded from LinkedIn's
-          // safety-go wrapper), so LinkedIn-sourced external roles are applyable via external-apply.
-          const externalApplyUrl = meta.isEasyApply ? null : getDetailPanelApplyUrl();
+          let description = '';
+          let externalApplyUrl = null;
+          let title = meta.title, company = meta.company;
+          if (!FAST) {
+            // Click the card to load its description into the detail panel (better fit scoring).
+            const link = card.querySelector('a[href*="/jobs/view/"]') || card.querySelector('a');
+            if (link) link.click();
+            description = await waitForDetailPanelDescription();
+            // Free pre-filter: need at least one keyword in title/company/desc.
+            if (keywordScore(meta.title + ' ' + meta.company) + keywordScore(description) === 0 && description.length < 50) continue;
+            // Capture the real offsite ATS apply URL for external jobs (decoded from LinkedIn's
+            // safety-go wrapper), so LinkedIn-sourced external roles are applyable via external-apply.
+            externalApplyUrl = meta.isEasyApply ? null : getDetailPanelApplyUrl();
+            title = getDetailPanelTitle() || meta.title;
+            company = getDetailPanelCompany() || meta.company;
+          } else {
+            // FAST: pre-filter on title+company only (no description available).
+            if (keywordScore(meta.title + ' ' + meta.company) === 0) continue;
+          }
           jobsToScore.push({
             id: meta.jobId, url: meta.applyUrl,
-            title: getDetailPanelTitle() || meta.title,
-            company: getDetailPanelCompany() || meta.company,
+            title, company,
             location: meta.location, isEasyApply: meta.isEasyApply,
             applyUrl: externalApplyUrl || meta.applyUrl, externalApplyUrl: externalApplyUrl || null,
+            needsAtsResolution: FAST && !meta.isEasyApply, // external job whose ATS URL isn't decoded yet
             description: description.slice(0, 3000), scrapedAt: Date.now(), status: 'scoring'
           });
           scoredCount++;
@@ -416,7 +450,27 @@
       await sendBatchToBackground(jobsToScore);
     }
 
-    setStatus(`Scan complete — collected ${total} jobs.`);
+    // Coverage report: collected-vs-LinkedIn-reported, channel split. Appended (by query) to
+    // pja_scan_coverage so the unified run can verify near-complete coverage (not a sample).
+    const metas = Array.from(cardMeta.values());
+    const easyCount = metas.filter(m => m.isEasyApply).length;
+    const reported = pjaReadResultCount();
+    const params = new URLSearchParams(location.search);
+    const coverage = {
+      query: params.get('keywords') || '', location: params.get('location') || '',
+      collected: total, reported,
+      coverage: (reported && reported > 0) ? Math.round((total / reported) * 100) : null,
+      easyApply: easyCount, external: total - easyCount, ts: Date.now(),
+    };
+    try {
+      chrome.storage.local.get('pja_scan_coverage', r => {
+        const arr = Array.isArray(r.pja_scan_coverage) ? r.pja_scan_coverage : [];
+        arr.push(coverage);
+        chrome.storage.local.set({ pja_scan_coverage: arr.slice(-50) });
+      });
+    } catch (_) {}
+
+    setStatus(`Scan complete — collected ${total}${reported ? '/' + reported : ''} jobs (EA ${easyCount}, ext ${total - easyCount}).`);
     setProgress(total, total);
     if (btn) { btn.disabled = false; btn.textContent = 'Scan Again'; }
 
