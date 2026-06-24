@@ -734,6 +734,15 @@ select.pcw-input{cursor:pointer}
 
   // ── Resume per-job apply across page navigations ─────────────────────────
   function resumeApplyOnLoad() {
+    // ACCOUNT SAFETY: if LinkedIn shows a security checkpoint/captcha, PAUSE the queue and
+    // surface it — never auto-interact with a challenge (no CAPTCHA solving; protect the account).
+    if (/\/checkpoint\/|\/challenge\//.test(location.pathname)
+        || /security verification|quick security check|are you a human|unusual activity/i.test(document.body?.innerText || '')) {
+      const rawCp = sessionStorage.getItem('pja_apply_queue');
+      if (rawCp) { try { const q = JSON.parse(rawCp); q.status = 'paused_checkpoint'; sessionStorage.setItem('pja_apply_queue', JSON.stringify(q)); } catch (_) {} }
+      try { chrome.storage.local.set({ pja_ea_paused: { reason: 'checkpoint', url: location.href, ts: Date.now() } }); } catch (_) {}
+      return;
+    }
     // Queue navigates to /jobs/view/{id}/ — modal opens in interop-outlet shadow root.
     // Also handles /jobs/search/?currentJobId= for legacy/fallback paths.
     const onSearchWithJob = location.href.includes('linkedin.com/jobs/search/') &&
@@ -840,9 +849,10 @@ select.pcw-input{cursor:pointer}
       } else {
         sessionStorage.setItem('pja_apply_queue', JSON.stringify(queue));
         setTimeout(() => {
-          // Advance via the /apply/ FAST PATH (modal renders directly), not the flaky job-view anchor.
+          // Humane pacing: randomized 15–40s gap between jobs to protect the LinkedIn account
+          // from anti-automation throttling. Advance via the search page (reliable Easy Apply button).
           window.location.href = `https://www.linkedin.com/jobs/search/?f_AL=true&currentJobId=${queue.jobs[queue.currentIndex].jobId}`;
-        }, 3000 + Math.random() * 2000);
+        }, 15000 + Math.random() * 25000);
       }
     };
 
