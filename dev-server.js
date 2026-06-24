@@ -267,6 +267,24 @@ async function handleRequest(req, res) {
     return;
   }
 
+  // ── /open-tab: open a URL in a new tab (kicks off external-apply on the first ATS page) ──
+  if (req.method === 'POST' && req.url === '/open-tab') {
+    let body = '';
+    req.on('data', d => body += d);
+    req.on('end', () => {
+      let url = null;
+      try { url = JSON.parse(body || '{}').url || null; } catch (_) {}
+      let pushed = 0;
+      for (const client of wsClients) {
+        if (client.readyState === 1 && url) { client.send(JSON.stringify({ cmd: 'openTab', url })); pushed++; }
+      }
+      res.writeHead(200, CORS);
+      res.end(JSON.stringify({ ok: true, pushed, url }));
+      console.log(`[PJA] /open-tab → ${url} to ${pushed} client(s)`);
+    });
+    return;
+  }
+
   // ── /resolve-ats: resolve external ATS URLs for jobIds via voyager (body {jobIds:[...]}) ──
   if (req.method === 'POST' && req.url === '/resolve-ats') {
     let body = '';

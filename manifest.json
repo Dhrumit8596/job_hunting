@@ -20,6 +20,7 @@
     "*://*.smartrecruiters.com/*",
     "*://*.ashbyhq.com/*",
     "*://*.rippling.com/*",
+    "*://*.paylocity.com/*",
     "*://*/*"
   ],
   "background": {
@@ -47,6 +48,7 @@
         "*://*.bamboohr.com/*",
         "*://*.smartrecruiters.com/*",
         "*://*.ashbyhq.com/*",
+        "*://*.paylocity.com/*",
         "*://*.successfactors.com/*",
         "*://*.smashfly.com/*",
         "*://*/careers/*",
