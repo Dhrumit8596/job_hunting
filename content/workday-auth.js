@@ -146,7 +146,27 @@ function detectScreen() {
     return 'start_application';
   }
 
+  // Workday JOB POSTING page (pre-apply): a primary "Apply" button is present but the apply/auth
+  // flow hasn't started yet. Detect it so we can dismiss cookie banners and click Apply to enter
+  // the flow (these new tenants land here, not on a recognized auth screen → was 'unknown').
+  if (document.querySelector('[data-automation-id="adventureButton"], [data-automation-id="apply"], a[data-automation-id="apply"]')
+      || Array.from(document.querySelectorAll('a[role=button], button, a')).some(el =>
+           /^apply(\s|$)/i.test((el.textContent || '').trim()) && el.offsetParent !== null)) {
+    return 'job_apply_start';
+  }
+
   return 'unknown';
+}
+
+// Dismiss cookie-consent banners that block clicks on some Workday tenants (OneTrust/TrustArc/
+// Workday legal notice + generic Accept buttons).
+function wdDismissCookies() {
+  const sels = ['[data-automation-id="legalNoticeAcceptButton"]', '#onetrust-accept-btn-handler',
+    '#truste-consent-button', '.onetrust-close-btn-handler', '[aria-label*="accept all" i]'];
+  for (const s of sels) { const b = document.querySelector(s); if (b) { try { b.click(); } catch (_) {} } }
+  const acc = Array.from(document.querySelectorAll('button, a')).find(el =>
+    /^(accept all|accept all cookies|accept|i accept|agree|got it|allow all)$/i.test((el.textContent || '').trim()) && el.offsetParent !== null);
+  if (acc) { try { acc.click(); } catch (_) {} }
 }
 
 // ── React-safe form submission via background MAIN world handler ──────────
@@ -556,6 +576,27 @@ async function run(profile, password) {
         }
       }
       dbg('start_application: screen did not change after 10s');
+    }
+    return 'unknown_screen';
+  }
+
+  if (screen === 'job_apply_start') {
+    // On the Workday job posting: dismiss cookie banners (block clicks), then click the primary
+    // Apply button to enter the application/auth flow, then re-run with the new screen.
+    wdDismissCookies();
+    await sleep(600);
+    const applyBtn = document.querySelector('[data-automation-id="adventureButton"], [data-automation-id="apply"], a[data-automation-id="apply"]')
+      || Array.from(document.querySelectorAll('a[role=button], button, a')).find(el => /^apply(\s|$)/i.test((el.textContent || '').trim()) && el.offsetParent !== null);
+    if (applyBtn) {
+      dbg('job_apply_start: clicking Apply');
+      applyBtn.click();
+      let waited = 0;
+      while (waited < 12000) {
+        await sleep(400); waited += 400;
+        const s2 = detectScreen();
+        if (s2 !== 'job_apply_start') { dbg('job_apply_start → ' + s2 + ' after ' + waited + 'ms'); return run(profile, password); }
+      }
+      dbg('job_apply_start: no change after Apply click');
     }
     return 'unknown_screen';
   }
