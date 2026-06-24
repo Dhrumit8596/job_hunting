@@ -78,4 +78,33 @@ module.exports = (t) => {
   const stOk = wOk.__pjaEasyApplyState(wOk.__pjaGetCurrentModal());
   t.eq(stOk.success, true, 'EA-state: post-submit confirmation → success (double-submit guard)');
   t.eq(w2.__pjaEasyApplyState(null).open, false, 'EA-state: no modal → not open');
+
+  // --- button collector excludes PAGE-level buttons (dialog scoping) ---
+  // Regression: scanning the whole shadow root pulled in LinkedIn's "Messaging" widget + a page
+  // "Next", and clicking the wrong "Next" navigated the page → reload loop (open_loop_skip).
+  const wPage = load(`<!DOCTYPE html><html><body>
+    <button id="page-msg">Messaging</button>
+    <button id="page-next">Next</button>
+    <div class="jobs-easy-apply-modal" role="dialog"><h3>Contact info</h3>
+      <button>Continue to next step</button>
+    </div>
+  </body></html>`);
+  const pbtns = wPage.__pjaModalBtns();
+  t.ok(pbtns.includes('Continue to next step'), 'EA: finds the in-dialog button');
+  t.ok(!pbtns.includes('Messaging'), 'EA: excludes page-level Messaging button');
+  t.ok(!pbtns.includes('Next'), 'EA: excludes page-level Next button (outside the dialog)');
+
+  // --- pjaFillForm scoped to the open EA modal (never fills LinkedIn's page search bar) ---
+  // Regression: document-wide fill populated jobs-search-box-*, triggering a search that closed
+  // the modal mid-flow (modal_closed/unknown_buttons root cause).
+  const wFill = load(`<!DOCTYPE html><html><body>
+    <input id="jobs-search-box-keyword-id-ember1" role="combobox">
+    <input id="global-nav-search-input">
+    <div class="jobs-easy-apply-modal" role="dialog"><h3>Contact info</h3>
+      <label for="em">Email address*</label><input id="em" type="email" required>
+    </div>
+  </body></html>`);
+  wFill.pjaFillForm({ email: 'q@e.com', firstName: 'Q' }, {});
+  t.eq(wFill.document.getElementById('jobs-search-box-keyword-id-ember1').value, '', 'EA: pjaFillForm leaves the page search bar empty');
+  t.eq(wFill.document.getElementById('global-nav-search-input').value, '', 'EA: pjaFillForm leaves the global nav search empty');
 };
