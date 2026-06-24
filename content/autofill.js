@@ -1487,7 +1487,15 @@ function pjaFillForm(profile, answers) {
   }
 
   let filled = 0;
+  // Easy Apply scope guard: when an EA modal is open, only fill fields INSIDE it. Filling
+  // LinkedIn's own page inputs (the jobs search bar) triggers a search that closes the modal
+  // mid-flow (root cause of EA modal_closed/unknown_buttons). On ATS pages there's no EA modal,
+  // so _eaRoot is null and filling stays document-wide as before.
+  const _eaModal = (typeof pjaGetCurrentModal === 'function') ? pjaGetCurrentModal() : null;
+  const _eaRoot = _eaModal && _eaModal.root;
   fields.forEach(el => {
+    if (_eaRoot && _eaRoot.contains && !_eaRoot.contains(el)) return;
+    if (/^(jobs-search-box|global-nav)/.test(el.id || '')) return;
     const rawLabel = pjaGetLabel(el);
     const key = pjaClassify(rawLabel);
 

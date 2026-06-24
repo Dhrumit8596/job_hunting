@@ -66,17 +66,23 @@ function pjaModalButtonEls() {
   const m = pjaGetCurrentModal();
   if (!m) return [];
   const r = m.root;
-  const scopes = [];
-  if (r.querySelector) { const d = r.querySelector('[role="dialog"]'); if (d) scopes.push(d); }
-  if (r.closest) { const u = r.closest('[role="dialog"]'); if (u) scopes.push(u); }
-  scopes.push(r);
+  // PREFER the actual [role=dialog] element — scanning the whole shadow root pulled in page-level
+  // controls (LinkedIn's "Messaging" widget, a page "Next"), and clicking the wrong "Next"
+  // navigated the page → reload loop (open_loop_skip). The dialog excludes those.
+  let dialog = (r.querySelector && r.querySelector('[role="dialog"]'))
+    || (r.closest && r.closest('[role="dialog"]'))
+    || (r.matches && r.matches('[role="dialog"]') ? r : null);
+  if (dialog) {
+    const b = Array.from(dialog.querySelectorAll('button'));
+    if (b.length) return b;
+  }
+  // Fallback (footer mounted outside the dialog, or no dialog): widen to root then shadow root.
+  const scopes = [r];
   if (m.isShadow) { const o = document.getElementById('interop-outlet'); if (o && o.shadowRoot) scopes.push(o.shadowRoot); }
   const seen = new Set(); const out = [];
   for (const sc of scopes) {
     if (!sc.querySelectorAll) continue;
-    for (const b of sc.querySelectorAll('button')) {
-      if (!seen.has(b)) { seen.add(b); out.push(b); }
-    }
+    for (const b of sc.querySelectorAll('button')) { if (!seen.has(b)) { seen.add(b); out.push(b); } }
   }
   return out;
 }

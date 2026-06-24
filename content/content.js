@@ -724,7 +724,7 @@ select.pcw-input{cursor:pointer}
             answers: answersResp?.answers || {}
           };
           sessionStorage.setItem('pja_apply_queue', JSON.stringify(queue));
-          window.location.href = `https://www.linkedin.com/jobs/view/${_autoJobs[0].jobId}/`;
+          window.location.href = `https://www.linkedin.com/jobs/search/?f_AL=true&currentJobId=${_autoJobs[0].jobId}`;
         });
       });
     } catch (err) {
@@ -841,7 +841,7 @@ select.pcw-input{cursor:pointer}
         sessionStorage.setItem('pja_apply_queue', JSON.stringify(queue));
         setTimeout(() => {
           // Advance via the /apply/ FAST PATH (modal renders directly), not the flaky job-view anchor.
-          window.location.href = `https://www.linkedin.com/jobs/view/${queue.jobs[queue.currentIndex].jobId}/`;
+          window.location.href = `https://www.linkedin.com/jobs/search/?f_AL=true&currentJobId=${queue.jobs[queue.currentIndex].jobId}`;
         }, 3000 + Math.random() * 2000);
       }
     };
