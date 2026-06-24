@@ -58,11 +58,35 @@ function pjaModalHeading() {
   return m.root.querySelector('h3')?.textContent?.trim() || null;
 }
 
-function pjaModalBtns() {
+// Robust button-ELEMENT collector. The Easy Apply footer (Next/Review/Submit) can render just
+// OUTSIDE the narrow modal root (a separate footer container), which made the old m.root-only
+// scan return [] even though the heading read fine → false 'unknown_buttons'. Widen to the full
+// [role=dialog] (header+content+footer) and, in shadow modals, the whole shadow root. Deduped.
+function pjaModalButtonEls() {
   const m = pjaGetCurrentModal();
   if (!m) return [];
-  return Array.from(m.root.querySelectorAll('button'))
-    .map(b => b.textContent.trim()).filter(Boolean);
+  const r = m.root;
+  const scopes = [];
+  if (r.querySelector) { const d = r.querySelector('[role="dialog"]'); if (d) scopes.push(d); }
+  if (r.closest) { const u = r.closest('[role="dialog"]'); if (u) scopes.push(u); }
+  scopes.push(r);
+  if (m.isShadow) { const o = document.getElementById('interop-outlet'); if (o && o.shadowRoot) scopes.push(o.shadowRoot); }
+  const seen = new Set(); const out = [];
+  for (const sc of scopes) {
+    if (!sc.querySelectorAll) continue;
+    for (const b of sc.querySelectorAll('button')) {
+      if (!seen.has(b)) { seen.add(b); out.push(b); }
+    }
+  }
+  return out;
+}
+function pjaModalBtns() {
+  const seen = new Set(); const out = [];
+  for (const b of pjaModalButtonEls()) {
+    const t = (b.textContent || '').trim();
+    if (t && !seen.has(t)) { seen.add(t); out.push(t); }
+  }
+  return out;
 }
 
 // Classify the current Easy Apply modal state — used for mid-refresh resilience: if LinkedIn
@@ -83,7 +107,7 @@ function pjaEasyApplyState(modal) {
 function pjaClickInModal(label) {
   const m = pjaGetCurrentModal();
   if (!m) return false;
-  const btns = Array.from(m.root.querySelectorAll('button'));
+  const btns = pjaModalButtonEls(); // robust scope (incl footer / shadow)
   const btn = btns.find(b => b.textContent.trim() === label)
     || btns.find(b => (b.getAttribute('aria-label') || '').trim() === label)
     || btns.find(b => new RegExp('^' + label, 'i').test(b.textContent.trim()));
@@ -99,7 +123,7 @@ function pjaClickInModal(label) {
 function pjaTrustedClickInModal(label) {
   const m = pjaGetCurrentModal();
   if (!m) return Promise.resolve(false);
-  const btns = Array.from(m.root.querySelectorAll('button'));
+  const btns = pjaModalButtonEls(); // robust scope (incl footer / shadow), not just m.root
   const btn = btns.find(b => b.textContent.trim() === label)
     || btns.find(b => (b.getAttribute('aria-label') || '').trim() === label)
     || btns.find(b => new RegExp('^' + label, 'i').test(b.textContent.trim()));
@@ -417,12 +441,19 @@ function pjaAutoCheckConsent() {
 // because they are type=number or unlabeled comboboxes.
 function pjaFillRequiredComboboxFallback(profile, answers) {
   const visible = el => !!el.offsetParent;
+  // SCOPE to the Easy Apply modal — scanning document-wide previously filled LinkedIn's own
+  // search bar (jobs-search-box-keyword/location), which triggers a search and CLOSES the modal
+  // mid-flow (root cause of false unknown_buttons/modal_closed). On non-EA (Greenhouse) callers
+  // there's no modal, so fall back to document.
+  const _m = (typeof pjaGetCurrentModal === 'function') ? pjaGetCurrentModal() : null;
+  const scope = _m ? ((_m.root.querySelector && _m.root.querySelector('[role="dialog"]')) || _m.root) : document;
   // Include ALL visible empty role=combobox inputs (not just [required] ones) — Greenhouse/Lever
   // often mark required on a wrapper, not the input. Filling is still gated below by label
   // patterns / answer-bank, so unmatched comboboxes (country, "how did you hear") are left alone.
-  const combos = Array.from(document.querySelectorAll(
+  const combos = Array.from(scope.querySelectorAll(
     'input[role=combobox], input[required][list], input[aria-required="true"][list]'
-  )).filter(el => visible(el) && !(el.value && el.value.trim()));
+  )).filter(el => visible(el) && !(el.value && el.value.trim())
+    && !/^jobs-search-box/.test(el.id || '')); // never touch the page search bar
 
   for (const el of combos) {
     // Education dropdowns (School/Degree/Discipline) are handled by pjaFillGreenhouseEducation
@@ -718,7 +749,7 @@ async function pjaApplyOnCurrentPage(job, profile, answers, onStatus) {
   // would make every subsequent job return 'aborted'. Reset defensively.
   PJA_AUTO_STATE.aborted = false;
   const { title } = job;
-  pjaTrace('run-start path=' + location.pathname.slice(-30));
+  pjaTrace('run-start v2 path=' + location.pathname.slice(-30));
   onStatus(`${title}: looking for Easy Apply…`);
   await pjaAutoWait(2000);
 
@@ -887,6 +918,27 @@ async function pjaApplyOnCurrentPage(job, profile, answers, onStatus) {
     let btns = pjaModalBtns();
     for (let r = 0; r < 6 && btns.length === 0; r++) { await pjaAutoWait(800); btns = pjaModalBtns(); }
     pjaTrace('step' + step + ' resume=' + isResumeStep + ' btns=' + btns.join(',').slice(0, 40));
+    if (btns.length === 0) {
+      // DIAGNOSTIC → dedicated race-free key (pja_dbg writes race under rapid tracing). Capture
+      // what the page actually contains so we can fix the collector precisely.
+      try {
+        const dm = pjaGetCurrentModal();
+        const sc = dm ? (dm.root.querySelector && dm.root.querySelector('[role="dialog"]')) || dm.root : null;
+        const txt = el => (el.textContent || '').trim().slice(0, 30);
+        const cnt = (root, sel) => { try { return root && root.querySelectorAll ? root.querySelectorAll(sel).length : -1; } catch (_) { return -2; } };
+        const sample = (root, sel) => { try { return root && root.querySelectorAll ? Array.from(root.querySelectorAll(sel)).map(txt).filter(Boolean).slice(0, 8) : []; } catch (_) { return []; } };
+        const diag = {
+          ts: Date.now(), heading,
+          modal: dm ? { isShadow: dm.isShadow, rootTag: dm.root.tagName || dm.root.nodeName || '?', rootClass: (dm.root.className || '').slice(0, 60) } : null,
+          scopeBtn: cnt(sc, 'button'), scopeRoleBtn: cnt(sc, '[role="button"]'), scopeA: cnt(sc, 'a'),
+          scopeBtnTexts: sample(sc, 'button'), scopeRoleBtnTexts: sample(sc, '[role="button"],a'),
+          docModal: cnt(document, '.jobs-easy-apply-modal'), docDialog: cnt(document, '[role="dialog"]'),
+          docDialogBtns: sample(document, '[role="dialog"] button'),
+          docFooterBtns: sample(document, 'footer button, .artdeco-modal__actionbar button, [data-test-modal-actionbar] button'),
+        };
+        chrome.storage.local.set({ pja_ea_diag: diag });
+      } catch (_) {}
+    }
 
     if (btns.includes('Submit application')) {
       // Verification gate: stop with the completed form on screen so the user can

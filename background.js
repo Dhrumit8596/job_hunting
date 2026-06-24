@@ -78,10 +78,11 @@ if (DEV_MODE) {
                   const queue = { status: 'applying', jobs: eaJobs, currentIndex: 0,
                     results: { applied: [], skipped: [], errors: [] },
                     profile: d.pja_profile || {}, answers: d.pja_answers || {} };
-                  // Open the /apply/ FAST PATH — renders the Easy Apply modal directly in regular
-                  // DOM (no slow detail panel, no flaky job-view anchor). pjaApplyOnCurrentPage
-                  // detects the pre-rendered modal and drives it.
-                  const firstUrl = 'https://www.linkedin.com/jobs/search/?f_AL=true&currentJobId=' + eaJobs[0].jobId;
+                  // Open the JOB-VIEW page (not search): the search page has a keyword/location
+                  // search bar that pjaFillForm pollutes, triggering a search that closes the EA
+                  // modal mid-flow. Job-view has no search bar and the modal opens in the stable
+                  // shadow outlet. AUTO mode waits for the Easy Apply <button> to hydrate.
+                  const firstUrl = 'https://www.linkedin.com/jobs/view/' + eaJobs[0].jobId + '/';
                   chrome.tabs.create({ url: firstUrl, active: true }, tab => {
                     const onUpd = (tid, info) => {
                       if (tid === tab.id && info.status === 'complete') {
