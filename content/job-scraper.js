@@ -457,6 +457,7 @@
     window.pjaExtractCardMeta = extractCardMeta;
     window.pjaAccumulateRenderedCards = accumulateRenderedCards;
     window.pjaDecodeApplyUrl = pjaDecodeApplyUrl;
+    window.__pjaStartScan = startScan; // backend-triggerable (dev-server /start-scan → WS)
   }
 
   // ── Init ───────────────────────────────────────────────────────────────────

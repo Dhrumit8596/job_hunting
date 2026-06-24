@@ -98,6 +98,24 @@ if (DEV_MODE) {
                   });
                 });
               }
+            } else if (msg.cmd === 'startScan') {
+              // Backend-trigger the LinkedIn scanner on a search URL (sources EA candidates →
+              // pja_shortlist). Opens the search, then runs window.__pjaStartScan() in the tab.
+              const scanUrl = msg.url || 'https://www.linkedin.com/jobs/search/?f_AL=true&keywords=quality%20engineer&location=California';
+              chrome.tabs.create({ url: scanUrl, active: true }, tab => {
+                const onUpd = (tid, info) => {
+                  if (tid === tab.id && info.status === 'complete') {
+                    chrome.tabs.onUpdated.removeListener(onUpd);
+                    setTimeout(() => {
+                      chrome.scripting.executeScript({
+                        target: { tabId: tab.id },
+                        func: () => { if (typeof window.__pjaStartScan === 'function') window.__pjaStartScan(); },
+                      }).catch(() => {});
+                    }, 4000);
+                  }
+                };
+                chrome.tabs.onUpdated.addListener(onUpd);
+              });
             } else if (msg.cmd === 'cdpDateTest') {
               const dbgLog = [];
               const origLog = console.log.bind(console);
