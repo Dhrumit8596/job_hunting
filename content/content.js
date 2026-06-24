@@ -778,6 +778,16 @@ select.pcw-input{cursor:pointer}
 
     const finishAndAdvance = (result) => {
       try { chrome.storage.local.set({ pja_ea_lastresult: { at: Date.now(), jobId: job.jobId, title: job.title, result } }); } catch(e) {}
+      // LinkedIn daily Easy Apply cap: HALT the whole queue (don't burn the rest of the jobs on the
+      // limit notice) and surface it so the run pivots to other sources / resumes tomorrow.
+      if (result && (result.halt || result.reason === 'daily_limit')) {
+        try {
+          queue.status = 'paused_daily_limit';
+          sessionStorage.setItem('pja_apply_queue', JSON.stringify(queue));
+          chrome.storage.local.set({ pja_ea_paused: { reason: 'daily_limit', ts: Date.now() } });
+        } catch (e) {}
+        return;
+      }
       const r = queue.results;
       if (result.success) {
         r.applied.push(job);

@@ -884,6 +884,14 @@ async function pjaApplyOnCurrentPage(job, profile, answers, onStatus) {
   pjaTrace('open mode=' + (PJA_EA_AUTO_OPEN ? 'AUTO' : 'SEMI') + ' modalOpen=' + !!initModal + ' autoOpened=' + autoOpened);
   if (!initModal) { pjaTrace('result=no_easy_apply (modal never opened)'); return { success: false, reason: 'no_easy_apply' }; }
 
+  // LinkedIn DAILY Easy Apply submission cap — once hit, every job shows the limit notice (no
+  // Submit). Stop the whole queue (halt) and surface it; hammering won't help and risks the account.
+  if (/limit(ed)?\s+daily submission|daily submission limit|apply tomorrow|reached your (daily )?limit|save this job and apply tomorrow/i.test(document.body?.innerText || '')) {
+    pjaTrace('result=daily_limit (LinkedIn Easy Apply daily cap reached)');
+    pjaDismissModal();
+    return { success: false, reason: 'daily_limit', halt: true };
+  }
+
   // TEST MODE — stop here so nothing is filled or submitted. Reports HOW the modal opened.
   if (PJA_EA_DRY_RUN) {
     onStatus(`✓ Modal opened (${autoOpened ? 'AUTOMATICALLY' : 'after assist'}) — dry run, not submitting`);
