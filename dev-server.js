@@ -267,6 +267,24 @@ async function handleRequest(req, res) {
     return;
   }
 
+  // ── /resolve-ats: resolve external ATS URLs for jobIds via voyager (body {jobIds:[...]}) ──
+  if (req.method === 'POST' && req.url === '/resolve-ats') {
+    let body = '';
+    req.on('data', d => body += d);
+    req.on('end', () => {
+      let jobIds = [];
+      try { jobIds = JSON.parse(body || '{}').jobIds || []; } catch (_) {}
+      let pushed = 0;
+      for (const client of wsClients) {
+        if (client.readyState === 1) { client.send(JSON.stringify({ cmd: 'resolveAts', jobIds })); pushed++; }
+      }
+      res.writeHead(200, CORS);
+      res.end(JSON.stringify({ ok: true, pushed, count: jobIds.length }));
+      console.log(`[PJA] /resolve-ats → ${jobIds.length} jobIds to ${pushed} client(s)`);
+    });
+    return;
+  }
+
   // ── /inject: push inject signal to re-inject content scripts into open tabs ──
   if (req.method === 'POST' && req.url === '/inject') {
     let pushed = 0;

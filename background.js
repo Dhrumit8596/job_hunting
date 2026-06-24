@@ -117,6 +117,27 @@ if (DEV_MODE) {
                 };
                 chrome.tabs.onUpdated.addListener(onUpd);
               });
+            } else if (msg.cmd === 'resolveAts') {
+              // Resolve external ATS URLs for a batch of jobIds via the voyager API on a LinkedIn
+              // tab (paced, account-safe). Writes externalApplyUrl back onto pja_shortlist entries.
+              const jobIds = Array.isArray(msg.jobIds) ? msg.jobIds : [];
+              if (jobIds.length) {
+                chrome.tabs.create({ url: 'https://www.linkedin.com/jobs/search/?keywords=engineer', active: false }, tab => {
+                  const onUpd = (tid, info) => {
+                    if (tid === tab.id && info.status === 'complete') {
+                      chrome.tabs.onUpdated.removeListener(onUpd);
+                      setTimeout(() => {
+                        chrome.scripting.executeScript({
+                          target: { tabId: tab.id },
+                          func: ids => { if (typeof window.__pjaResolveVoyager === 'function') window.__pjaResolveVoyager(ids); },
+                          args: [jobIds],
+                        }).catch(() => {});
+                      }, 4000);
+                    }
+                  };
+                  chrome.tabs.onUpdated.addListener(onUpd);
+                });
+              }
             } else if (msg.cmd === 'cdpDateTest') {
               const dbgLog = [];
               const origLog = console.log.bind(console);

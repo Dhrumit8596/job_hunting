@@ -205,6 +205,41 @@
     return a ? pjaDecodeApplyUrl(a.getAttribute('href')) : null;
   }
 
+  // Resolve external ATS apply URLs for a batch of jobIds via LinkedIn's voyager API (no per-job
+  // page navigation → fast + account-safe; paced). Writes externalApplyUrl/applyUrl back onto the
+  // matching pja_shortlist entries. Must run on a logged-in linkedin.com tab (credentials:include).
+  async function pjaResolveVoyagerBatch(jobIds) {
+    const csrf = (document.cookie.match(/JSESSIONID="?([^";]+)"?/) || [])[1] || '';
+    const results = {};
+    let resolved = 0;
+    for (const jid of jobIds || []) {
+      try {
+        const url = `https://www.linkedin.com/voyager/api/jobs/jobPostings/${jid}?decorationId=com.linkedin.voyager.deco.jobs.web.shared.WebFullJobPosting-65`;
+        const r = await fetch(url, { headers: { 'csrf-token': csrf, accept: 'application/json' }, credentials: 'include' });
+        if (r.ok) {
+          const j = await r.json();
+          const am = j.applyMethod || (j.data && j.data.applyMethod) || {};
+          const off = am.companyApplyUrl ? am
+            : (am['com.linkedin.voyager.jobs.OffsiteApply'] || am['com.linkedin.voyager.jobs.web.shared.OffsiteApply'] || {});
+          const companyUrl = off.companyApplyUrl || null;
+          const dec = companyUrl ? (pjaDecodeApplyUrl(companyUrl) || companyUrl) : null;
+          results[String(jid)] = dec;
+          if (dec) resolved++;
+        } else { results[String(jid)] = null; }
+      } catch (_) { results[String(jid)] = null; }
+      chrome.storage.local.set({ pja_voyager_resolved: { ts: Date.now(), resolved, done: Object.keys(results).length, total: (jobIds || []).length } });
+      await delay(250 + Math.random() * 250);
+    }
+    await new Promise(res => chrome.storage.local.get('pja_shortlist', r => {
+      const list = (r.pja_shortlist || []).map(jb => {
+        const u = results[String(jb.id || jb.jobId)];
+        return u ? { ...jb, externalApplyUrl: u, applyUrl: u, needsAtsResolution: false } : jb;
+      });
+      chrome.storage.local.set({ pja_shortlist: list }, res);
+    }));
+    return results;
+  }
+
   // ── Inject floating scanner widget ────────────────────────────────────────
   // LinkedIn is a React SPA that can fully replace document.body children on
   // navigation. A simple getElementById guard only prevents double-injection
@@ -513,6 +548,7 @@
     window.pjaAccumulateRenderedCards = accumulateRenderedCards;
     window.pjaDecodeApplyUrl = pjaDecodeApplyUrl;
     window.__pjaStartScan = startScan; // backend-triggerable (dev-server /start-scan → WS)
+    window.__pjaResolveVoyager = pjaResolveVoyagerBatch; // backend-triggerable (/resolve-ats)
   }
 
   // ── Init ───────────────────────────────────────────────────────────────────
