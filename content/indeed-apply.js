@@ -152,12 +152,14 @@
       // Only act on the current job's viewjob page.
       if (jkOfUrl() !== job.jobId) return;
       await sleep(1500);
-      if (challenged()) { try { chrome.storage.local.set({ pja_indeed_paused: { reason: 'captcha', url: location.href, ts: Date.now() } }); } catch (_) {} return; }
       const applyBtn = document.querySelector('#indeedApplyButton, [data-testid="indeedApplyButton-test"]')
         || btnByText(/apply with indeed|apply now/i);
       diag('viewjob jk=' + jkOfUrl() + ' applyBtn=' + !!applyBtn);
-      if (applyBtn) { applyBtn.click(); /* → navigates to smartapply; resume fires there */ }
-      else { await advance(q, { success: false, reason: 'no_indeed_apply_button' }); }
+      if (applyBtn) { applyBtn.click(); return; /* → navigates to smartapply; resume fires there */ }
+      // No apply button: a real challenge replaced the page, OR the job isn't Easily-apply. Only a
+      // page WITHOUT the apply button + challenge text is a real challenge (avoid false positives).
+      if (challenged()) { try { chrome.storage.local.set({ pja_indeed_paused: { reason: 'captcha', url: location.href, ts: Date.now() } }); } catch (_) {} return; }
+      await advance(q, { success: false, reason: 'no_indeed_apply_button' });
       return;
     }
 
