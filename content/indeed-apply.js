@@ -15,6 +15,8 @@
 
   const PJA_INDEED_STOP_BEFORE_SUBMIT = false; // false = actually submit (autonomous). true = stop at submit for review.
   const sleep = ms => new Promise(r => setTimeout(r, ms));
+  const diag = m => { try { chrome.storage.local.get('pja_indeed_diag', d => { const a = (d.pja_indeed_diag || []).slice(-39); a.push((Date.now() % 100000) + ' ' + m); chrome.storage.local.set({ pja_indeed_diag: a }); }); } catch (_) {} };
+  diag('loaded host=' + host + ' vj=' + onViewJob + ' sa=' + onSmartApply);
   const QKEY = 'pja_indeed_queue';
   const getQ = () => new Promise(r => chrome.storage.local.get(QKEY, d => r(d[QKEY] || null)));
   const setQ = q => new Promise(r => chrome.storage.local.set({ [QKEY]: q }, r));
@@ -60,7 +62,13 @@
       }
 
       const path = location.pathname;
+      const kind0 = pjaIndeedStepKind(document);
+      const btnsNow = Array.from(document.querySelectorAll('button')).map(b => (b.textContent || '').trim()).filter(x => x && !/skip to|find jobs|save-icon|report|see more|save and close/i.test(x)).slice(0, 5);
+      diag('step' + step + ' path=' + path.replace('/beta/indeedapply/form/', '') + ' kind=' + kind0 + ' btns=' + btnsNow.join('|').slice(0, 60));
       if (path === prevPath) { same++; } else { same = 0; prevPath = path; }
+      // Stuck on the same step despite clicking advance → a required question we couldn't answer.
+      // Skip the job cleanly instead of looping the whole MAX budget.
+      if (same >= 3) { diag('stuck path=' + path.replace('/beta/indeedapply/form/', '')); return { success: false, reason: 'stuck_question', path }; }
 
       // Fill whatever this module needs (contact/resume are usually prefilled from the Indeed profile).
       try { if (typeof pjaFillForm === 'function') pjaFillForm(profile, answers); } catch (_) {}
@@ -70,6 +78,15 @@
       // Shared answerer for screening questions (years / work-auth / experience / education / etc.).
       if (typeof window.pjaAnswerRequiredViaAI === 'function') { try { await window.pjaAnswerRequiredViaAI(job, document.body); } catch (_) {} await sleep(600); }
 
+      if (/questions/i.test(path)) {
+        const qlabel = (document.querySelector('fieldset legend, [data-testid*="question" i], h2, [role=group] [role=heading]')?.textContent
+          || document.querySelector('label')?.textContent || '').trim().slice(0, 55);
+        const types = Array.from(document.querySelectorAll('input, select, textarea')).filter(e => e.name !== 'g-recaptcha-response')
+          .map(e => (e.type || e.tagName).toLowerCase()).join(',');
+        const checked = document.querySelectorAll('input[type=radio]:checked, input[type=checkbox]:checked').length;
+        const filledText = Array.from(document.querySelectorAll('input[type=text], textarea, select')).filter(e => e.value && e.value.trim()).length;
+        diag('Q "' + qlabel + '" types=[' + types + '] checked=' + checked + ' txt=' + filledText);
+      }
       // Submit (review step) vs Continue (advance).
       const submitBtn = btnByText(/submit (your )?application|^submit application$|^submit$/i);
       if (submitBtn) {
@@ -83,7 +100,8 @@
         continue;
       }
       const cont = btnByText(/^continue$/i) || btnByText(/^continue\b|^next\b|review your application/i);
-      if (cont) { cont.click(); await sleep(1600); continue; }
+      if (cont) { diag('click continue "' + (cont.textContent || '').trim().slice(0, 20) + '"'); cont.click(); await sleep(1600); continue; }
+      diag('no advance btn (kind=' + kind0 + ' same=' + same + ')');
 
       // No advance control + heading unchanged twice → stuck (unfillable required field).
       if (same >= 2) return { success: false, reason: 'stuck', path };
@@ -137,12 +155,14 @@
       if (challenged()) { try { chrome.storage.local.set({ pja_indeed_paused: { reason: 'captcha', url: location.href, ts: Date.now() } }); } catch (_) {} return; }
       const applyBtn = document.querySelector('#indeedApplyButton, [data-testid="indeedApplyButton-test"]')
         || btnByText(/apply with indeed|apply now/i);
+      diag('viewjob jk=' + jkOfUrl() + ' applyBtn=' + !!applyBtn);
       if (applyBtn) { applyBtn.click(); /* → navigates to smartapply; resume fires there */ }
       else { await advance(q, { success: false, reason: 'no_indeed_apply_button' }); }
       return;
     }
 
     if (onSmartApply) {
+      diag('smartapply start job=' + job.jobId + ' path=' + location.pathname.replace('/beta/indeedapply/', ''));
       const result = await runSmartApply(job, q.profile || {}, q.answers || {});
       await advance(q, result);
     }
