@@ -250,6 +250,24 @@ async function handleRequest(req, res) {
     return;
   }
 
+  // ── /start-indeed-apply: backend-trigger the Indeed Apply queue (body {jobs:[{jobId,title,company}]}) ──
+  if (req.method === 'POST' && req.url === '/start-indeed-apply') {
+    let body = '';
+    req.on('data', d => body += d);
+    req.on('end', () => {
+      let jobs = [];
+      try { jobs = JSON.parse(body || '{}').jobs || []; } catch (_) {}
+      let pushed = 0;
+      for (const client of wsClients) {
+        if (client.readyState === 1) { client.send(JSON.stringify({ cmd: 'startIndeedApply', jobs })); pushed++; }
+      }
+      res.writeHead(200, CORS);
+      res.end(JSON.stringify({ ok: true, pushed, queued: jobs.length }));
+      console.log(`[PJA] /start-indeed-apply → ${jobs.length} jobs to ${pushed} client(s)`);
+    });
+    return;
+  }
+
   // ── /start-scan: backend-trigger the LinkedIn scanner to source EA candidates → pja_shortlist ──
   if (req.method === 'POST' && req.url === '/start-scan') {
     let body = '';

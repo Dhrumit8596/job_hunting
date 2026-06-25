@@ -98,6 +98,20 @@ if (DEV_MODE) {
                   });
                 });
               }
+            } else if (msg.cmd === 'startIndeedApply') {
+              // Seed pja_indeed_queue + open the first job's viewjob page. indeed-apply.js drives
+              // the rest (click Apply → smartapply step-machine → submit → advance), resuming across
+              // the viewjob↔smartapply navigations. Monitor via pja_indeed_queue / pja_applied_log.
+              const ijobs = Array.isArray(msg.jobs) ? msg.jobs : [];
+              if (ijobs.length) {
+                chrome.storage.local.get(['pja_profile', 'pja_answers'], d => {
+                  const queue = { status: 'applying', jobs: ijobs, currentIndex: 0,
+                    results: { applied: [], skipped: [] }, profile: d.pja_profile || {}, answers: d.pja_answers || {} };
+                  chrome.storage.local.set({ pja_indeed_queue: queue, pja_indeed_paused: null }, () => {
+                    chrome.tabs.create({ url: 'https://www.indeed.com/viewjob?jk=' + ijobs[0].jobId, active: true });
+                  });
+                });
+              }
             } else if (msg.cmd === 'startScan') {
               // Backend-trigger a job scanner (sources candidates → pja_shortlist). source:'indeed'
               // runs the Indeed scanner; otherwise the LinkedIn scanner. Opens the search URL, then

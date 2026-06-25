@@ -36,6 +36,7 @@
         "*://*.linkedin.com/jobs/search/*",
         "*://*.indeed.com/viewjob*",
         "*://*.indeed.com/jobs*",
+        "*://smartapply.indeed.com/*",
         "*://*.glassdoor.com/job-listing/*",
         "*://*.glassdoor.com/Jobs/*",
         "*://*.greenhouse.io/*",
@@ -71,6 +72,7 @@
         "content/external-apply.js",
         "content/job-scraper.js",
         "content/indeed-scraper.js",
+        "content/indeed-apply.js",
         "content/content.js"
       ],
       "run_at": "document_idle",
