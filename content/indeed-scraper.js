@@ -82,62 +82,75 @@
     return m ? parseInt(m[1], 10) : null;
   }
 
-  // ── Scan flow ──────────────────────────────────────────────────────────────
+  // ── Stateful scan (resumes across page loads) ───────────────────────────────
+  // Indeed paginates with a FULL page navigation (not SPA), so an in-page loop dies on the next
+  // click. We persist scan state in chrome.storage and resume on each search-page load (like the
+  // Easy Apply queue), collecting page-by-page until no next page / page cap / challenge.
+  const SCAN_KEY = 'pja_indeed_scan';
+  const getScan = () => new Promise(r => chrome.storage.local.get(SCAN_KEY, d => r(d[SCAN_KEY] || null)));
+  const setScan = s => new Promise(r => chrome.storage.local.set({ [SCAN_KEY]: s }, r));
+  const isSearchPage = () => /\/jobs(\/|$|\?)/.test(location.pathname + location.search) || location.pathname === '/jobs';
+
   async function startIndeedScan(opts) {
-    if (window.__pjaIndeedScanning) return;
-    window.__pjaIndeedScanning = true;
-    const MAX_PAGES = (opts && opts.maxPages) || 20;
-    const cardMeta = new Map();
-    const pending = [];
-    const flush = async (force) => {
-      while (pending.length >= 10 || (force && pending.length)) {
-        const batch = pending.splice(0, 10);
-        await new Promise(res => { try { chrome.runtime.sendMessage({ type: 'BATCH_SCORE_JOBS', jobs: batch, collectOnly: true }, () => res()); } catch (_) { res(); } });
-      }
-    };
-
-    for (let page = 0; page < MAX_PAGES; page++) {
-      if (indeedChallenged()) {
-        try { chrome.storage.local.set({ pja_indeed_paused: { reason: 'challenge', url: location.href, ts: Date.now() } }); } catch (_) {}
-        window.__pjaIndeedScanning = false;
-        return { paused: 'challenge', collected: cardMeta.size };
-      }
-      // collect cards on this page
-      for (const card of getCardEls()) {
-        const meta = extractIndeedCardMeta(card);
-        if (!meta || !meta.jobId) continue;
-        if (!cardMeta.has(meta.jobId)) {
-          cardMeta.set(meta.jobId, meta);
-          if (kwHit(meta.title + ' ' + meta.company)) pending.push({ id: meta.jobId, ...meta, description: '', status: 'scoring' });
-        }
-      }
-      await flush(false);
-      const next = nextPageEl();
-      if (!next) break;
-      next.click();
-      await sleep(2500 + Math.random() * 1500); // humane pacing between pages
-    }
-    await flush(true);
-
-    // Coverage record (collected-vs-reported, channel split).
-    const metas = Array.from(cardMeta.values());
-    const ia = metas.filter(m => m.indeedApply).length;
-    const reported = reportedCount();
     const params = new URLSearchParams(location.search);
-    const coverage = { source: 'indeed', query: params.get('q') || '', location: params.get('l') || '',
-      collected: metas.length, reported, indeedApply: ia, external: metas.length - ia, ts: Date.now() };
-    try {
-      chrome.storage.local.get('pja_scan_coverage', r => {
-        const arr = Array.isArray(r.pja_scan_coverage) ? r.pja_scan_coverage : [];
-        arr.push(coverage); chrome.storage.local.set({ pja_scan_coverage: arr.slice(-80) });
-      });
-    } catch (_) {}
-    window.__pjaIndeedScanning = false;
-    return { collected: metas.length, indeedApply: ia, external: metas.length - ia, reported };
+    const scan = { q: params.get('q') || '', l: params.get('l') || '', page: 0,
+      maxPages: (opts && opts.maxPages) || 15, ids: [], total: 0, indeedApply: 0,
+      status: 'running', ts: Date.now() };
+    await setScan(scan);
+    return resumeIndeedScanOnLoad();
+  }
+
+  async function resumeIndeedScanOnLoad() {
+    if (!isSearchPage()) return;
+    const scan = await getScan();
+    if (!scan || scan.status !== 'running') return;
+    const params = new URLSearchParams(location.search);
+    if ((params.get('q') || '') !== scan.q) return; // a different search; not our scan
+    await sleep(1500); // let cards render
+
+    if (indeedChallenged()) {
+      try { chrome.storage.local.set({ pja_indeed_paused: { reason: 'challenge', url: location.href, ts: Date.now() } }); } catch (_) {}
+      scan.status = 'paused'; await setScan(scan); return;
+    }
+
+    // Collect this page's new cards.
+    const seen = new Set(scan.ids);
+    const pending = [];
+    let newCount = 0;
+    for (const card of getCardEls()) {
+      const meta = extractIndeedCardMeta(card);
+      if (!meta || !meta.jobId || seen.has(meta.jobId)) continue;
+      seen.add(meta.jobId); scan.ids.push(meta.jobId); scan.total++; newCount++;
+      if (meta.indeedApply) scan.indeedApply++;
+      if (kwHit(meta.title + ' ' + meta.company)) pending.push({ id: meta.jobId, ...meta, description: '', status: 'scoring' });
+    }
+    while (pending.length) {
+      const b = pending.splice(0, 10);
+      await new Promise(res => { try { chrome.runtime.sendMessage({ type: 'BATCH_SCORE_JOBS', jobs: b, collectOnly: true }, () => res()); } catch (_) { res(); } });
+    }
+
+    const next = nextPageEl();
+    if (next && newCount > 0 && scan.page + 1 < scan.maxPages) {
+      scan.page++; await setScan(scan);
+      await sleep(2500 + Math.random() * 1800); // humane pacing between pages
+      next.click(); // full navigation → resumeIndeedScanOnLoad fires on the next page load
+      return;
+    }
+    // Finished — write coverage + mark done.
+    scan.status = 'done'; await setScan(scan);
+    const cov = { source: 'indeed', query: scan.q, location: scan.l, collected: scan.total,
+      reported: reportedCount(), indeedApply: scan.indeedApply, external: scan.total - scan.indeedApply, ts: Date.now() };
+    chrome.storage.local.get('pja_scan_coverage', r => {
+      const arr = Array.isArray(r.pja_scan_coverage) ? r.pja_scan_coverage : [];
+      arr.push(cov); chrome.storage.local.set({ pja_scan_coverage: arr.slice(-80) });
+    });
   }
 
   // Exports (unit tests + backend trigger via /start-scan {source:'indeed'}).
   window.pjaExtractIndeedCardMeta = extractIndeedCardMeta;
   window.pjaIndeedChallenged = indeedChallenged;
   window.__pjaStartIndeedScan = startIndeedScan;
+
+  // Auto-resume across Indeed pagination navigations.
+  if (isSearchPage()) { setTimeout(() => { resumeIndeedScanOnLoad().catch(() => {}); }, 1200); }
 })();
