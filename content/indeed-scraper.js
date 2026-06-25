@@ -21,10 +21,22 @@
   const kwHit = t => { t = (t || '').toLowerCase(); return KW.some(k => t.includes(k)); };
 
   // ── Anti-bot guard ─────────────────────────────────────────────────────────
+  // NB: Indeed loads an INVISIBLE background reCAPTCHA on every normal results page, so we must
+  // NOT flag on the mere presence of "recaptcha"/captcha iframes. A real challenge either shows
+  // explicit challenge TEXT, or replaces the results entirely (no job cards) with a CF challenge /
+  // visible captcha.
   function indeedChallenged() {
-    const html = document.documentElement.innerHTML;
-    return /cf-challenge|hcaptcha|recaptcha|verify you are human|additional verification required|are you a robot|unusual traffic from your/i.test(html)
-      || !!document.querySelector('iframe[src*="hcaptcha"], iframe[src*="recaptcha"], #challenge-form');
+    const body = document.body;
+    const txt = body ? (body.innerText || body.textContent || '') : '';
+    if (/verify you are human|additional verification required|are you a robot|unusual traffic from your|please verify you'?re a human|complete the security check|let's confirm you are human/i.test(txt)) return true;
+    // A real challenge replaces the results: NO job cards present. (Normal pages always have cards
+    // AND an invisible bg reCAPTCHA — the no-cards guard avoids that false positive.)
+    const hasCards = document.querySelectorAll('[data-jk]').length > 0;
+    if (!hasCards) {
+      if (/cf-challenge|challenge-platform/i.test(document.documentElement.innerHTML)) return true;
+      if (document.querySelector('#challenge-form, iframe[src*="hcaptcha"], iframe[src*="recaptcha"], iframe[src*="captcha"]')) return true;
+    }
+    return false;
   }
 
   // ── Card extraction ────────────────────────────────────────────────────────
