@@ -86,4 +86,24 @@ function tnAdjustScore(title, score) {
   return s;
 }
 
-module.exports = { isEligibleTitle, isEligibleLocation, isItarExcluded, isExportControlledCompany, filterJobs, tnAdjustScore, ELIGIBLE_TITLE, TITLE_EXCLUDE, COMPANY_EXPORT_BLOCK };
+// MEDICAL-WAFER priority boost. The candidate's actual background is wafer inspection / metrology
+// / quality at a MEDICAL-DEVICE (point-of-care diagnostics) company, so medical-device roles in
+// her core domain are the MOST relevant — rank them above generic semiconductor. Boost when the role
+// is medical/medtech AND in her domain (wafer/metrology/inspection/quality/process). Smaller boost
+// for medical-device quality/manufacturing generally. Caps at 100. Applied after tnAdjustScore.
+const MEDICAL_RE = /\b(medical|medtech|med.?device|medical device|diagnostic|in.?vitro|ivd|biomedical|implant|surgical|orthoped|cardio|catheter|point.?of.?care|patient|fda|iso ?13485|gmp|cgmp|clinical|pharmaceutical|biotech|life science|drug delivery|combination product)\b/i;
+const CORE_DOMAIN_RE = /\b(wafer|metrolog|inspection|defect|thin film|photolith|cleanroom|clean room|microfab|mems|semiconductor|yield|failure analysis|spc|process engineer|process development|process integration)\b/i;
+function medicalWaferBoost(title, company, description, score) {
+  if (score == null || score === '') return score;
+  const s = Number(score);
+  if (!Number.isFinite(s)) return score;
+  const text = [title, company, description].filter(Boolean).join(' ');
+  const isMedical = MEDICAL_RE.test(text);
+  const isCore = CORE_DOMAIN_RE.test(String(title || '') + ' ' + String(description || ''));
+  let boost = 0;
+  if (isMedical && isCore) boost = 12;          // medical-device + her core wafer/metrology domain
+  else if (isMedical && /\b(quality|manufactur|process|equipment|reliability)\b/i.test(text)) boost = 7; // medical-device adjacent
+  return Math.min(100, s + boost);
+}
+
+module.exports = { isEligibleTitle, isEligibleLocation, isItarExcluded, isExportControlledCompany, filterJobs, tnAdjustScore, medicalWaferBoost, MEDICAL_RE, CORE_DOMAIN_RE, ELIGIBLE_TITLE, TITLE_EXCLUDE, COMPANY_EXPORT_BLOCK };

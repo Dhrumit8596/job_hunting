@@ -166,7 +166,7 @@ function setStorageToExtension(obj) {
 // Score one chunk (<=10) of jobs via the same prompt /batch-score uses.
 const SCORE_SYSTEM_PROMPT = `You score job fit for the candidate, a Canadian moving to California on a TN visa. Her ACTUAL skills (from resume): wafer inspection (~2,500/day), thin film metrology, photolithography, defect detection, thickness measurement, cleanroom, yield improvement, GMP, SPC, quality management/control, 5S, root cause analysis, EH&S, SDS handling, data management. She has a B.E. (Environmental Engineering). She does NOT have: FMEA, 8D, ISO 13485, optical metrology, supplier audits, Python, CAD.
 TN VISA RULE (critical): TN status is only for PROFESSIONAL roles (Engineer/Scientist + degree). Any Technician/Tech/Operator/Associate/Assembler/Supervisor/Manager/Coordinator/Lead title is NOT TN-eligible → score it 0-25 no matter how well skills match. Engineer/Scientist titles are eligible. No H-1B available; roles needing US citizenship/clearance → ≤30.
-BEST FITS (TN-eligible, score 85-95): Wafer Inspection/Metrology/Yield/Defect/Process(-Integration) Engineer in semiconductor; Thin Film/Photolithography/CMP/Etch Process Engineer. Quality/Reliability/Equipment/Manufacturing Engineer (semi/medtech) 70-88. Deduct 10-15 per required gap (FMEA/8D/ISO13485/Python/CAD). Score 0-100. Return ONLY a JSON array [{id, score}]. No markdown, no explanation.`;
+BEST FITS (TN-eligible, score 85-95): Wafer Inspection/Metrology/Yield/Defect/Process(-Integration) Engineer in semiconductor; Thin Film/Photolithography/CMP/Etch Process Engineer. Quality/Reliability/Equipment/Manufacturing Engineer (semi/medtech) 70-88. TOP PRIORITY (score 90-95): roles in her core domain (wafer/metrology/inspection/quality/process) at MEDICAL-DEVICE / diagnostics / medtech companies — her current role is at a medical-device / point-of-care diagnostics company, so medical-device + wafer/metrology/quality is her single strongest match. Deduct 10-15 per required gap (FMEA/8D/ISO13485/Python/CAD). Score 0-100. Return ONLY a JSON array [{id, score}]. No markdown, no explanation.`;
 
 async function scoreJobChunk(batch) {
   const jobList = batch.map((j, i) => `Job ${i + 1}: "${j.title}" at "${j.company}" (${j.location})`).join('\n---\n');
@@ -195,10 +195,11 @@ async function scoreAll(jobs, concurrency = 4) {
     }
   }
   await Promise.all(Array.from({ length: Math.min(concurrency, chunks.length || 1) }, worker));
-  const { tnAdjustScore } = require('./sourcing/filter');
+  const { tnAdjustScore, medicalWaferBoost } = require('./sourcing/filter');
   return jobs.map(j => {
     const raw = byId[String(j.id)] != null ? byId[String(j.id)] : null;
-    return { ...j, fitScore: raw == null ? null : tnAdjustScore(j.title, raw) };
+    if (raw == null) return { ...j, fitScore: null };
+    return { ...j, fitScore: medicalWaferBoost(j.title, j.company, j.description, tnAdjustScore(j.title, raw)) };
   });
 }
 
@@ -588,13 +589,20 @@ Job IDs (in order): ${batch.map(j => JSON.stringify(j.id)).join(', ')}`;
 
         const batchPrompt = `You score job fit for the candidate, a Canadian moving to California on a TN visa. Her ACTUAL skills (from resume): wafer inspection (~2,500/day), thin film metrology, photolithography, defect detection, thickness measurement, cleanroom, yield improvement, GMP, SPC, quality management/control, 5S, root cause analysis, EH&S, SDS handling, data management. She has a B.E. (Environmental Engineering). She does NOT have: FMEA, 8D, ISO 13485, optical metrology, supplier audits, Python, CAD.
 TN VISA RULE (critical): TN status is only for PROFESSIONAL roles (Engineer/Scientist + degree). Any Technician/Tech/Operator/Associate/Assembler/Supervisor/Manager/Coordinator/Lead title is NOT TN-eligible → score it 0-25 no matter how well skills match. Engineer/Scientist titles are eligible. No H-1B available; roles needing US citizenship/clearance → ≤30.
-BEST FITS (TN-eligible, score 85-95): Wafer Inspection/Metrology/Yield/Defect/Process(-Integration) Engineer in semiconductor; Thin Film/Photolithography/CMP/Etch Process Engineer. Quality/Reliability Engineer (semi/medtech) 70-88. Deduct 10-15 per required gap (FMEA/8D/ISO13485/Python/CAD). Score 0-100. Return ONLY a JSON array [{id, score}]. No markdown, no explanation.`;
+BEST FITS (TN-eligible, score 85-95): Wafer Inspection/Metrology/Yield/Defect/Process(-Integration) Engineer in semiconductor; Thin Film/Photolithography/CMP/Etch Process Engineer. Quality/Reliability Engineer (semi/medtech) 70-88. TOP PRIORITY (score 90-95): her core domain (wafer/metrology/inspection/quality/process) at MEDICAL-DEVICE / diagnostics / medtech companies — her current role is at a medical-device / point-of-care diagnostics company, so medical-device + wafer/metrology/quality is her single strongest match. Deduct 10-15 per required gap (FMEA/8D/ISO13485/Python/CAD). Score 0-100. Return ONLY a JSON array [{id, score}]. No markdown, no explanation.`;
 
         const raw = await runClaudeWithSystemPrompt(batchPrompt, prompt);
         const start = raw.indexOf('[');
         const end   = raw.lastIndexOf(']');
         if (start === -1 || end === -1) throw new Error('No JSON array in response: ' + raw.slice(0, 120));
-        const scores = JSON.parse(raw.slice(start, end + 1));
+        let scores = JSON.parse(raw.slice(start, end + 1));
+        // Apply TN grading + medical-wafer priority boost (medical-device domain relevance).
+        const { tnAdjustScore, medicalWaferBoost } = require('./sourcing/filter');
+        const jById = {}; for (const j of batch) jById[String(j.id)] = j;
+        scores = scores.map(s => {
+          const j = jById[String(s.id)] || {};
+          return { ...s, score: medicalWaferBoost(j.title, j.company, j.description, tnAdjustScore(j.title, s.score)) };
+        });
 
         console.log(`done (${Date.now() - t0}ms) scores=[${scores.map(s=>s.score).join(',')}]`);
         res.writeHead(200, CORS);
