@@ -1,0 +1,55 @@
+'use strict';
+// Indeed scraper tests: card extraction (jobkey/title/company/location), channel classification
+// (Indeed "Easily apply" vs External), and the anti-bot challenge detector. SYNTHETIC DOM only.
+const fs = require('fs');
+const path = require('path');
+const { JSDOM } = require('jsdom');
+const ROOT = path.resolve(__dirname, '../..');
+
+function load(html) {
+  const dom = new JSDOM(html, { url: 'https://www.indeed.com/jobs?q=process+engineer&l=California', runScripts: 'outside-only' });
+  const w = dom.window;
+  w.chrome = { storage: { local: { get: (k, cb) => cb && cb({}), set: (o, cb) => cb && cb() } },
+    runtime: { sendMessage() {}, onMessage: { addListener() {} } } };
+  w.console = { log() {}, warn() {}, error() {} };
+  w.eval(fs.readFileSync(path.resolve(ROOT, 'content/indeed-scraper.js'), 'utf8'));
+  return w;
+}
+
+function card(jk, title, company, location, easily) {
+  return `<div class="job_seen_beacon">
+    <a data-jk="${jk}" class="jcs-JobTitle"><span title="${title}">${title}</span></a>
+    <span data-testid="company-name">${company}</span>
+    <div data-testid="text-location">${location}</div>
+    ${easily ? '<span>Easily apply</span>' : ''}
+  </div>`;
+}
+
+module.exports = (t) => {
+  const w = load(`<!DOCTYPE html><body>
+    ${card('abc123', 'Manufacturing Engineer', 'ECA Medical Instruments', 'Newbury Park, CA', true)}
+    ${card('def456', 'Senior Principal Process Engineer', 'Coherent Corp.', '5 min·Sunnyvale, CA', false)}
+  </body>`);
+
+  t.ok(typeof w.pjaExtractIndeedCardMeta === 'function', 'indeed: extractor exposed on window');
+
+  const c1 = w.document.querySelectorAll('.job_seen_beacon')[0];
+  const m1 = w.pjaExtractIndeedCardMeta(c1);
+  t.eq(m1.jobId, 'abc123', 'indeed: jobkey from data-jk');
+  t.eq(m1.title, 'Manufacturing Engineer', 'indeed: title parsed');
+  t.eq(m1.company, 'ECA Medical Instruments', 'indeed: company parsed');
+  t.eq(m1.platform, 'indeed', 'indeed: platform tagged');
+  t.eq(m1.indeedApply, true, 'indeed: "Easily apply" → indeedApply=true');
+  t.eq(m1.isEasyApply, false, 'indeed: not LinkedIn EA');
+  t.ok(/viewjob\?jk=abc123$/.test(m1.applyUrl), 'indeed: applyUrl is the viewjob URL');
+
+  const c2 = w.document.querySelectorAll('.job_seen_beacon')[1];
+  const m2 = w.pjaExtractIndeedCardMeta(c2);
+  t.eq(m2.indeedApply, false, 'indeed: no "Easily apply" → external (indeedApply=false)');
+  t.ok(/sunnyvale/i.test(m2.location) && !/min/i.test(m2.location), 'indeed: location strips the "N min" commute prefix');
+
+  // anti-bot challenge detector
+  t.eq(w.pjaIndeedChallenged(), false, 'indeed: normal results page → not challenged');
+  const wc = load('<!DOCTYPE html><body><div>Additional Verification Required</div><iframe src="https://hcaptcha.com/x"></iframe></body>');
+  t.eq(wc.pjaIndeedChallenged(), true, 'indeed: captcha/hcaptcha page → challenged (pause)');
+};

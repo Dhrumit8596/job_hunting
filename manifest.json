@@ -70,6 +70,7 @@
         "content/auto-apply.js",
         "content/external-apply.js",
         "content/job-scraper.js",
+        "content/indeed-scraper.js",
         "content/content.js"
       ],
       "run_at": "document_idle",

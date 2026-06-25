@@ -255,11 +255,11 @@ async function handleRequest(req, res) {
     let body = '';
     req.on('data', d => body += d);
     req.on('end', () => {
-      let url = null, fast = false;
-      try { const b = JSON.parse(body || '{}'); url = b.url || null; fast = !!b.fast; } catch (_) {}
+      let url = null, fast = false, source = null;
+      try { const b = JSON.parse(body || '{}'); url = b.url || null; fast = !!b.fast; source = b.source || null; } catch (_) {}
       let pushed = 0;
       for (const client of wsClients) {
-        if (client.readyState === 1) { client.send(JSON.stringify({ cmd: 'startScan', url, fast })); pushed++; }
+        if (client.readyState === 1) { client.send(JSON.stringify({ cmd: 'startScan', url, fast, source })); pushed++; }
       }
       res.writeHead(200, CORS);
       res.end(JSON.stringify({ ok: true, pushed }));

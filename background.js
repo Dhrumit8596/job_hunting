@@ -99,9 +99,13 @@ if (DEV_MODE) {
                 });
               }
             } else if (msg.cmd === 'startScan') {
-              // Backend-trigger the LinkedIn scanner on a search URL (sources EA candidates →
-              // pja_shortlist). Opens the search, then runs window.__pjaStartScan() in the tab.
-              const scanUrl = msg.url || 'https://www.linkedin.com/jobs/search/?f_AL=true&keywords=quality%20engineer&location=California';
+              // Backend-trigger a job scanner (sources candidates → pja_shortlist). source:'indeed'
+              // runs the Indeed scanner; otherwise the LinkedIn scanner. Opens the search URL, then
+              // runs the platform's start-scan in the tab.
+              const isIndeed = msg.source === 'indeed';
+              const scanUrl = msg.url || (isIndeed
+                ? 'https://www.indeed.com/jobs?q=process+engineer&l=California'
+                : 'https://www.linkedin.com/jobs/search/?f_AL=true&keywords=quality%20engineer&location=California');
               chrome.tabs.create({ url: scanUrl, active: true }, tab => {
                 const onUpd = (tid, info) => {
                   if (tid === tab.id && info.status === 'complete') {
@@ -109,10 +113,13 @@ if (DEV_MODE) {
                     setTimeout(() => {
                       chrome.scripting.executeScript({
                         target: { tabId: tab.id },
-                        func: (fast) => { if (typeof window.__pjaStartScan === 'function') window.__pjaStartScan({ fast }); },
-                        args: [!!msg.fast],
+                        func: (fast, source) => {
+                          if (source === 'indeed') { if (typeof window.__pjaStartIndeedScan === 'function') window.__pjaStartIndeedScan({}); }
+                          else { if (typeof window.__pjaStartScan === 'function') window.__pjaStartScan({ fast }); }
+                        },
+                        args: [!!msg.fast, msg.source || ''],
                       }).catch(() => {});
-                    }, 4000);
+                    }, 4500);
                   }
                 };
                 chrome.tabs.onUpdated.addListener(onUpd);

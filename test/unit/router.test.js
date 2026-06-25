@@ -20,6 +20,9 @@ module.exports = (t) => {
     { id: '555', title: 'Yield Engineer',            company: 'Cerebras Systems', isEasyApply: true, fitScore: 85 }, // export-controlled
     { id: '666', title: 'Equipment Engineer',        company: 'ASML', location: 'San Jose, CA', isEasyApply: false, applyUrl: 'https://boards.greenhouse.io/asml/jobs/2', fitScore: 78 },
     { id: '777', title: 'Process Engineer',          company: 'Lam Research', isEasyApply: false, applyUrl: 'x', fitScore: 70 }, // dup company::title of 222
+    // Indeed channel: "Easily apply" → indeedApply bucket; Indeed external → external bucket.
+    { id: 'i1', title: 'Manufacturing Engineer',     company: 'ECA Medical Instruments', location: 'Newbury Park, CA', platform: 'indeed', indeedApply: true, isEasyApply: false, fitScore: 88 },
+    { id: 'i2', title: 'Process Engineer',           company: 'Coherent', location: 'Sunnyvale, CA', platform: 'indeed', indeedApply: false, isEasyApply: false, applyUrl: 'https://www.indeed.com/viewjob?jk=i2', fitScore: 84 },
   ];
 
   const r = routeJobs(jobs, storage, { threshold: 60 });
@@ -27,7 +30,11 @@ module.exports = (t) => {
   // split
   t.eq(r.ea.length, 1, 'router: 1 Easy Apply survivor (KLA)');
   t.eq(r.ea[0].company, 'KLA', 'router: EA queue has the wafer-inspection role');
-  t.eq(r.external.length, 2, 'router: 2 external survivors (Lam, ASML)');
+  t.eq(r.external.length, 3, 'router: 3 external survivors (Lam, ASML, Coherent/Indeed-external)');
+  // Indeed Apply bucket
+  t.eq(r.indeedApply.length, 1, 'router: 1 Indeed Apply survivor (ECA Medical)');
+  t.eq(r.indeedApply[0].company, 'ECA Medical Instruments', 'router: Indeed "Easily apply" → indeedApply bucket');
+  t.ok(r.external.some(j => j.company === 'Coherent'), 'router: Indeed external → external bucket');
 
   // highest-fit first within external (Lam 88 before ASML 78)
   t.eq(r.external[0].company, 'Lam Research', 'router: external sorted by fit desc');

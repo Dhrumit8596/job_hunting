@@ -29,7 +29,7 @@ function routeJobs(jobs, storage, opts = {}) {
     if (jid) appliedJids.add(jid);
   }
 
-  const out = { ea: [], external: [], skipped: [] };
+  const out = { ea: [], external: [], indeedApply: [], skipped: [] };
   const seenKey = new Set(), seenJid = new Set();
   const skip = (j, reason) => out.skipped.push({ id: j.id || j.jobId, company: j.company, title: j.title, skipReason: reason });
 
@@ -45,10 +45,14 @@ function routeJobs(jobs, storage, opts = {}) {
     if (applied.has(key) || (jid && appliedJids.has(jid))) { skip(j, 'already_applied'); continue; }
     if (seenKey.has(key) || (jid && seenJid.has(jid))) { skip(j, 'dup_in_run'); continue; }
     seenKey.add(key); if (jid) seenJid.add(jid);
-    if (j.isEasyApply) out.ea.push(j); else out.external.push(j);
+    // Channel routing: Indeed "Easily apply" → indeedApply engine; LinkedIn Easy Apply → ea;
+    // everything else (LinkedIn external + Indeed external) → external-apply (ATS).
+    if (j.platform === 'indeed' && j.indeedApply) out.indeedApply.push(j);
+    else if (j.isEasyApply) out.ea.push(j);
+    else out.external.push(j);
   }
 
-  out.counts = { ea: out.ea.length, external: out.external.length, skipped: out.skipped.length };
+  out.counts = { ea: out.ea.length, external: out.external.length, indeedApply: out.indeedApply.length, skipped: out.skipped.length };
   return out;
 }
 
