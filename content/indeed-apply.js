@@ -79,13 +79,29 @@
       if (typeof window.pjaAnswerRequiredViaAI === 'function') { try { await window.pjaAnswerRequiredViaAI(job, document.body); } catch (_) {} await sleep(600); }
 
       if (/questions/i.test(path)) {
-        const qlabel = (document.querySelector('fieldset legend, [data-testid*="question" i], h2, [role=group] [role=heading]')?.textContent
-          || document.querySelector('label')?.textContent || '').trim().slice(0, 55);
-        const types = Array.from(document.querySelectorAll('input, select, textarea')).filter(e => e.name !== 'g-recaptcha-response')
-          .map(e => (e.type || e.tagName).toLowerCase()).join(',');
-        const checked = document.querySelectorAll('input[type=radio]:checked, input[type=checkbox]:checked').length;
-        const filledText = Array.from(document.querySelectorAll('input[type=text], textarea, select')).filter(e => e.value && e.value.trim()).length;
-        diag('Q "' + qlabel + '" types=[' + types + '] checked=' + checked + ' txt=' + filledText);
+        // Answer Indeed screening radio groups. NB: Indeed uses value="true"/"false" (not yes/no),
+        // which the shared radio fallback misses — handle here. Default YES (her domain experience)
+        // unless the question is a gap/disqualifier (sponsorship / felony / clearance) → NO.
+        let answered = 0;
+        for (const fs of document.querySelectorAll('fieldset, [role="radiogroup"]')) {
+          const radios = Array.from(fs.querySelectorAll('input[type=radio]'));
+          if (!radios.length || radios.some(r => r.checked)) continue;
+          const legend = ((fs.querySelector('legend, [role="heading"]')?.textContent) || fs.textContent || '').toLowerCase();
+          const wantNo = /(sponsor|visa.*(require|need)|require.*sponsor|felon|convicted|criminal record|security clearance|u\.?s\.? citizen|government clearance)/i.test(legend);
+          const target = radios.find(r => {
+            const v = (r.value || '').toLowerCase();
+            const lbl = ((r.closest('label')?.textContent) || r.getAttribute('aria-label') || '').toLowerCase();
+            return wantNo ? (v === 'false' || /\bno\b/.test(lbl)) : (v === 'true' || /\byes\b/.test(lbl));
+          });
+          if (target) {
+            if (typeof pjaClickRadio === 'function') pjaClickRadio(target);
+            else { target.checked = true; target.click(); target.dispatchEvent(new Event('input', { bubbles: true })); target.dispatchEvent(new Event('change', { bubbles: true })); }
+            answered++;
+          }
+        }
+        const checked = document.querySelectorAll('input[type=radio]:checked').length;
+        diag('Q answered=' + answered + ' checked=' + checked);
+        await sleep(600);
       }
       // Submit (review step) vs Continue (advance).
       const submitBtn = btnByText(/submit (your )?application|^submit application$|^submit$/i);
