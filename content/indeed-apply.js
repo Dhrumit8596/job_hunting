@@ -79,29 +79,26 @@
       if (typeof window.pjaAnswerRequiredViaAI === 'function') { try { await window.pjaAnswerRequiredViaAI(job, document.body); } catch (_) {} await sleep(600); }
 
       if (/questions/i.test(path)) {
-        // Answer Indeed screening radio groups. NB: Indeed uses value="true"/"false" (not yes/no),
-        // which the shared radio fallback misses — handle here. Default YES (her domain experience)
-        // unless the question is a gap/disqualifier (sponsorship / felony / clearance) → NO.
+        // Indeed screening radios are grouped by NAME (no fieldset), value="Yes"/"No" (or true/false).
+        // Read each group's question by walking up the DOM, then answer honestly: default YES, but NO
+        // for the gap/disqualifier questions (require sponsorship / felony / clearance / US-citizen).
+        const groups = {};
+        document.querySelectorAll('input[type=radio]').forEach(r => { if (r.name) (groups[r.name] = groups[r.name] || []).push(r); });
         let answered = 0;
-        for (const fs of document.querySelectorAll('fieldset, [role="radiogroup"]')) {
-          const radios = Array.from(fs.querySelectorAll('input[type=radio]'));
-          if (!radios.length || radios.some(r => r.checked)) continue;
-          const legend = ((fs.querySelector('legend, [role="heading"]')?.textContent) || fs.textContent || '').toLowerCase();
-          const wantNo = /(sponsor|visa.*(require|need)|require.*sponsor|felon|convicted|criminal record|security clearance|u\.?s\.? citizen|government clearance)/i.test(legend);
-          const target = radios.find(r => {
-            const v = (r.value || '').toLowerCase();
-            const lbl = ((r.closest('label')?.textContent) || r.getAttribute('aria-label') || '').toLowerCase();
-            return wantNo ? (v === 'false' || /\bno\b/.test(lbl)) : (v === 'true' || /\byes\b/.test(lbl));
-          });
+        for (const radios of Object.values(groups)) {
+          if (radios.some(r => r.checked)) continue;
+          let el = radios[0], qtext = '';
+          for (let i = 0; i < 6 && el; i++) { el = el.parentElement; if (!el) break; const t = (el.textContent || '').replace(/\b(yes|no)\b/gi, '').replace(/\s+/g, ' ').trim(); if (t.length > 12) { qtext = t.toLowerCase(); break; } }
+          const wantNo = /(require\b.*sponsor|sponsor\w*\b.*(require|need|now)|now,? or will you.*sponsor|\bfelon|convicted|criminal record|security clearance|government clearance|are you a (u\.?s\.?|united states) citizen|u\.?s\.? citizenship required)/i.test(qtext);
+          const target = radios.find(r => { const v = (r.value || '').toLowerCase(); return wantNo ? (v === 'no' || v === 'false') : (v === 'yes' || v === 'true'); });
           if (target) {
             if (typeof pjaClickRadio === 'function') pjaClickRadio(target);
             else { target.checked = true; target.click(); target.dispatchEvent(new Event('input', { bubbles: true })); target.dispatchEvent(new Event('change', { bubbles: true })); }
             answered++;
           }
         }
-        const checked = document.querySelectorAll('input[type=radio]:checked').length;
-        diag('Q answered=' + answered + ' checked=' + checked);
-        await sleep(600);
+        diag('Q answered=' + answered + '/' + Object.keys(groups).length);
+        await sleep(700);
       }
       // Submit (review step) vs Continue (advance).
       const submitBtn = btnByText(/submit (your )?application|^submit application$|^submit$/i);
