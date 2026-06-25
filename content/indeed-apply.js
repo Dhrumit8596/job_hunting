@@ -155,7 +155,14 @@
       const applyBtn = document.querySelector('#indeedApplyButton, [data-testid="indeedApplyButton-test"]')
         || btnByText(/apply with indeed|apply now/i);
       diag('viewjob jk=' + jkOfUrl() + ' applyBtn=' + !!applyBtn);
-      if (applyBtn) { applyBtn.click(); return; /* → navigates to smartapply; resume fires there */ }
+      if (applyBtn) {
+        applyBtn.click();
+        await sleep(7000);
+        // If we're still on the viewjob page (no navigation to smartapply), the job is already
+        // applied or unavailable — skip it so the queue advances instead of sticking here.
+        if (location.pathname.startsWith('/viewjob')) { await advance(q, { success: false, reason: 'already_applied_or_unavailable' }); }
+        return; /* navigated → resume fires on smartapply */
+      }
       // No apply button: a real challenge replaced the page, OR the job isn't Easily-apply. Only a
       // page WITHOUT the apply button + challenge text is a real challenge (avoid false positives).
       if (challenged()) { try { chrome.storage.local.set({ pja_indeed_paused: { reason: 'captcha', url: location.href, ts: Date.now() } }); } catch (_) {} return; }
