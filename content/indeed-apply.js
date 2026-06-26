@@ -31,6 +31,45 @@
   }
   function jkOfUrl(u) { const m = String(u || location.href).match(/[?&]jk=([^&]+)/); return m ? m[1] : null; }
 
+  // Question text by DOM walk-up (Indeed groups by name, no fieldset).
+  function qTextFor(el) { for (let i = 0; i < 7 && el; i++) { el = el.parentElement; if (!el) break; const t = (el.textContent || '').replace(/\b(yes|no)\b/gi, '').replace(/\s+/g, ' ').trim(); if (t.length > 12) return t.slice(0, 100); } return ''; }
+
+  // Collect the required questions still UNANSWERED on the current step (radios not checked +
+  // required empty text/select), so a stall is recorded into the answer bank instead of vanishing.
+  function collectUnansweredQuestions() {
+    const out = [];
+    const groups = {};
+    document.querySelectorAll('input[type=radio]').forEach(r => { if (r.name) (groups[r.name] = groups[r.name] || []).push(r); });
+    for (const radios of Object.values(groups)) { if (!radios.some(r => r.checked)) out.push({ label: qTextFor(radios[0]), type: 'radio', options: radios.map(r => r.value).slice(0, 8) }); }
+    document.querySelectorAll('input[type=text], input[type=number], input:not([type]), textarea, select').forEach(e => {
+      if (e.name === 'g-recaptcha-response' || !e.offsetParent) return;
+      const req = e.required || e.getAttribute('aria-required') === 'true';
+      if (req && !(e.value && e.value.trim())) out.push({ label: qTextFor(e), type: e.tagName === 'SELECT' ? 'select' : (e.type || 'text'), options: e.tagName === 'SELECT' ? Array.from(e.options).map(o => o.text).slice(0, 8) : [] });
+    });
+    return out.filter(q => q.label);
+  }
+
+  // Record unanswered questions into pja_missing_questions (same shape external-apply uses), so the
+  // answer bank captures Indeed screening questions we couldn't fill (for review + future fills).
+  function recordIndeedMissing(job) {
+    try {
+      const fields = collectUnansweredQuestions();
+      if (!fields.length) return;
+      chrome.storage.local.get('pja_missing_questions', d => {
+        const store = d.pja_missing_questions || {};
+        for (const f of fields) {
+          const key = (f.label || '').toLowerCase().trim().replace(/\s+/g, ' ').slice(0, 100);
+          if (!key) continue;
+          if (!store[key]) store[key] = { question: f.label, type: f.type, options: f.options, answer: null, seenCount: 0, contexts: [] };
+          store[key].seenCount = (store[key].seenCount || 0) + 1;
+          const ctx = { jobId: job.jobId, company: job.company, title: job.title, url: location.href, channel: 'indeed-apply' };
+          if (!store[key].contexts.find(c => c.jobId === job.jobId)) store[key].contexts.push(ctx);
+        }
+        chrome.storage.local.set({ pja_missing_questions: store });
+      });
+    } catch (_) {}
+  }
+
   // Pure-ish step classifier (testable): which kind of smartapply step is on screen.
   // 'success' (applied), 'submit' (review step has a Submit button), 'continue' (advance),
   // 'challenge' (captcha → pause), or 'unknown'. Reads the given doc (defaults to document).
@@ -68,7 +107,7 @@
       if (path === prevPath) { same++; } else { same = 0; prevPath = path; }
       // Stuck on the same step despite clicking advance → a required question we couldn't answer.
       // Skip the job cleanly instead of looping the whole MAX budget.
-      if (same >= 3) { diag('stuck path=' + path.replace('/beta/indeedapply/form/', '')); return { success: false, reason: 'stuck_question', path }; }
+      if (same >= 3) { diag('stuck path=' + path.replace('/beta/indeedapply/form/', '')); recordIndeedMissing(job); return { success: false, reason: 'stuck_question', path }; }
 
       // Fill whatever this module needs (contact/resume are usually prefilled from the Indeed profile).
       try { if (typeof pjaFillForm === 'function') pjaFillForm(profile, answers); } catch (_) {}
@@ -96,6 +135,22 @@
             else { target.checked = true; target.click(); target.dispatchEvent(new Event('input', { bubbles: true })); target.dispatchEvent(new Event('change', { bubbles: true })); }
             answered++;
           }
+        }
+        // Consent / acknowledgment radios (single "I have read and agree / I acknowledge / I certify"
+        // option) → check it (these are agreements, not experience claims).
+        for (const radios of Object.values(groups)) {
+          if (radios.some(r => r.checked)) continue;
+          const agree = radios.find(r => /\bi (have read|agree|acknowledge|certify|consent|confirm)\b/i.test(r.value || '') || radios.length === 1);
+          if (agree) { if (typeof pjaClickRadio === 'function') pjaClickRadio(agree); else { agree.checked = true; agree.dispatchEvent(new Event('click', { bubbles: true })); agree.dispatchEvent(new Event('change', { bubbles: true })); } answered++; }
+        }
+        document.querySelectorAll('input[type=checkbox]').forEach(cb => { if (!cb.checked && (cb.required || /agree|acknowledge|certify|consent|confirm/i.test(qTextFor(cb)))) { cb.click(); answered++; } });
+        // Required contact text fields Indeed didn't prefill (City / Postal Code / State) → from profile.
+        for (const e of document.querySelectorAll('input[type=text], input[type=number], input:not([type])')) {
+          if (e.name === 'g-recaptcha-response' || !e.offsetParent || (e.value && e.value.trim())) continue;
+          if (!(e.required || e.getAttribute('aria-required') === 'true')) continue;
+          const ql = qTextFor(e).toLowerCase();
+          let v = /postal code|\bzip\b/.test(ql) ? profile.zip : /\bcity\b/.test(ql) ? profile.city : /\bstate\b/.test(ql) ? profile.state : null;
+          if (v && typeof pjaSetNative === 'function') { pjaSetNative(e, v); answered++; }
         }
         diag('Q answered=' + answered + '/' + Object.keys(groups).length);
         await sleep(700);
