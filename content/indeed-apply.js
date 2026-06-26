@@ -136,6 +136,26 @@
             answered++;
           }
         }
+        // Multi-option radios beyond Yes/No: relocation, commute, work-authorization. Honest for a
+        // CA-based candidate applying to CA roles (she is local; commute=yes; authorized via TN).
+        for (const radios of Object.values(groups)) {
+          if (radios.some(r => r.checked)) continue;
+          const q = qTextFor(radios[0]).toLowerCase();
+          let pick = null;
+          if (/relocat/.test(q)) pick = radios.find(r => /\blocal\b/i.test(r.value)) || radios.find(r => /will not relocate|no.*relocat/i.test(r.value)) || radios.find(r => /relocate/i.test(r.value));
+          else if (/commute|reliably|able to (get|travel)/.test(q)) pick = radios.find(r => /^yes/i.test(r.value));
+          else if (/authoriz|eligible to work|legally/.test(q)) pick = radios.find(r => /^yes/i.test(r.value));
+          if (pick) { if (typeof pjaClickRadio === 'function') pjaClickRadio(pick); else { pick.checked = true; pick.dispatchEvent(new Event('click', { bubbles: true })); pick.dispatchEvent(new Event('change', { bubbles: true })); } answered++; }
+        }
+        // Work-auth / relocation as SELECT dropdowns.
+        for (const sel of document.querySelectorAll('select')) {
+          if (!sel.offsetParent || (sel.value && sel.value.trim() && !/choose|select/i.test(sel.value))) continue;
+          const q = qTextFor(sel).toLowerCase();
+          let opt = null;
+          if (/sponsor/.test(q)) opt = Array.from(sel.options).find(o => /^no$/i.test(o.text));
+          else if (/authoriz|eligible|relocat|commute|willing/.test(q)) opt = Array.from(sel.options).find(o => /^yes$/i.test(o.text)) || Array.from(sel.options).find(o => /local/i.test(o.text));
+          if (opt && typeof pjaFillSelect === 'function') { pjaFillSelect(sel, opt.text); answered++; }
+        }
         // Consent / acknowledgment radios (single "I have read and agree / I acknowledge / I certify"
         // option) → check it (these are agreements, not experience claims).
         for (const radios of Object.values(groups)) {
