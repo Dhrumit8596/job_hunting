@@ -556,6 +556,18 @@
         || document.querySelector('[data-automation-id="pageFooterNextButton"]')
         || findButton(/^next$|^continue$|^next step$|^save and continue$|^save & continue$|^proceed$|^proceed to next/i);
       if (!nextBtn) {
+        // Consent/terms wall (e.g. Jobvite privacy gate): the only actionable button is
+        // "I Accept"/"Agree" and the real form renders after it. Click it and re-loop
+        // instead of breaking — but only once per step count to avoid a click loop.
+        const consentBtn = findButton(/^i accept$|^accept( all)?$|^i agree$|^agree( and continue)?$|^accept (and|&) continue$/i);
+        if (consentBtn) {
+          await addDbg('[ext] step-loop: consent wall — clicking "' + (consentBtn.textContent || '').trim().slice(0, 20) + '"');
+          consentBtn.click();
+          await sleep(2500);
+          if (typeof pjaFillForm === 'function') { try { pjaFillForm(profile, answers); } catch (_) {} }
+          await sleep(800);
+          continue;
+        }
         const diagBtns = Array.from(document.querySelectorAll('button')).map(b => (b.textContent||b.getAttribute('aria-label')||'').trim().slice(0,20)).filter(Boolean).slice(0,8);
         const diagCFs = Array.from(document.querySelectorAll('[data-automation-id="click_filter"]')).map(cf => cf.getAttribute('aria-label')||'noLabel').slice(0,5);
         const diagBotNext = !!document.querySelector('[data-automation-id="bottomNavigationNext"]');
