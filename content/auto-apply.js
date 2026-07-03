@@ -381,6 +381,13 @@ function pjaFillRequiredRadioFallback(profile) {
       defaultVal = 'No';
     } else if (/referred by|employee referral|referral from|were you referred/i.test(legendText)) {
       defaultVal = 'No'; // not an employee referral
+    } else if (/outside (business|employment|interest)|conflict(s)? of interest|moonlight|secondary employment/i.test(legendText)) {
+      defaultVal = 'No'; // no outside business interests / conflicts
+    } else if (/\bcitizen(ship)?\b/i.test(legendText)) {
+      // "Are you a citizen of the country you'll be employed in?" — Canadian TN working in
+      // the US → honest No. Compound "citizen or otherwise authorized" is caught by the
+      // authorize branch ABOVE this one (order matters).
+      defaultVal = 'No';
     } else if (/federal government|u\.s\.? government|government employee/i.test(legendText)) {
       defaultVal = 'No'; // never employed by the U.S. federal government
     } else if (/commut|onsite|on-site|on site|in.person|report to.*office|work.*office|hybrid/i.test(legendText)) {
@@ -483,6 +490,8 @@ function pjaFillRequiredSelectFallback() {
     let fillVal = 'Yes'; // safe default for most quality/experience questions
     if (/food.*mfg|regulated.*mfg|aseptic|sterile|diploma.*process|process.*cert|process.*oper/i.test(labelText)) {
       fillVal = 'No'; // specific pharma/food cert the candidate doesn't have
+    } else if (/outside (business|employment|interest)|conflict(s)? of interest|moonlight|secondary employment/i.test(labelText)) {
+      fillVal = 'No'; // no outside business interests / conflicts
     } else if (/citizen|green card|permanent resident/i.test(labelText)) {
       fillVal = 'No'; // TN visa, not citizen/GC
     } else if (/passport|travel/i.test(labelText)) {

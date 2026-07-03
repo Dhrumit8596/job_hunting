@@ -147,6 +147,10 @@
 
   async function runExternalApply(job, rawAnswers) {
     try {
+    // Previous load's last action — read BEFORE overwriting. 'ready_to_submit:' here means
+    // THIS tab clicked submit for this job and the confirmation page is a real submit landing;
+    // anything else on a confirmation page means the application predates this run.
+    const pjaPrevAction = sessionStorage.getItem('pja_last_action') || '';
     sessionStorage.setItem('pja_last_action', 'runExternalApply:' + job.company);
     // Stall watchdog: if this job neither submits nor skips within the window, force-advance the
     // queue so one hung page can't block an unattended batch. On normal completion navigateBack
@@ -464,9 +468,17 @@
       const onDone = /\/completed\/|\/confirmation/i.test(location.pathname) ||
         /application submitted|we have received your application|view my applications|thank you for applying|you have applied/i.test(document.body?.innerText || '');
       if (onDone) {
-        await new Promise(r => chrome.storage.local.get('pja_dbg', d => { const a=(d.pja_dbg||[]).slice(-19); a.push('[ext] early post-submit confirmation → applied: ' + job.company); chrome.storage.local.set({pja_dbg:a}, r); }));
-        sessionStorage.setItem('pja_last_action', 'recordResult:applied:' + job.company);
-        await recordResult(job, { success: true, reason: 'applied' });
+        // Real submit only if THIS tab clicked submit for this job on the previous load
+        // (pjaPrevAction 'ready_to_submit:'). Landing on a completed page any other way
+        // (e.g. re-visiting a req applied in a PAST session) is NOT a new application —
+        // counting it inflates the tally. Record it as already_applied and move on.
+        const realSubmit = pjaPrevAction.startsWith('ready_to_submit:');
+        const verdict = realSubmit ? 'applied' : 'already_applied (prior session)';
+        await new Promise(r => chrome.storage.local.get('pja_dbg', d => { const a=(d.pja_dbg||[]).slice(-19); a.push('[ext] early confirmation → ' + verdict + ': ' + job.company + ' ' + (job.id || '')); chrome.storage.local.set({pja_dbg:a}, r); }));
+        sessionStorage.setItem('pja_last_action', 'recordResult:' + (realSubmit ? 'applied' : 'already_applied') + ':' + job.company);
+        await recordResult(job, realSubmit
+          ? { success: true, reason: 'applied' }
+          : { success: false, reason: 'already_applied' });
         navigateBack(job);
         return;
       }
