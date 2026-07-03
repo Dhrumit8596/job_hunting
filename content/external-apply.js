@@ -468,11 +468,16 @@
       const onDone = /\/completed\/|\/confirmation/i.test(location.pathname) ||
         /application submitted|we have received your application|view my applications|thank you for applying|you have applied/i.test(document.body?.innerText || '');
       if (onDone) {
-        // Real submit only if THIS tab clicked submit for this job on the previous load
-        // (pjaPrevAction 'ready_to_submit:'). Landing on a completed page any other way
-        // (e.g. re-visiting a req applied in a PAST session) is NOT a new application —
-        // counting it inflates the tally. Record it as already_applied and move on.
-        const realSubmit = pjaPrevAction.startsWith('ready_to_submit:');
+        // Real submit only if THIS tab clicked Submit for this job in this run — detected by the
+        // persistent per-job flag set at the step-loop Submit click (survives the navigation to
+        // /completed/, unlike sessionStorage.pja_last_action which later iterations overwrite),
+        // OR the sessionStorage marker as a fallback. Landing on /completed/ WITHOUT having
+        // clicked Submit this run (a req applied in a PAST session) is NOT a new application →
+        // already_applied, so the tally isn't inflated.
+        const submitFlagKey = 'pja_wd_submitclick_' + (job.id || job.jobId || '');
+        const submitClickTs = await new Promise(r => chrome.storage.local.get(submitFlagKey, d => r(d[submitFlagKey])));
+        const realSubmit = pjaPrevAction.startsWith('ready_to_submit:') || (submitClickTs && (Date.now() - submitClickTs) < 180000);
+        if (submitClickTs) { try { await new Promise(r => chrome.storage.local.remove(submitFlagKey, r)); } catch (_) {} }
         const verdict = realSubmit ? 'applied' : 'already_applied (prior session)';
         await new Promise(r => chrome.storage.local.get('pja_dbg', d => { const a=(d.pja_dbg||[]).slice(-19); a.push('[ext] early confirmation → ' + verdict + ': ' + job.company + ' ' + (job.id || '')); chrome.storage.local.set({pja_dbg:a}, r); }));
         sessionStorage.setItem('pja_last_action', 'recordResult:' + (realSubmit ? 'applied' : 'already_applied') + ':' + job.company);
@@ -617,12 +622,13 @@
       );
       await addDbg('[ext] step ' + steps + ' clicking Next step=' + stepTextBefore + ' wdMissing=' + wdSelectMissing.map(m=>m.label).join('|') + ' btn=' + nextBtnAid + '/' + nextBtnText + (nextBtnDisabled ? '[DISABLED]' : '') + (isWorkdaySidStep ? '[SID-CDP]' : ''));
       // If THIS click is the final Submit (Workday multi-step forms submit via the footer/bottom
-      // Submit button in the step loop, not the dedicated submit section), mark ready_to_submit
-      // so the early-confirmation on the next /completed/ load records APPLIED — not
-      // already_applied. Without this, real AMAT submits were misclassified as prior-session
-      // re-visits and skipped (regression from the tally-integrity gate).
+      // Submit button in the step loop), record a PERSISTENT per-job "submitted this run" flag so
+      // the early-confirmation on the next /completed/ load records APPLIED — not already_applied.
+      // sessionStorage.pja_last_action is too fragile (later step-loop iterations overwrite it
+      // before /completed/ loads); chrome.storage.local survives the navigation intact.
       if (/submit/i.test(nextBtnText) || nextBtnAid === 'bottomNavigationSubmit') {
         try { sessionStorage.setItem('pja_last_action', 'ready_to_submit:' + job.company); } catch (_) {}
+        try { await new Promise(r => chrome.storage.local.set({ ['pja_wd_submitclick_' + (job.id || job.jobId || '')]: Date.now() }, r)); } catch (_) {}
       }
       const preClickUrl = location.href;
       if (isWorkdaySidStep && nextBtnAid) {
