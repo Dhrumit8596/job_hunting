@@ -1490,12 +1490,23 @@ function pjaFillCombobox(input, value, key) {
     const lbId = expectedListboxId ? document.getElementById(expectedListboxId) : null;
     _dbg(_inputId+' val="'+String(value).slice(0,20)+'" selectCtrl='+!!selectCtrl+' expLbId='+expectedListboxId+' lbFound='+!!lbId+' exp='+input.getAttribute('aria-expanded'));
     if (doSelect()) { _dbg(_inputId+' OK-a1'); return; }
-    // Attempt 2 — CDP TRUSTED open, only for react-select controls the synthetic path couldn't open.
-    if (selectCtrl && input.getAttribute('aria-expanded') !== 'true') {
-      const opened = await cdpTrustedOpen();
+    // How many options are currently rendered for THIS react-select's menu.
+    const optionCount = () => {
+      let lb = expectedListboxId ? document.getElementById(expectedListboxId) : null;
+      if (!lb && ariaControlsId) lb = document.getElementById(ariaControlsId);
+      return lb ? lb.querySelectorAll('[role="option"]').length : 0;
+    };
+    // Attempt 2 — CDP TRUSTED open for react-select controls whose menu didn't populate via
+    // synthetic events (react-select v5 renders options only on a TRUSTED mousedown). Trigger on
+    // the real signal — NO options rendered — NOT on aria-expanded (some fields report
+    // expanded=true with an EMPTY menu: the Antora experience + Hispanic/Latino selects). A CDP
+    // click toggles, so if it closed an already-open-but-empty menu, tap once more.
+    if (selectCtrl && optionCount() === 0) {
+      let opened = await cdpTrustedOpen();
       await sleep(450);
-      if (isAutocomplete) { typeToFilter(value); await sleep(500); }
-      if (doSelect()) { _dbg(_inputId+' OK-cdp opened='+opened); return; }
+      if (optionCount() === 0) { opened = await cdpTrustedOpen(); await sleep(450); }
+      if (isAutocomplete && optionCount() > 20) { typeToFilter(value); await sleep(500); }
+      if (doSelect()) { _dbg(_inputId+' OK-cdp opened='+opened+' opts='+optionCount()); return; }
     }
     // Attempt 3 — synthetic retry.
     openFlyout();
