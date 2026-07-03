@@ -870,61 +870,22 @@ const PJA_FIELD_VALIDATORS = {
 // CustomEvent bridge (handled by fiber-main.js in MAIN world) and only fall back
 // to a direct call when the bridge is unavailable (e.g. fiber-main.js not yet injected).
 function pjaFillViaReactFiber(input, value, key) {
-  const fiberKey = Object.keys(input).find(k => k.startsWith('__reactFiber'));
-  if (!fiberKey) return false;
-  const lv = (value || '').toLowerCase().trim();
-  const isYes = ['yes','true','1'].includes(lv);
-  const isNo  = ['no','false','0'].includes(lv);
-
-  // Walk fiber tree to find the react-select component's options + depth
-  let fiber = input[fiberKey], depth = 0, optionsList = null, foundDepth = -1;
-  while (fiber && depth < 35) {
-    const mp = fiber.memoizedProps;
-    if (mp && Array.isArray(mp.options) && mp.options.length && typeof mp.onChange === 'function' && depth >= 3) {
-      optionsList = mp.options;
-      foundDepth = depth;
-      break;
-    }
-    fiber = fiber.return; depth++;
-  }
-  if (!optionsList) return false;
-
-  // Pick the best matching option
-  let opt = optionsList.find(o => String(o.label || o.value || '').toLowerCase() === lv);
-  if (!opt && isYes) opt = optionsList.find(o => /^yes\b/i.test(String(o.label || '')));
-  if (!opt && isNo)  opt = optionsList.find(o => /^no\b/i.test(String(o.label || '')));
-  if (!opt && key === 'requireSponsorship' && isNo)
-    opt = optionsList.find(o => /not required|will not require/i.test(String(o.label || '')));
-  if (!opt && key === 'workAuth' && isYes)
-    opt = optionsList.find(o => /authorized/i.test(String(o.label || '')) && !/not authorized/i.test(String(o.label || '')));
-  // Self-ID decline: banked "I decline to self-identify" must match option "Decline To Self
-  // Identify" / "I don't wish to answer" etc. (spacing/hyphen/prefix differ) — match on intent.
-  if (!opt && /decline|prefer not|wish not|not to answer|do not wish|don'?t wish|rather not/i.test(lv))
-    opt = optionsList.find(o => /decline|prefer not|wish not|not to answer|do not wish|don'?t wish|rather not/i.test(String(o.label || '')));
-  if (!opt && lv.length > 3)
-    opt = optionsList.find(o => String(o.label || '').toLowerCase().includes(lv));
-  // Leading yes/no token from verbose prose ("No. My background is…") → the Yes/No option.
-  if (!opt) { const lead = lv.match(/^(yes|no)\b/); if (lead) opt = optionsList.find(o => new RegExp('^'+lead[1]+'\\b','i').test(String(o.label || ''))); }
-  if (!opt) return false;
-
-  // Always route through the MAIN-world bridge (fiber-main.js pja:reactselect listener).
-  // We do not gate on data-pja-fiber-main because fiber-main.js may be loaded without
-  // having set the attribute (timing race). The bridge will succeed if loaded, otherwise
-  // data-pja-fiber-done stays unset and we fall through to the direct call.
+  // The React fiber + onChange closure live in the MAIN world; a content script (ISOLATED
+  // world) CANNOT see input's __reactFiber expando, so we must NOT walk the fiber here — doing
+  // so silently returned false and this whole path was dead. Instead hand the raw value to the
+  // MAIN-world bridge (fiber-main.js `pja:reactselect`), which walks the fiber, matches the
+  // option (see pickOpt there), and calls onChange. dispatchEvent is synchronous, so
+  // data-pja-fiber-done is set within this call when fiber-main.js is loaded.
   const uid = 'pja_rs_' + Date.now() + '_' + Math.random().toString(36).slice(2, 7);
   input.setAttribute('data-pja-fiber-id', uid);
   input.removeAttribute('data-pja-fiber-done');
   document.dispatchEvent(new CustomEvent('pja:reactselect', {
-    detail: { uid, optionLabel: String(opt.label || ''), optionValue: String(opt.value !== undefined ? opt.value : opt.label || '') }
+    detail: { uid, optionLabel: String(value || ''), optionValue: String(value || ''), key: String(key || '') }
   }));
-  const bridgeOk = input.getAttribute('data-pja-fiber-done') === 'ok';
+  const ok = input.getAttribute('data-pja-fiber-done') === 'ok';
   input.removeAttribute('data-pja-fiber-done');
-  if (bridgeOk) return true;
   input.removeAttribute('data-pja-fiber-id');
-
-  // Bridge unavailable — direct call fallback (only works in MAIN world, will throw in isolated world)
-  try { fiber.memoizedProps.onChange(opt, { action: 'select-option', option: opt }); return true; } catch(_) {}
-  return false;
+  return ok;
 }
 
 // ── Greenhouse Education section filler ────────────────────────────────────

@@ -101,11 +101,28 @@
     }
     if (!fk) return;
 
-    var lv = String(optionLabel).toLowerCase();
+    var lv = String(optionLabel).toLowerCase().trim();
+    var key = String(detail.key || '');
+    function lbl(o) { return String(o.label !== undefined ? o.label : (o.value !== undefined ? o.value : '')).toLowerCase().trim(); }
     function pickOpt(opts) {
-      var o = opts.find(function(o) { return String(o.label || o.value || '').toLowerCase() === lv; });
-      if (!o) o = opts.find(function(o) { return String(o.value !== undefined ? o.value : '').toLowerCase() === String(optionValue).toLowerCase(); });
-      if (!o) o = opts.find(function(o) { return String(o.label || '').toLowerCase().indexOf(lv) === 0; });
+      // 1. exact label / value
+      var o = opts.find(function(o) { return lbl(o) === lv; });
+      if (o) return o;
+      if (!o) o = opts.find(function(o) { return String(o.value !== undefined ? o.value : '').toLowerCase() === String(optionValue).toLowerCase() && String(optionValue) !== ''; });
+      if (o) return o;
+      // 2. Yes / No (incl. verbose prose like "No. My background is…")
+      var lead = lv.match(/^(yes|no)\b/);
+      if (lead) { o = opts.find(function(o){ return new RegExp('^'+lead[1]+'\\b').test(lbl(o)); }); if (o) return o; }
+      // 3. honest-policy keys
+      if (key === 'requireSponsorship' && /^no\b/.test(lv)) { o = opts.find(function(o){ return /not required|will not require|^no\b/.test(lbl(o)); }); if (o) return o; }
+      if (key === 'workAuth' && /^yes\b/.test(lv)) { o = opts.find(function(o){ return /authorized/.test(lbl(o)) && !/not authorized/.test(lbl(o)); }); if (o) return o; }
+      // 4. self-ID decline (banked "I decline to self-identify" ↔ option "Decline To Self Identify")
+      if (/decline|prefer not|wish not|not to answer|do not wish|don'?t wish|rather not/.test(lv)) {
+        o = opts.find(function(o){ return /decline|prefer not|wish not|not to answer|do not wish|don'?t wish|rather not/.test(lbl(o)); }); if (o) return o;
+      }
+      // 5. leading-token / substring
+      o = opts.find(function(o) { return lbl(o).indexOf(lv) === 0; });
+      if (!o && lv.length > 2) o = opts.find(function(o) { return lbl(o).indexOf(lv) !== -1; });
       return o;
     }
 
