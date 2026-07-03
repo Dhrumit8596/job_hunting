@@ -929,13 +929,25 @@ async function pjaApplyOnCurrentPage(job, profile, answers, onStatus) {
   // Wait for the user (SEMI) — or as a fallback when AUTO open was ignored.
   if (!initModal) {
     onStatus(`👆 Click "Easy Apply" for "${title}" — I'll auto-fill the rest`);
-    const deadline = Date.now() + PJA_EA_ASSIST_TIMEOUT_MS;
+    // AUTO mode is unattended (backend-triggered): nobody will click for us, so 5 min of
+    // silent retrying is 5 dead minutes per job (the "idle run" failure). Cap it at 90s
+    // and trace periodically so a stuck open is visible in pja_dbg. SEMI keeps the full
+    // window — a human really may take minutes.
+    const assistMs = PJA_EA_AUTO_OPEN ? Math.min(PJA_EA_ASSIST_TIMEOUT_MS, 90000) : PJA_EA_ASSIST_TIMEOUT_MS;
+    const deadline = Date.now() + assistMs;
+    let lastTrace = 0;
     while (Date.now() < deadline && !initModal) {
       if (PJA_AUTO_STATE.aborted) return { success: false, reason: 'aborted' };
       // In AUTO mode keep retrying our own click; in SEMI mode just watch for the user.
+      let btnSeen = false;
       if (PJA_EA_AUTO_OPEN) {
         const btn = findEasyApplyBtn();
+        btnSeen = !!btn;
         if (btn) { try { pjaClickEasyApply(btn); } catch (_) {} }
+      }
+      if (Date.now() - lastTrace > 30000) {
+        lastTrace = Date.now();
+        pjaTrace('open-retry: modal not open, btn=' + btnSeen + ', ' + Math.round((deadline - Date.now()) / 1000) + 's left');
       }
       await pjaAutoWait(1000);
       initModal = pjaGetCurrentModal();
