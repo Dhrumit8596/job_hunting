@@ -63,4 +63,25 @@ module.exports = (t) => {
   w.pjaWriteAppliedLog({ company: 'Acme Robotics', title: 'Manufacturing Engineer', channel: 'api' }, { status: 'applied' });
   t.eq(store.pja_applied_log.length, 2, 'applied-log: distinct title -> new record');
   t.eq(store.pja_applied_log[1].channel, 'api', 'applied-log: per-record channel preserved');
+
+  // ── Distinct postings sharing company::title (the AMAT case: many reqs all titled
+  // "Process Engineer") must be SEPARATE records — keyed by jobId when both sides have one.
+  const req1 = { company: 'MegaFab', title: 'Process Engineer', jobId: 'R2616270', applyUrl: 'https://wd/j/R2616270' };
+  const req2 = { company: 'MegaFab', title: 'Process Engineer', jobId: 'R2616317', applyUrl: 'https://wd/j/R2616317' };
+  w.pjaWriteAppliedLog(req1, { status: 'applied' });
+  w.pjaWriteAppliedLog(req2, { status: 'applied' });
+  let mf = store.pja_applied_log.filter(e => e.company === 'MegaFab');
+  t.eq(mf.length, 2, 'applied-log: same title, different jobId -> two records (distinct reqs)');
+
+  // re-write of the SAME req (submitting->applied lifecycle) still merges, not duplicates
+  w.pjaWriteAppliedLog(req2, { status: 'applied', reason: 're-confirm' });
+  mf = store.pja_applied_log.filter(e => e.company === 'MegaFab');
+  t.eq(mf.length, 2, 'applied-log: same jobId re-write merges (no duplicate)');
+
+  // legacy entry WITHOUT jobId matches an incoming write WITH jobId (enrich, not duplicate)
+  w.pjaWriteAppliedLog({ company: 'OldCo', title: 'Process Engineer' }, { status: 'applied' });
+  w.pjaWriteAppliedLog({ company: 'OldCo', title: 'Process Engineer', jobId: 'R99' }, { status: 'applied' });
+  const oc = store.pja_applied_log.filter(e => e.company === 'OldCo');
+  t.eq(oc.length, 1, 'applied-log: legacy no-jobId entry absorbs the jobId write (no duplicate)');
+  t.eq(oc[0].jobId, 'R99', 'applied-log: legacy entry enriched with the jobId');
 };

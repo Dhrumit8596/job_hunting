@@ -799,7 +799,11 @@ select.pcw-input{cursor:pointer}
             const log = Array.isArray(d.pja_applied_log) ? d.pja_applied_log : [];
             const nz = s => (s || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
             const key = nz(job.company) + '::' + nz(job.title);
-            if (!log.some(e => nz(e.company) + '::' + nz(e.title) === key)) {
+            // Distinct postings can share company::title — treat as duplicate only when the
+            // jobId also matches (or the existing entry has none). Mirrors pjaWriteAppliedLog.
+            const inId = String(job.jobId || '');
+            if (!log.some(e => nz(e.company) + '::' + nz(e.title) === key
+                && (!inId || e.jobId == null || String(e.jobId) === inId))) {
               log.push({
                 company: job.company, title: job.title, jobId: job.jobId || null,
                 applyUrl: `https://www.linkedin.com/jobs/view/${job.jobId}/`,

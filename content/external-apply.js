@@ -2286,7 +2286,14 @@
           const key = nz(job.company) + '::' + nz(job.title);
           const RANK = { skipped: 0, submitting: 1, applied: 2 };
           const incomingStatus = fields.status || 'applied';
-          const existing = log.find(e => nz(e.company) + '::' + nz(e.title) === key);
+          // Same company::title can be DISTINCT postings (e.g. 10 AMAT reqs all titled
+          // "Process Engineer") — when both sides carry a jobId, require it to match too,
+          // else distinct reqs collapse into one merged entry (under-counts + poisons dedupe).
+          // A legacy entry without jobId still matches (and gets enriched) so the
+          // submitting→applied merge for the same job keeps working.
+          const inId = String(job.jobId || job.id || '');
+          const existing = log.find(e => nz(e.company) + '::' + nz(e.title) === key
+            && (!inId || e.jobId == null || String(e.jobId) === inId));
           if (existing) {
             if ((RANK[incomingStatus] ?? 1) >= (RANK[existing.status] ?? 1)) existing.status = incomingStatus;
             if (fields.reason) existing.reason = fields.reason;
