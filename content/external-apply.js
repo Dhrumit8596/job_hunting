@@ -2249,6 +2249,16 @@
       } catch (_) {}
       await sleep(250);
     }
+    // pjaFillCombobox QUEUES its selection on the sequential _pjaComboChain and returns
+    // immediately — so `applied` counts calls, not commits. Await the chain (bounded) before
+    // returning, else the caller's missing-required/submit check runs while a combobox is
+    // still selecting → the field reads empty → skip (the Antora question_19018428004 skip).
+    if (window._pjaComboChain && typeof window._pjaComboChain.then === 'function') {
+      await Promise.race([
+        window._pjaComboChain.catch(() => {}),
+        new Promise(r => setTimeout(r, 6000)),
+      ]);
+    }
     await dbg('[ai] applied=' + applied + ' low=' + low + ' of ' + questions.length);
     return { applied, asked: questions.length, low };
   }
