@@ -1438,27 +1438,54 @@ function pjaFillCombobox(input, value, key) {
   // Autocomplete options arrive async (often via network) — wait longer between attempts.
   const w = isAutocomplete ? 700 : 200;
   const _dbg = (m) => { try { chrome.storage.local.get('pja_dbg', d => { const a=(d.pja_dbg||[]).slice(-40); a.push('[combo] '+m); chrome.storage.local.set({pja_dbg:a}); }); } catch(_){} };
-  window._pjaComboChain = window._pjaComboChain.then(() => new Promise(resolve => {
+
+  // CDP trusted-open for react-select v5 controls: some (e.g. Greenhouse job-boards Country,
+  // 244 opts) refuse to open from an isolated-world synthetic mousedown — the menu only renders
+  // on a TRUSTED mousedown. Reuse the WORKDAY_TRUSTED_CLICK CDP path to click the control in the
+  // real page context; the isolated-world option click in doSelect() then works normally.
+  const cdpTrustedOpen = () => {
+    const target = selectCtrl || input;
+    if (!target || typeof chrome === 'undefined' || !chrome.runtime) return Promise.resolve(false);
+    const hadId = target.id;
+    const tempId = '__pja_rs_' + Date.now();
+    target.setAttribute('id', tempId);
+    try { input.focus(); } catch (_) {}
+    const restore = () => { if (hadId) target.setAttribute('id', hadId); else target.removeAttribute('id'); };
+    return new Promise(resolve => {
+      let done = false;
+      const to = setTimeout(() => { if (!done) { done = true; restore(); resolve(false); } }, 3000);
+      try {
+        const sel = '#' + ((window.CSS && CSS.escape) ? CSS.escape(tempId) : tempId);
+        chrome.runtime.sendMessage({ type: 'WORKDAY_TRUSTED_CLICK', selector: sel }, resp => {
+          if (done) return; done = true; clearTimeout(to); restore();
+          resolve(!!(resp && resp.ok));
+        });
+      } catch (_) { if (!done) { done = true; clearTimeout(to); restore(); resolve(false); } }
+    });
+  };
+
+  window._pjaComboChain = window._pjaComboChain.then(() => (async () => {
+    const sleep = ms => new Promise(r => setTimeout(r, ms));
+    // Attempt 1 — synthetic open (works for most react-selects + Workday multiselects).
     openFlyout();
-    setTimeout(() => {
-      const lbId = expectedListboxId ? document.getElementById(expectedListboxId) : null;
-      _dbg(_inputId+' val="'+String(value).slice(0,20)+'" selectCtrl='+!!selectCtrl+' expLbId='+expectedListboxId+' lbFound='+!!lbId+' exp='+input.getAttribute('aria-expanded'));
-      console.log('PJA combo attempt 1:', _inputId, 'value:', value, 'lbFound:', !!lbId, 'ariaExpanded:', input.getAttribute('aria-expanded'));
-      if (doSelect()) { _dbg(_inputId+' OK-a1'); console.log('PJA combo ok:', _inputId); return resolve(); }
-      openFlyout();
-      setTimeout(() => {
-        console.log('PJA combo attempt 2:', _inputId, 'lbFound:', !!document.getElementById(expectedListboxId));
-        if (doSelect()) { console.log('PJA combo ok:', _inputId); return resolve(); }
-        openFlyout();
-        setTimeout(() => {
-          console.log('PJA combo attempt 3:', _inputId);
-          if (!doSelect()) { _dbg(_inputId+' FAIL→native lbFound='+!!document.getElementById(expectedListboxId)); console.log('PJA combo fallback pjaSetNative:', _inputId); pjaSetNative(input, value); }
-          else { _dbg(_inputId+' OK-a3'); console.log('PJA combo ok:', _inputId); }
-          resolve();
-        }, w);
-      }, w);
-    }, isAutocomplete ? 700 : 150);
-  }));
+    await sleep(isAutocomplete ? 700 : 150);
+    const lbId = expectedListboxId ? document.getElementById(expectedListboxId) : null;
+    _dbg(_inputId+' val="'+String(value).slice(0,20)+'" selectCtrl='+!!selectCtrl+' expLbId='+expectedListboxId+' lbFound='+!!lbId+' exp='+input.getAttribute('aria-expanded'));
+    if (doSelect()) { _dbg(_inputId+' OK-a1'); return; }
+    // Attempt 2 — CDP TRUSTED open, only for react-select controls the synthetic path couldn't open.
+    if (selectCtrl && input.getAttribute('aria-expanded') !== 'true') {
+      const opened = await cdpTrustedOpen();
+      await sleep(450);
+      if (isAutocomplete) { typeToFilter(value); await sleep(500); }
+      if (doSelect()) { _dbg(_inputId+' OK-cdp opened='+opened); return; }
+    }
+    // Attempt 3 — synthetic retry.
+    openFlyout();
+    await sleep(w);
+    if (doSelect()) { _dbg(_inputId+' OK-a3'); return; }
+    _dbg(_inputId+' FAIL→native exp='+input.getAttribute('aria-expanded'));
+    pjaSetNative(input, value);
+  })());
 
   return true;
 }
