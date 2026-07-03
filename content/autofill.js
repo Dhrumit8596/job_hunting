@@ -1405,6 +1405,12 @@ function pjaFillCombobox(input, value, key) {
   // Background: react-select's onMouseDown is on the container, not the inner input.
   const openFlyout = () => {
     if (selectCtrl) {
+      // FOCUS the inner input BEFORE the mouse sequence — react-select v5 (Greenhouse
+      // job-boards, emotion `remix-css-*` classes) only opens its menu on mousedown when the
+      // input is already focused. Without this, large selects like Country (244 options) never
+      // opened (aria-expanded stayed false → lbFound=false → field left empty → submit blocked).
+      // Verified live on the Antora Country react-select.
+      try { input.focus(); } catch (_) {}
       // Open the react-select control (its onMouseDown is on this div, not the inner input).
       ['mouseover','mouseenter','mousemove','mousedown','mouseup','click'].forEach(type =>
         selectCtrl.dispatchEvent(new MouseEvent(type, { bubbles: true, cancelable: true, button: 0, buttons: 1 }))
