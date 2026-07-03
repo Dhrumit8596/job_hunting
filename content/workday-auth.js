@@ -646,10 +646,16 @@ async function run(profile, password) {
     // Unknown/transitional — let it proceed to create or sign in
     await deleteAccount(hostname);
   } else if (existing && ['verified', 'exists_try_signin', 'needs_signin'].includes(existing.status)) {
-    // Use stored account email when profile.email is missing
-    const effectiveProfile = (!profile.email && existing.email)
+    // Prefer the STORED account email whenever one exists — the record is a known-good
+    // account for THIS tenant. A queue may carry a different (e.g. plus-addressed) email;
+    // signing in with it against a tenant that already has a bare-email account fails with
+    // "wrong email address or password" → sign_in_error (the KLA/Hyve/Lyten skip bug).
+    const effectiveProfile = (existing.email && existing.email !== profile.email)
       ? { ...profile, email: existing.email } : profile;
-    return await runSignIn(effectiveProfile, password);
+    if (existing.email && existing.email !== profile.email) {
+      dbg('using stored account email ' + existing.email + ' over queue email ' + (profile.email || 'none'));
+    }
+    return await runSignIn(effectiveProfile, existing.password || password);
   } else if (existing && existing.status === 'pending_verification') {
     dbg('pending verification — resuming Gmail flow');
     const verified = await runGmailVerify(profile.email, 'verify', hostname);
