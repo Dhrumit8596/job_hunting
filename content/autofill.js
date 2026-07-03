@@ -1236,6 +1236,16 @@ function pjaFillCombobox(input, value, key) {
   // Targeting the inner <input> element does NOT open the menu; react-select's handler is on this div.
   const selectCtrl = input.closest('[class*="select__control"]');
 
+  // IDEMPOTENCY: react-select keeps its input.value EMPTY even when a value is selected (the
+  // value renders in `.select__single-value`), so the callers' `!input.value` empty-check thinks
+  // the field is unfilled and re-fills it on every pass. Re-opening an already-selected react-
+  // select toggles its menu CLOSED and corrupts the value (the Greenhouse multi-pass race that
+  // left Country/experience empty at submit). Skip if a non-placeholder single-value is present.
+  if (selectCtrl) {
+    const sv = selectCtrl.querySelector('[class*="single-value"]');
+    if (sv && sv.textContent && sv.textContent.trim()) return true;
+  }
+
   // Find the toggle/expand button for non-react-select combobox widgets.
   const widgetContainer = input.closest(
     '[class*="select__container"],[class*="selectContainer"],[class*="select-container"],' +
