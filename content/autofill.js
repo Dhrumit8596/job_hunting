@@ -897,8 +897,14 @@ function pjaFillViaReactFiber(input, value, key) {
     opt = optionsList.find(o => /not required|will not require/i.test(String(o.label || '')));
   if (!opt && key === 'workAuth' && isYes)
     opt = optionsList.find(o => /authorized/i.test(String(o.label || '')) && !/not authorized/i.test(String(o.label || '')));
+  // Self-ID decline: banked "I decline to self-identify" must match option "Decline To Self
+  // Identify" / "I don't wish to answer" etc. (spacing/hyphen/prefix differ) — match on intent.
+  if (!opt && /decline|prefer not|wish not|not to answer|do not wish|don'?t wish|rather not/i.test(lv))
+    opt = optionsList.find(o => /decline|prefer not|wish not|not to answer|do not wish|don'?t wish|rather not/i.test(String(o.label || '')));
   if (!opt && lv.length > 3)
     opt = optionsList.find(o => String(o.label || '').toLowerCase().includes(lv));
+  // Leading yes/no token from verbose prose ("No. My background is…") → the Yes/No option.
+  if (!opt) { const lead = lv.match(/^(yes|no)\b/); if (lead) opt = optionsList.find(o => new RegExp('^'+lead[1]+'\\b','i').test(String(o.label || ''))); }
   if (!opt) return false;
 
   // Always route through the MAIN-world bridge (fiber-main.js pja:reactselect listener).
@@ -1244,6 +1250,17 @@ function pjaFillCombobox(input, value, key) {
   if (selectCtrl) {
     const sv = selectCtrl.querySelector('[class*="single-value"]');
     if (sv && sv.textContent && sv.textContent.trim()) return true;
+  }
+
+  // REACT-SELECT PRIMARY PATH: call the component's onChange directly via the React fiber
+  // (through the MAIN-world fiber-main.js bridge) — reads options from props, NO menu open
+  // needed. This is the RELIABLE fill for Greenhouse job-boards react-selects, whose menus
+  // won't open from isolated-world synthetic OR CDP clicks (the Antora/PsiQuantum
+  // question_19018428004 + self-ID selects). Verified live: sets "No" where clicks all failed.
+  // Falls through to the click path (below) only if the fiber has no options/onChange (e.g. the
+  // Country phone-combined select, which the CDP-open path handles).
+  if (selectCtrl && typeof pjaFillViaReactFiber === 'function') {
+    try { if (pjaFillViaReactFiber(input, value, key)) return true; } catch (_) {}
   }
 
   // Find the toggle/expand button for non-react-select combobox widgets.
