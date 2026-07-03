@@ -290,6 +290,41 @@ function pjaScanQualifyingJobs() {
   });
 }
 
+// ── Voluntary self-identification / EEO answer policy ────────────────────────
+// Race, ethnicity, Hispanic/Latino, gender, veteran status, disability. These are
+// VOLUNTARY — "decline to self-identify" is always a valid, honest answer. Where the
+// candidate has a banked factual answer that forms commonly require (gender=Female,
+// veteran=No, disability=No, Hispanic/Latino=No), prefer it; otherwise decline.
+// Returns the matching item from `opts` (option elements OR {el,value,text} for radios),
+// or null when `labelText` is not a self-ID question. Without this, self-ID selects have
+// no "Yes" option so the Yes/No fallbacks skip them → the step stays empty → 'stuck'.
+function pjaSelfIdPick(labelText, opts) {
+  const L = String(labelText || '').toLowerCase();
+  const isSelfId = /hispanic|latino|\brace\b|ethnic|\bgender\b|\bsex\b|veteran|disab|self.?identif|sexual orientation|transgender|gender identity/i.test(L);
+  if (!isSelfId) return null;
+  const hay = o => (String(o.text || '') + ' ' + String(o.value || '')).toLowerCase();
+  const find = re => opts.find(o => re.test(hay(o)));
+  const decline = () => find(/decline|don'?t wish|do not wish|prefer not|not to answer|wish not to|choose not|not disclose|not to disclose|not specified|rather not/);
+
+  if (/hispanic|latino/.test(L)) {
+    return find(/not hispanic|not latino/) || find(/\bno\b|^false$/) || decline();
+  }
+  if (/(\bgender\b|\bsex\b|gender identity)/.test(L) && !/transgender|orientation/.test(L)) {
+    return find(/\bfemale\b|\bwoman\b/) || decline();
+  }
+  if (/veteran/.test(L)) {
+    return find(/not a (protected )?veteran|\bi am not\b|not a veteran/) || find(/\bno\b|^false$/) || decline();
+  }
+  if (/disab/.test(L)) {
+    return find(/no,? i (do not|don'?t)|do not have|don'?t have/) || find(/\bno\b|^false$/) || decline();
+  }
+  // General race / ethnicity → banked policy is decline; else honest factual (Asian).
+  if (/\brace\b|ethnic/.test(L)) {
+    return decline() || find(/asian/);
+  }
+  return decline();
+}
+
 // ── Fallback radio fill ──────────────────────────────────────────────────────
 // For required radio groups that pjaFillForm couldn't match to profile/answers,
 // apply sensible defaults based on the question text.
@@ -308,6 +343,16 @@ function pjaFillRequiredRadioFallback(profile) {
     if (!anyRequired) continue;
 
     const legendText = (fs.querySelector('legend')?.textContent || '').toLowerCase();
+
+    // Voluntary self-ID / EEO (race/ethnicity/Hispanic/gender/veteran/disability): answer
+    // honestly from banked policy. MUST run before the Yes/No last-resort below, which would
+    // otherwise wrongly pick "Yes" for "Are you Hispanic or Latino?".
+    const sidRadioOpts = radios.map(r => ({
+      el: r, value: r.value,
+      text: (typeof pjaGetLabel === 'function' ? pjaGetLabel(r) : (r.getAttribute('aria-label') || ''))
+    }));
+    const sidRadio = pjaSelfIdPick(legendText, sidRadioOpts);
+    if (sidRadio) { pjaClickRadio(sidRadio.el); continue; }
 
     // Education-LEVEL pickers ("What is the highest level of education you have completed?") have
     // degree-level OPTIONS (High school/GED, Associate, Bachelor's, Master's, Doctorate) — NOT
@@ -404,9 +449,16 @@ function pjaFillRequiredSelectFallback() {
     // Get label first (needed for both proficiency and yes/no routing)
     const labelText = (typeof pjaGetLabel === 'function' ? pjaGetLabel(sel) : '') || '';
 
+    const opts = Array.from(sel.options);
+
+    // Voluntary self-ID / EEO selects (race/ethnicity/Hispanic/gender/veteran/disability) have NO
+    // Yes option, so the generic Yes/No path below skips them → the step stays empty → 'stuck'
+    // (the Metrology Equipment Engineer blocker). Answer honestly from banked policy.
+    const sidOpt = pjaSelfIdPick(labelText, opts);
+    if (sidOpt) { pjaCommitSelect(sel, sidOpt.value); continue; }
+
     // Work authorization category selects (U.S. Citizen / Green Card / Temporary / Other)
     // the candidate is on TN Visa = Temporary Employment Authorization
-    const opts = Array.from(sel.options);
     const hasAuthCategory = opts.some(o => /citizen|green card|permanent resident|temporary employment/i.test(o.text));
     if (hasAuthCategory && /authoriz|work permit|visa|basis/i.test(labelText)) {
       const tempOpt = opts.find(o => /temporary/i.test(o.text));
@@ -1150,5 +1202,6 @@ window.__pjaExternalApplyOnCurrentPage = pjaExternalApplyOnCurrentPage;
 window.__pjaModalHeading               = pjaModalHeading;
 window.__pjaModalBtns                  = pjaModalBtns;
 window.__pjaFillRequiredRadioFallback  = pjaFillRequiredRadioFallback;
+window.__pjaSelfIdPick                 = pjaSelfIdPick;
 window.__pjaEmptyRequiredFields        = pjaEmptyRequiredFields;
 window.__pjaEasyApplyState             = pjaEasyApplyState;
