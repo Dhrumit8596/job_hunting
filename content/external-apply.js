@@ -616,6 +616,14 @@
         !!document.querySelector('[data-automation-id="formField-disabilityStatus"]')
       );
       await addDbg('[ext] step ' + steps + ' clicking Next step=' + stepTextBefore + ' wdMissing=' + wdSelectMissing.map(m=>m.label).join('|') + ' btn=' + nextBtnAid + '/' + nextBtnText + (nextBtnDisabled ? '[DISABLED]' : '') + (isWorkdaySidStep ? '[SID-CDP]' : ''));
+      // If THIS click is the final Submit (Workday multi-step forms submit via the footer/bottom
+      // Submit button in the step loop, not the dedicated submit section), mark ready_to_submit
+      // so the early-confirmation on the next /completed/ load records APPLIED — not
+      // already_applied. Without this, real AMAT submits were misclassified as prior-session
+      // re-visits and skipped (regression from the tally-integrity gate).
+      if (/submit/i.test(nextBtnText) || nextBtnAid === 'bottomNavigationSubmit') {
+        try { sessionStorage.setItem('pja_last_action', 'ready_to_submit:' + job.company); } catch (_) {}
+      }
       const preClickUrl = location.href;
       if (isWorkdaySidStep && nextBtnAid) {
         // SID form React handlers check isTrusted — synthetic events are ignored.
