@@ -1283,8 +1283,12 @@ function pjaFillCombobox(input, value, key) {
     const opts = Array.from(listbox.querySelectorAll('[role="option"]'));
     if (!opts.length) return false;
 
-    const isYes = ['yes','true','1'].includes(lv);
-    const isNo  = ['no','false','0'].includes(lv);
+    // Verbose-answer coercion: the answer bank / AI may hold prose like "No. My background is…"
+    // for a Yes/No select. Reduce to a leading yes/no token so the option match below can fire
+    // (else the field never selects → 'exp=true FAIL', the Antora question_19018428004 case).
+    const lvLead = lv.match(/^(yes|no)\b/);
+    const isYes = ['yes','true','1'].includes(lv) || (lvLead && lvLead[1] === 'yes');
+    const isNo  = ['no','false','0'].includes(lv)  || (lvLead && lvLead[1] === 'no');
 
     let match = opts.find(o => o.textContent.trim().toLowerCase() === lv);
     if (!match && isYes) match = opts.find(o => /^yes\b/i.test(o.textContent.trim()));
@@ -1415,6 +1419,10 @@ function pjaFillCombobox(input, value, key) {
   // Background: react-select's onMouseDown is on the container, not the inner input.
   const openFlyout = () => {
     if (selectCtrl) {
+      // ALREADY OPEN → don't re-fire the mouse sequence: on react-select a second mousedown
+      // TOGGLES the menu CLOSED, which is the Greenhouse multi-pass race (a field opened by one
+      // fill attempt got closed by the next → exp=true then FAIL). Leave it open for doSelect().
+      if (input.getAttribute('aria-expanded') === 'true') { try { input.focus(); } catch (_) {} return; }
       // FOCUS the inner input BEFORE the mouse sequence — react-select v5 (Greenhouse
       // job-boards, emotion `remix-css-*` classes) only opens its menu on mousedown when the
       // input is already focused. Without this, large selects like Country (244 options) never
