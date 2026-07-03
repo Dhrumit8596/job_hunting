@@ -218,6 +218,21 @@ async function wdPollCreateAccount(maxMs = 15000) {
 // ── Gmail verification flow ───────────────────────────────────────────────
 
 async function runGmailVerify(email, purpose, hostname) {
+  // Some tenants (Bloom Energy) DON'T auto-send the verification email — the verify page has a
+  // "request a verification email" / "resend" control that must be clicked first, else the
+  // Gmail search below finds nothing. Click it (once) on the current page before opening Gmail.
+  if (purpose !== 'reset') {
+    try {
+      const reqBtn = Array.from(document.querySelectorAll('a, button, [role="button"], [data-automation-id]'))
+        .find(el => /request a verification email|resend( verification)?( email)?|send( me)? (a |the )?(verification|confirmation) email/i.test((el.innerText || el.getAttribute('aria-label') || '').trim()));
+      if (reqBtn) {
+        dbg('runGmailVerify: clicking request-verification-email "' + (reqBtn.innerText || '').trim().slice(0, 30) + '"');
+        reqBtn.click();
+        await sleep(3000); // let the send fire + email arrive
+      }
+    } catch (_) {}
+  }
+
   const searchQuery = purpose === 'reset'
     ? 'from:(no-reply@myworkday.com OR noreply@workday.com) subject:(reset) in:inbox newer_than:10m'
     : 'from:(no-reply@myworkday.com OR noreply@workday.com) in:inbox newer_than:10m';
@@ -335,12 +350,7 @@ async function runCreateAccount(profile, password) {
   if (screen === 'verify_pending') {
     dbg('verify_pending — opening Gmail for verification');
     await setAccount(hostname, { status: 'pending_verification' });
-    // Some tenants (Bloom Energy) don't auto-send the email — the page offers a "request a
-    // verification email" / "resend" control that must be clicked first. Click it (once) so the
-    // email actually arrives before runGmailVerify searches the inbox.
-    const reqBtn = Array.from(document.querySelectorAll('a, button, [role="button"], [data-automation-id]'))
-      .find(el => /request a verification email|resend( verification)?|send( me)? (a |the )?(verification|confirmation) email|resend email/i.test((el.innerText || el.getAttribute('aria-label') || '').trim()));
-    if (reqBtn) { dbg('clicking request-verification-email: ' + (reqBtn.innerText || '').trim().slice(0, 30)); try { reqBtn.click(); } catch (_) {} await sleep(2500); }
+    // (request-verification-email click is handled centrally inside runGmailVerify)
     const verified = await runGmailVerify(profile.email, 'verify', hostname);
     if (verified) {
       await setAccount(hostname, { status: 'verified', verifiedAt: Date.now() });
