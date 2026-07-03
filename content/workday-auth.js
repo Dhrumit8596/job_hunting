@@ -97,7 +97,7 @@ function detectScreen() {
 
   if (
     document.querySelector('[data-automation-id="verifyEmailPage"], [data-automation-id="checkYourEmail"]') ||
-    /check your email|verification email sent|verify your email/i.test(document.body?.innerText || '')
+    /check your email|verification email sent|verify your email|verify your account|before you (can )?sign in|request a verification email|account is not.*verified|please verify/i.test(document.body?.innerText || '')
   ) {
     return 'verify_pending';
   }
@@ -335,6 +335,12 @@ async function runCreateAccount(profile, password) {
   if (screen === 'verify_pending') {
     dbg('verify_pending — opening Gmail for verification');
     await setAccount(hostname, { status: 'pending_verification' });
+    // Some tenants (Bloom Energy) don't auto-send the email — the page offers a "request a
+    // verification email" / "resend" control that must be clicked first. Click it (once) so the
+    // email actually arrives before runGmailVerify searches the inbox.
+    const reqBtn = Array.from(document.querySelectorAll('a, button, [role="button"], [data-automation-id]'))
+      .find(el => /request a verification email|resend( verification)?|send( me)? (a |the )?(verification|confirmation) email|resend email/i.test((el.innerText || el.getAttribute('aria-label') || '').trim()));
+    if (reqBtn) { dbg('clicking request-verification-email: ' + (reqBtn.innerText || '').trim().slice(0, 30)); try { reqBtn.click(); } catch (_) {} await sleep(2500); }
     const verified = await runGmailVerify(profile.email, 'verify', hostname);
     if (verified) {
       await setAccount(hostname, { status: 'verified', verifiedAt: Date.now() });
