@@ -121,4 +121,19 @@ module.exports = (t) => {
   t.eq(w.pjaIsGarbageLabel('--'), true, 'garbage: punctuation only');
   t.eq(w.pjaIsGarbageLabel('Are you legally authorized to work?'), false, 'real question kept');
   t.eq(w.pjaIsGarbageLabel('Highest level of education'), false, 'real label kept');
+
+  // --- pjaCoerceToOption: AI prose → fixed option (the Antora single-select skip) ---
+  const co = w.pjaCoerceToOption;
+  t.ok(typeof co === 'function', 'coerce: exported');
+  t.eq(co('No. My background is in quality/metrology, not process ownership.', ['Yes', 'No']), 'No',
+    'coerce: verbose "No. ..." → No');
+  t.eq(co('Yes', ['Yes', 'No']), 'Yes', 'coerce: exact Yes');
+  t.eq(co('yes, absolutely', ['Yes', 'No']), 'Yes', 'coerce: leading yes token');
+  t.eq(co('I decline to self-identify', ['Hispanic or Latino', 'Not Hispanic or Latino', 'I decline to self-identify']),
+    'I decline to self-identify', 'coerce: exact multiword option');
+  t.eq(co("Master's degree", ["Bachelor's degree", "Master's degree", 'Doctorate']), "Master's degree",
+    'coerce: option phrase inside answer');
+  t.eq(co('option label objects', [{ label: 'Yes' }, { label: 'No' }]), null,
+    'coerce: no match → null (caller keeps original)');
+  t.eq(co('No', [{ label: 'Yes' }, { label: 'No' }]), 'No', 'coerce: works on {label} option objects');
 };

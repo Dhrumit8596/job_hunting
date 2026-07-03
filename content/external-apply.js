@@ -2025,6 +2025,34 @@
   // on the model's confidence (it hedges on long legalese). Confidence gating applies only to
   // open-ended experiential/knowledge questions, where a low-confidence guess is undesirable.
   // Decide the value to apply from a single AI answer object for `label`.
+  // PURE: coerce a possibly-verbose answer to the option that best matches a fixed option list.
+  // Handles the common AI shape "No. My background..." → "No", plus leading-token and substring
+  // matches. Returns the matched OPTION string, or null when nothing matches (caller keeps the
+  // original). Exported + unit-tested (test/unit/answer-correctness.test.js).
+  function pjaCoerceToOption(answer, options) {
+    const opts = (options || []).map(o => (typeof o === 'string' ? o : (o && (o.label || o.value)) || '')).filter(Boolean);
+    if (!opts.length) return null;
+    const a = String(answer || '').trim();
+    if (!a) return null;
+    const norm = s => String(s).toLowerCase().replace(/[^a-z0-9 ]+/g, ' ').replace(/\s+/g, ' ').trim();
+    const na = norm(a);
+    // 1. exact (normalized) match
+    let hit = opts.find(o => norm(o) === na);
+    if (hit) return hit;
+    // 2. leading Yes/No token — "no. my background is..." → the No option
+    const lead = na.match(/^(yes|no)\b/);
+    if (lead) { hit = opts.find(o => norm(o) === lead[1] || new RegExp('^' + lead[1] + '\\b').test(norm(o))); if (hit) return hit; }
+    // 3. an option appears as a whole-word phrase inside the answer (longest option first)
+    for (const o of [...opts].sort((x, y) => y.length - x.length)) {
+      const no = norm(o);
+      if (no.length >= 2 && new RegExp('\\b' + no.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '\\b').test(na)) return o;
+    }
+    // 4. the answer is a prefix of exactly one option (or vice-versa)
+    const pre = opts.filter(o => norm(o).startsWith(na) || na.startsWith(norm(o)));
+    if (pre.length === 1) return pre[0];
+    return null;
+  }
+
   function pjaAnswerValue(label, a) {
     if (!a || a.answer == null) return null;
     const ans = String(a.answer).trim();
@@ -2069,7 +2097,7 @@
     const want = norm(label);
     return pjaAnswerValue(label, (aiAnswers || []).find(x => norm(x.label) === want));
   }
-  if (typeof window !== 'undefined') { window.pjaSelectAiAnswer = pjaSelectAiAnswer; window.pjaAnswerValue = pjaAnswerValue; }
+  if (typeof window !== 'undefined') { window.pjaSelectAiAnswer = pjaSelectAiAnswer; window.pjaAnswerValue = pjaAnswerValue; window.pjaCoerceToOption = pjaCoerceToOption; }
   // Exported so auto-apply.js (Easy Apply) can reuse the exact same answerer on the modal root.
   if (typeof window !== 'undefined') setTimeout(() => { try { window.pjaAnswerRequiredViaAI = pjaAnswerRequiredViaAI; window.pjaCollectRequiredEmptyFields = collectRequiredEmptyFields; } catch (_) {} }, 0);
 
@@ -2236,8 +2264,14 @@
       // Prefer exact label match; fall back to positional (dev-server returns answers in
       // question order — robust when the model reworords/truncates long legalese labels).
       const a = resp.answers.find(x => norm(x.label) === norm(f.label)) || resp.answers[i];
-      const ans = pjaAnswerValue(f.label, a);
+      let ans = pjaAnswerValue(f.label, a);
       if (!ans) { low++; continue; }
+      // Option-typed fields (select/combobox/radio) need the answer to MATCH an option. The AI
+      // often returns prose ("No. My background is...") for a Yes/No screen — coerce it to the
+      // best-matching option so the filler can commit it (else it stays empty → skip).
+      if (['select', 'combobox', 'radio'].includes(f.type) && Array.isArray(f.options) && f.options.length) {
+        ans = pjaCoerceToOption(ans, f.options) || ans;
+      }
       try {
         if (f.type === 'checkboxgroup' && typeof pjaCheckMatchingBox === 'function') pjaCheckMatchingBox(f.members || [], ans);
         else if (f.type === 'select' && typeof pjaFillSelect === 'function') pjaFillSelect(f.el, ans);
