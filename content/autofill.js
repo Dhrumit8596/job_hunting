@@ -1021,14 +1021,11 @@ async function pjaFillGreenhouseEducation(profile) {
     if (!label) continue;
     // decide answer
     let want = null;
-    // Country is a SEARCHABLE 244-option react-select: "United States" isn't in the rendered
-    // option list until you type, so the open+click path below fails (country-error → submit
-    // blocked). The fiber bridge reads all options from props and commits onChange directly,
-    // no typing needed — use it first for country.
+    // Country is a SEARCHABLE 244-option react-select. The fiber onChange returns "true" but the
+    // value does NOT actually commit for this widget (verified 4x → country-error persisted). So
+    // do NOT short-circuit on fiber here; fall through to the type-to-filter + TRUSTED-CDP-click
+    // path below (cdpClickEl is what genuinely commits a react-select, as it does for school/degree).
     if (/country/i.test(label) || inp.id === 'country') {
-      if (typeof pjaFillViaReactFiber === 'function') {
-        try { if (pjaFillViaReactFiber(inp, 'United States', 'country')) { dbg('country → United States via fiber'); await sleep(200); continue; } } catch(_) {}
-      }
       want = /united states|usa|u\.s\./i;
     }
     else if (/sponsor/i.test(label)) want = /no|not/i;             // require sponsorship → No
@@ -1049,10 +1046,22 @@ async function pjaFillGreenhouseEducation(profile) {
     const ctrl = inp.closest('[class*="select__control"]');
     ['mousedown','mouseup','click'].forEach(t => ctrl.dispatchEvent(new MouseEvent(t,{bubbles:true,cancelable:true,button:0,buttons:1})));
     await sleep(500);
+    // Large SEARCHABLE selects (Country: 244 options) don't render "United States" until the
+    // input filters. Type into the input to filter, THEN scan + trusted-CDP-click the option
+    // (cdpClickEl is what actually commits react-select — synthetic option clicks don't stick).
+    const isBigSearch = (inp.id === 'country') || /\bcountry\b/i.test(label);
+    if (isBigSearch) {
+      const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value')?.set;
+      const q = 'United';
+      inp.focus();
+      if (setter) setter.call(inp, q); else inp.value = q;
+      inp.dispatchEvent(new InputEvent('input', { bubbles: true, data: q, inputType: 'insertText' }));
+      await sleep(650);
+    }
     const lb = document.getElementById('react-select-' + inp.id + '-listbox');
     const opts = lb ? Array.from(lb.querySelectorAll('[role=option]')) : [];
     if (!opts.length) { inp.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',bubbles:true})); continue; }
-    const m = opts.find(o => want.test(o.textContent.trim())) || null;
+    const m = (isBigSearch ? (opts.find(o => /^united states$/i.test(o.textContent.trim())) || opts.find(o => want.test(o.textContent.trim()))) : opts.find(o => want.test(o.textContent.trim()))) || null;
     if (m) { const how = await cdpClickEl(m); dbg('q "'+label.slice(0,20)+'" → "'+m.textContent.trim().slice(0,18)+'" via '+how); }
     else { inp.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',bubbles:true})); }
     await sleep(300);
