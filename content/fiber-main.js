@@ -150,9 +150,16 @@
     var f = el[fk];
     var depth = 0;
     var diagOnChange = 0, diagOptionNodes = 0, diagMatched = 0, diagOptSample = '';
+    var diagFull = [];
     while (f && depth < 50) {
       var mp = f.memoizedProps;
-      if (mp && typeof mp.onChange === 'function') diagOnChange++;
+      if (mp && typeof mp.onChange === 'function') {
+        diagOnChange++;
+        // Full per-node summary: which onChange nodes exist, their react-select-ness, options.
+        var optCount = Array.isArray(mp.options) ? mp.options.length : -1;
+        var sig = (mp.classNamePrefix !== undefined ? 'cnp' : '') + (typeof mp.getOptionValue === 'function' ? 'gov' : '') + (typeof mp.getOptionLabel === 'function' ? 'gol' : '') + (mp.isSearchable !== undefined ? 'srch' : '') + (mp.menuIsOpen !== undefined ? 'menu' : '') + (mp.components !== undefined ? 'comp' : '') + (mp.value !== undefined ? 'val' : '') + (mp.inputValue !== undefined ? 'inp' : '');
+        diagFull.push('d' + depth + '[' + (mp.name || '?') + ' opts=' + optCount + ' ' + (sig || 'plain') + ']');
+      }
       if (mp && Array.isArray(mp.options) && mp.options.length && typeof mp.onChange === 'function') {
         diagOptionNodes++;
         if (!diagOptSample) diagOptSample = mp.options.slice(0, 4).map(function(o){ return lbl(o); }).join(',');
@@ -178,11 +185,10 @@
     }
 
     var chosen = reactSelectCandidate || namedCandidate || innerCandidate;
-    if (!chosen) {
-      // Expose why no candidate matched so the isolated-world caller can log it.
-      el.setAttribute('data-pja-fiber-diag', 'want="' + String(lv).slice(0,16) + '" onChangeNodes=' + diagOnChange + ' optNodes=' + diagOptionNodes + ' matched=' + diagMatched + ' opts=[' + String(diagOptSample).slice(0,50) + ']');
-      return;
-    }
+    // Always expose the full fiber walk so the isolated caller can log which onChange nodes exist
+    // and which was chosen — this is how we finally SEE the country widget's real structure.
+    el.setAttribute('data-pja-fiber-diag', 'want="' + String(lv).slice(0,14) + '" chosen=' + (chosen ? (chosen.rs ? 'RS' : (chosen.mp.name ? 'named' : 'inner')) : 'NONE') + ' walk=' + diagFull.slice(0, 8).join(' '));
+    if (!chosen) return;
 
     try {
       if (chosen.rs) {
