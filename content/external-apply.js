@@ -2164,6 +2164,9 @@
     // Onsite / in-office ability — honest Yes: the candidate is Bay-Area-based and these roles are Bay Area.
     if (/able to (come|be|work|report) ?(on-?site|in.?office|in person)|come on-?site|on-?site as (required|needed)|work (on-?site|in.?office|in person)|report to (the )?office|commute to (the )?(office|site)/i.test(t)) return 'Yes';
     if (/background check|drug (test|screen)/i.test(t)) return 'Yes';
+    // Non-compete: honest No for a California-based candidate — CA Bus. & Prof. Code §16600 voids
+    // non-compete agreements, so a CA applicant is not bound by an enforceable one.
+    if (/non-?compete|noncompete/i.test(t) && /\b(bound|subject|signed|have|are you)\b/i.test(t)) return 'No';
     if (/how did you hear|where did you (hear|find)|referral source|source of (this )?application/i.test(t)) return 'LinkedIn';
     // Acknowledgment / certification statements ("I have read and understand the Export Control
     // statement…", "I acknowledge…", "I certify…", "I agree…") — honest Yes: reading and agreeing
