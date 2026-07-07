@@ -931,7 +931,17 @@ async function pjaFillGreenhouseEducation(profile) {
   const fillRS = async (idPrefix, value, otherFallback) => {
     if (!value) return;
     // handle numbered variants school--0, degree--0, etc.
-    const inp = document.getElementById(idPrefix + '--0') || document.getElementById(idPrefix);
+    // WAIT for late-rendering education fields (Greenhouse renders the education section
+    // progressively — "discipline" often appears a beat after the pass first runs, and was
+    // being skipped as not-in-dom → required discipline* left empty → whole form skipped).
+    let inp = document.getElementById(idPrefix + '--0') || document.getElementById(idPrefix);
+    // Only wait when the education SECTION is present (a sibling school/degree/education control
+    // exists) but this specific field is late — otherwise skip immediately (no education section).
+    const eduSectionPresent = () => !!(document.getElementById('school--0') || document.getElementById('degree--0') ||
+      document.querySelector('[id^="school"],[id^="degree"],[id^="discipline"],[class*="education"]'));
+    if (!inp && eduSectionPresent()) {
+      for (let _w = 0; !inp && _w < 8; _w++) { await sleep(400); inp = document.getElementById(idPrefix + '--0') || document.getElementById(idPrefix); }
+    }
     if (!inp) { dbg(idPrefix + ' not-in-dom'); return; }
     const ctrl = inp.closest('[class*="select__control"]');
     // Skip only if a value is actually COMMITTED (react-select single-value present) —
