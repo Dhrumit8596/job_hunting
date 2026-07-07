@@ -126,8 +126,13 @@
       return o;
     }
 
-    // First pass: find the NAMED form-level component (Formik field wrapper).
-    // These use a single-arg onChange(option) that calls setFieldValue.
+    // Find candidates. The KEY one is the actual react-select <Select> component (identified by
+    // classNamePrefix / getOptionValue / components in its props) — calling ITS onChange with the
+    // react-select actionMeta drives react-select's own state -> Formik setFieldValue -> the
+    // displayed value COMMITS. Calling the outer Formik-field wrapper's onChange(opt) does NOT
+    // update the display (verified live: form-level fires but .select__single-value stays empty;
+    // inner react-select node commits -> display shows the value). Prefer react-select > named > inner.
+    var reactSelectCandidate = null;
     var namedCandidate = null;
     var innerCandidate = null;
     var f = el[fk];
@@ -137,6 +142,8 @@
       if (mp && Array.isArray(mp.options) && mp.options.length && typeof mp.onChange === 'function') {
         var opt = pickOpt(mp.options);
         if (opt) {
+          var isReactSelect = (mp.classNamePrefix !== undefined) || (typeof mp.getOptionValue === 'function') || (mp.components !== undefined);
+          if (isReactSelect && !reactSelectCandidate) reactSelectCandidate = { mp: mp, opt: opt, rs: true };
           if (mp.name && !namedCandidate) namedCandidate = { mp: mp, opt: opt };
           if (!innerCandidate && depth >= 3) innerCandidate = { mp: mp, opt: opt };
         }
@@ -145,16 +152,18 @@
       depth++;
     }
 
-    // Prefer the named (form-level) component; fall back to inner react-select
-    var chosen = namedCandidate || innerCandidate;
+    var chosen = reactSelectCandidate || namedCandidate || innerCandidate;
     if (!chosen) return;
 
     try {
-      // Named form-level components typically accept a single option argument
-      chosen.mp.onChange(chosen.opt);
+      if (chosen.rs) {
+        // react-select onChange signature: (newValue, actionMeta) — drives its state + Formik.
+        chosen.mp.onChange(chosen.opt, { action: 'select-option', option: chosen.opt, name: chosen.mp.name });
+      } else {
+        chosen.mp.onChange(chosen.opt);
+      }
       el.setAttribute('data-pja-fiber-done', 'ok');
     } catch(e) {
-      // Try with react-select standard actionMeta
       try {
         chosen.mp.onChange(chosen.opt, { action: 'select-option', option: chosen.opt });
         el.setAttribute('data-pja-fiber-done', 'ok');
