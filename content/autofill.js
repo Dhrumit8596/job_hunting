@@ -2072,8 +2072,19 @@ async function pjaForceAllPolicyReactSelects(profile) {
     if (inp.id) { const l = document.getElementById(inp.id + '-label') || document.querySelector('label[for="' + CSS.escape(inp.id) + '"]'); if (l) label = l.textContent || ''; }
     if (!label) { const al = inp.getAttribute('aria-labelledby'); if (al) label = (document.getElementById(al.split(/\s+/)[0])?.textContent) || ''; }
     if (!label) { diag.cand.push({ id: (inp.id||'').slice(0,20), skip: 'nolabel' }); continue; }
-    const ans = det ? det(label) : null;
-    if (!ans) continue;                                                       // only fixed-truth policy Qs
+    let ans = det ? det(label) : null;
+    let isEdu = false;
+    // Education react-selects (degree/discipline/school) — the discipline field is a recurring
+    // Greenhouse blocker (renders late, gh-edu misses it). Commit from profile truth via the bridge.
+    if (!ans && profile) {
+      const L = ((label || '') + ' ' + (inp.id || '')).toLowerCase();
+      if (/\bdegree\b/.test(L)) { ans = profile.degree; isEdu = true; }
+      else if (/discipline|field of study|\bmajor\b/.test(L)) { ans = profile.major; isEdu = true; }
+      else if (/\bschool\b|university|college|institution/.test(L)) { ans = profile.university; isEdu = true; }
+    }
+    if (!ans) continue;                                                       // fixed-truth policy + education
+    // Education fields: don't re-fire if already committed (re-opening could toggle the selection).
+    if (isEdu) { const svc = ctrl.querySelector('[class*="single-value"],[class*="singleValue"]'); if (svc && svc.textContent && svc.textContent.trim() && !/^\s*select/i.test(svc.textContent)) continue; }
     // Try the fiber bridge (proven to commit these). Fall back to the UI forcer if it doesn't stick.
     try { if (typeof pjaFillViaReactFiber === 'function') pjaFillViaReactFiber(inp, ans, ''); } catch (_) {}
     await _sleep(200);
