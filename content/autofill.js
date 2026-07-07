@@ -1021,7 +1021,16 @@ async function pjaFillGreenhouseEducation(profile) {
     if (!label) continue;
     // decide answer
     let want = null;
-    if (/country/i.test(label) || inp.id === 'country') want = /united states|usa|u\.s\./i;
+    // Country is a SEARCHABLE 244-option react-select: "United States" isn't in the rendered
+    // option list until you type, so the open+click path below fails (country-error → submit
+    // blocked). The fiber bridge reads all options from props and commits onChange directly,
+    // no typing needed — use it first for country.
+    if (/country/i.test(label) || inp.id === 'country') {
+      if (typeof pjaFillViaReactFiber === 'function') {
+        try { if (pjaFillViaReactFiber(inp, 'United States', 'country')) { dbg('country → United States via fiber'); await sleep(200); continue; } } catch(_) {}
+      }
+      want = /united states|usa|u\.s\./i;
+    }
     else if (/sponsor/i.test(label)) want = /no|not/i;             // require sponsorship → No
     else if (/authoriz|legally|eligible to work|right to work/i.test(label)) want = /yes|authorized/i;
     else if (/gender|are you (male|female)/i.test(label)) want = profile.gender ? new RegExp(profile.gender, 'i') : /decline|prefer not/i;

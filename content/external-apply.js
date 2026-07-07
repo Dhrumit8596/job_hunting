@@ -1008,6 +1008,19 @@
       })) { success = true; break; }
     }
     console.log('PJA ext-apply: post-submit success:', success, '| url:', location.href.slice(0,80), '| pageText snippet:', document.body.innerText.slice(0,120));
+    // DIAGNOSTIC: on submit_unclear, dump Greenhouse/ATS validation errors so we can see WHICH
+    // field blocked the submit (the form stays up with error text / aria-invalid on the culprit).
+    if (!success) {
+      try {
+        const errEls = pjaQueryAllExt('[aria-invalid="true"], [class*="error"]:not([class*="error-"]), [role="alert"], .field--error, [class*="invalid"]')
+          .filter(el => { try { const r = el.getBoundingClientRect(); return r.width > 0 && r.height > 0; } catch(_) { return false; } });
+        const errs = errEls.slice(0, 8).map(el => {
+          const lbl = (el.getAttribute('aria-label') || el.id || el.name || (el.closest('[class*="field"]')?.querySelector('label')?.textContent) || el.textContent || '').trim().replace(/\s+/g,' ').slice(0, 40);
+          return lbl;
+        }).filter(Boolean);
+        await addDbg('[submit-fail] errs(' + errEls.length + '): ' + errs.join(' | ') + ' | pathHint=' + location.pathname.slice(-24));
+      } catch(_) {}
+    }
     sessionStorage.setItem('pja_last_action', 'recordResult:submit:' + (success ? 'applied' : 'unclear') + ':' + job.company);
     await recordResult(job, { success, reason: success ? 'applied' : 'submit_unclear' });
     navigateBack(job);
