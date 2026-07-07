@@ -90,6 +90,20 @@
         "*://localhost/*",
         "*://127.0.0.1/*"
       ]
+    },
+    {
+      "matches": ["<all_urls>"],
+      "js": ["content/fiber-main.js"],
+      "world": "MAIN",
+      "run_at": "document_start",
+      "all_frames": false,
+      "exclude_matches": [
+        "*://*.linkedin.com/*",
+        "*://*.indeed.com/*",
+        "*://*.glassdoor.com/*",
+        "*://localhost/*",
+        "*://127.0.0.1/*"
+      ]
     }
   ],
   "action": {
