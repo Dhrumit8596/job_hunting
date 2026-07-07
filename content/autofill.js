@@ -1281,6 +1281,18 @@ function pjaFillCombobox(input, value, key) {
       match = opts.find(o => /\b(yes|agree|accept|acknowledge|certif|consent|confirm|i have read|i understand)\b/i.test(o.textContent) && !/\b(no|do not|don'?t|decline|disagree)\b/i.test(o.textContent));
       if (!match && opts.length <= 2) match = opts.find(o => !/^\s*no\b|decline|do not|disagree/i.test(o.textContent.trim()));
     }
+    // Affirmative/negative PROSE → binary yes/no option (mirrors fiber-main pickOpt step 5).
+    // The AI may answer a Yes/No question with a full sentence ("I have supported manufacturing
+    // operations…" = yes). Only map on a BINARY yes/no option set with UNAMBIGUOUS leading
+    // sentiment; otherwise leave unmatched (skip rather than commit a guess). Normalizes format.
+    if (!match) {
+      const yesO = opts.find(o => /^yes\b/i.test(o.textContent.trim()));
+      const noO  = opts.find(o => /^no\b/i.test(o.textContent.trim()));
+      if ((yesO || noO) && opts.length <= 3) {
+        if (/^(no\b|not\b|never\b|none\b|i (do not|don'?t|have not|haven'?t|am not|'?m not|was not|wasn'?t|cannot|can'?t|did not|didn'?t))/i.test(lv)) { if (noO) match = noO; }
+        else if (/^(yes\b|absolutely\b|correct\b|affirmative\b|i've\b|i (have|am|'?m|do|can|could|would|will|was|did|'?ve)\b)/i.test(lv)) { if (yesO) match = yesO; }
+      }
+    }
     if (!match && lv.length > 3)
       match = opts.find(o => o.textContent.trim().toLowerCase().includes(lv));
     // Numeric-range options (e.g. years-of-experience dropdowns "0-3 years", "5-8 years",

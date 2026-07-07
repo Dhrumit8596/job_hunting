@@ -120,7 +120,19 @@
       if (/decline|prefer not|wish not|not to answer|do not wish|don'?t wish|rather not/.test(lv)) {
         o = opts.find(function(o){ return /decline|prefer not|wish not|not to answer|do not wish|don'?t wish|rather not/.test(lbl(o)); }); if (o) return o;
       }
-      // 5. leading-token / substring
+      // 5. Affirmative / negative PROSE → binary yes/no option. The AI answerer may reply to a
+      // Yes/No question with a full sentence ("I have supported manufacturing operations…" = yes;
+      // "I do not currently require…" = no) instead of the bare token. Only map when the option
+      // set is BINARY yes/no-like AND the leading sentiment is UNAMBIGUOUS — otherwise fall through
+      // and leave unmatched (skipping is safer than committing a guessed answer). This normalizes
+      // ANSWER FORMAT, not truth: the sentence already states the honest answer.
+      var yesOpt = opts.find(function(o){ return /^yes\b/.test(lbl(o)); });
+      var noOpt  = opts.find(function(o){ return /^no\b/.test(lbl(o)); });
+      if ((yesOpt || noOpt) && opts.length <= 3) {
+        if (/^(no\b|not\b|never\b|none\b|i (do not|don'?t|have not|haven'?t|am not|'?m not|was not|wasn'?t|cannot|can'?t|did not|didn'?t))/.test(lv)) { if (noOpt) return noOpt; }
+        else if (/^(yes\b|absolutely\b|correct\b|affirmative\b|i've\b|i (have|am|'?m|do|can|could|would|will|was|did|'?ve)\b)/.test(lv)) { if (yesOpt) return yesOpt; }
+      }
+      // 6. leading-token / substring
       o = opts.find(function(o) { return lbl(o).indexOf(lv) === 0; });
       if (!o && lv.length > 2) o = opts.find(function(o) { return lbl(o).indexOf(lv) !== -1; });
       return o;

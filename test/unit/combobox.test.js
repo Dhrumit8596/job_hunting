@@ -82,12 +82,25 @@ module.exports = async (t) => {
   const c4 = makeCombobox(w, 'yrs', ['0-3 years', '3-5 years', '5-8 years', '8-12 years', '12+ years']);
   w.pjaFillCombobox(c4.input, '6', 'yearsExperience');
 
+  // PROSE affirmative answer to a binary Yes/No question -> maps to "Yes". The AI answerer replies
+  // to "have you directly supported manufacturing operations…?" with a sentence starting "I have
+  // supported…"; the bare-token matchers miss it, so it must fall to the sentiment-prose mapping.
+  const c5 = makeCombobox(w, 'exp', ['Yes', 'No']);
+  w.pjaFillCombobox(c5.input, 'I have supported manufacturing operations and resolved non-conformances', null);
+
+  // PROSE negative answer -> maps to "No" (e.g. referral question answered "I was not referred…").
+  const c6 = makeCombobox(w, 'refq', ['Yes', 'No']);
+  w.pjaFillCombobox(c6.input, 'No, I was not referred by anyone', null);
+
   // the filler queues on window._pjaComboChain with ~700ms timers; wait it out
-  await sleep(3800);
+  // (6 comboboxes queued sequentially → allow ~700ms each plus buffer)
+  await sleep(6000);
 
   t.eq(c1.clicked(), 'No, I will not require sponsorship', 'combobox: sponsorship=No clicks will-not-require');
   t.eq(c2.clicked(), 'I am authorized to work', 'combobox: workAuth=Yes clicks authorized (not sponsorship)');
   t.eq(c3.clicked(), 'Job board or social media', 'combobox: referralSource=LinkedIn maps to job-board/social');
   t.eq(rsClicked, 'San Jose State University', 'combobox: react-select education (select__control) selects the matching school');
   t.eq(c4.clicked(), '5-8 years', 'combobox: years=6 picks the containing range (5-8 years)');
+  t.eq(c5.clicked(), 'Yes', 'combobox: affirmative PROSE ("I have supported…") maps to Yes on a binary set');
+  t.eq(c6.clicked(), 'No', 'combobox: negative PROSE ("No, I was not…") maps to No on a binary set');
 };
