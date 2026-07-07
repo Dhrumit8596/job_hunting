@@ -2247,6 +2247,13 @@ ${questionList}`;
       if (!session) { sendResponse({ ok: false }); return; }
       const gmailTabId = _sender.tab?.id;
       if (gmailTabId) chrome.tabs.remove(gmailTabId).catch(() => {});
+      // Persist the failure reason to pja_dbg (pja_wd_verify_result is cleared right after read).
+      try {
+        const { pja_dbg: dd } = await new Promise(r => chrome.storage.local.get('pja_dbg', r));
+        const arr = (dd || []).slice(-40);
+        arr.push('[WD] gmail-verify NO_EMAIL reason=' + (msg.reason || 'email_not_found'));
+        await new Promise(r => chrome.storage.local.set({ pja_dbg: arr }, r));
+      } catch (_) {}
       await chrome.storage.local.set({
         pja_wd_verify_result: {
           hostname: session.hostname, success: false,

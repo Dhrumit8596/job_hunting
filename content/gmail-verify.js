@@ -71,13 +71,22 @@ async function main() {
     return;
   }
 
-  console.log('PJA gmail-verify: found', rows.length, 'rows, clicking first');
-  rows[0].click();
-  await sleep(1500);
-
-  const verifyUrl = await findLinkInEmailBody(8000);
+  console.log('PJA gmail-verify: found', rows.length, 'rows, scanning top', Math.min(rows.length, 4));
+  // Broad search may return several rows — open the newest few until one has a Workday link.
+  let verifyUrl = null;
+  for (let i = 0; i < Math.min(rows.length, 4); i++) {
+    // rows go stale after navigation; re-query each pass.
+    const fresh = document.querySelectorAll('tr.zA, [role="row"][data-legacy-last-message-id], tr[data-thread-id], [data-thread-id]');
+    if (!fresh[i]) break;
+    fresh[i].click();
+    await sleep(1500);
+    verifyUrl = await findLinkInEmailBody(6000);
+    if (verifyUrl) break;
+    // go back to the results list for the next row
+    if (isOnSearchPage()) { /* already list */ } else { history.back(); await sleep(1200); }
+  }
   if (!verifyUrl) {
-    console.log('PJA gmail-verify: no link found in email body');
+    console.log('PJA gmail-verify: no Workday link found in top emails');
     chrome.runtime.sendMessage({ type: 'WD_GMAIL_NO_EMAIL_FOUND', reason: 'link_not_found' });
     return;
   }

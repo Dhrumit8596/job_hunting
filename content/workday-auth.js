@@ -229,25 +229,33 @@ async function runGmailVerify(email, purpose, hostname) {
         dbg('runGmailVerify: clicking request-verification-email "' + (reqBtn.innerText || '').trim().slice(0, 30) + '"');
         reqBtn.click();
         await sleep(3000); // let the send fire + email arrive
+      } else {
+        dbg('runGmailVerify: no request-email button found (auto-send assumed) screen=' + (typeof detectScreen === 'function' ? detectScreen() : '?'));
       }
-    } catch (_) {}
+    } catch (e) { dbg('runGmailVerify: reqBtn check error ' + e.message); }
   }
 
+  // Broad query: Workday verification emails come from tenant-branded senders too (e.g.
+  // Bloom Energy sends from a non-myworkday address), so the old narrow sender-only filter
+  // matched nothing (reason=email_not_found even though the email arrived). Match ANY Workday
+  // sender OR a verify/confirm subject; findLinkInEmailBody() still validates that the clicked
+  // email actually contains a myworkdayjobs.com link, so a broad search can't misfire.
   const searchQuery = purpose === 'reset'
-    ? 'from:(no-reply@myworkday.com OR noreply@workday.com) subject:(reset) in:inbox newer_than:10m'
-    : 'from:(no-reply@myworkday.com OR noreply@workday.com) in:inbox newer_than:10m';
+    ? '(from:(workday.com OR myworkday.com OR myworkdayjobs.com) OR subject:(reset password)) newer_than:20m'
+    : '(from:(workday.com OR myworkday.com OR myworkdayjobs.com) OR subject:(verify OR verification OR "confirm your email" OR activate OR "email address")) newer_than:20m';
 
   const { pja_wd_gmail_session: existingSession } = await new Promise(r =>
     chrome.storage.local.get('pja_wd_gmail_session', r)
   );
   if (existingSession && existingSession.hostname === hostname &&
       Date.now() - existingSession.startedAt < 120000) {
-    console.log('PJA workday-auth: Gmail flow already in progress, waiting...');
+    dbg('runGmailVerify: gmail flow already in progress, waiting');
     return await waitForVerifyComplete(hostname, 90000);
   }
 
   await new Promise(r => chrome.storage.local.remove('pja_wd_verify_result', r));
 
+  dbg('runGmailVerify: sending WD_OPEN_GMAIL_TAB q=' + searchQuery.slice(0, 40));
   const resp = await new Promise(resolve =>
     chrome.runtime.sendMessage({
       type: 'WD_OPEN_GMAIL_TAB',
@@ -257,12 +265,15 @@ async function runGmailVerify(email, purpose, hostname) {
     }, resolve)
   );
 
+  dbg('runGmailVerify: WD_OPEN_GMAIL_TAB resp=' + JSON.stringify(resp || null));
   if (!resp?.ok) {
-    console.log('PJA workday-auth: WD_OPEN_GMAIL_TAB failed', resp);
+    dbg('runGmailVerify: WD_OPEN_GMAIL_TAB not ok → false');
     return false;
   }
 
-  return await waitForVerifyComplete(hostname, 90000);
+  const verified = await waitForVerifyComplete(hostname, 90000);
+  dbg('runGmailVerify: waitForVerifyComplete → ' + verified);
+  return verified;
 }
 
 async function waitForVerifyComplete(hostname, timeoutMs) {
