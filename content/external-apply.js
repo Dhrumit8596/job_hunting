@@ -290,7 +290,7 @@
             if (typeof pjaFillRequiredSelectFallback === 'function') pjaFillRequiredSelectFallback();
             if (typeof pjaAutoCheckConsent === 'function') pjaAutoCheckConsent();
             if (typeof pjaFillRequiredComboboxFallback === 'function') pjaFillRequiredComboboxFallback(profile, answers);
-            if (typeof pjaForceCountryField === 'function') { const n = pjaForceCountryField(profile.country || 'United States'); if (n) await addDbg('[country] forced via fiber n=' + n); }
+            if (typeof pjaForceCountryField === 'function') { const n = await pjaForceCountryField(profile.country || 'United States'); if (n) await addDbg('[country] forced via fiber n=' + n); }
             await sleep(500);
             let missing2 = findMissingRequired();
             if (missing2.length) {
@@ -893,7 +893,7 @@
     // fields — the normal fill paths miss it (searchable 244-option select → country-error → the
     // whole submit is silently blocked even though every question is answered).
     if (typeof pjaForceCountryField === 'function') {
-      const cf = pjaForceCountryField((job.profile && job.profile.country) || 'United States');
+      const cf = await pjaForceCountryField((job.profile && job.profile.country) || 'United States');
       if (cf) { await addDbg('[country] forced via fiber n=' + cf); await sleep(300); }
     }
     let missing = findMissingRequired();
@@ -902,7 +902,7 @@
     if (hardMissing.length) {
       await pjaAnswerRequiredViaAI(job);
       await sleep(600);
-      if (typeof pjaForceCountryField === 'function') pjaForceCountryField((job.profile && job.profile.country) || 'United States');
+      if (typeof pjaForceCountryField === "function") await pjaForceCountryField((job.profile && job.profile.country) || 'United States');
       missing = findMissingRequired();
       hardMissing = missing.filter(m => m.type !== 'wd_selectinput');
     }

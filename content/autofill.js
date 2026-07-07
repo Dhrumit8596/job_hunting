@@ -1938,7 +1938,8 @@ window.pjaFillViaReactFiber = pjaFillViaReactFiber;
 // input by id/label and commit "United States" straight through the fiber bridge (reads all
 // options from props, no typing/rendering needed). Also handles react-select structures where the
 // input id differs from "country" by scanning for a country-labelled select__control.
-function pjaForceCountryField(value) {
+async function pjaForceCountryField(value) {
+  const _sleep = ms => new Promise(r => setTimeout(r, ms));
   const val = value || 'United States';
   const cands = [];
   const byId = document.getElementById('country');
@@ -1959,8 +1960,33 @@ function pjaForceCountryField(value) {
     // Skip intl-tel-input phone country pickers — those are handled by the phone filler.
     if (inp.closest('[class*="iti"], [class*="PhoneInput"]')) continue;
     const ctrl = inp.closest('[class*="select__control"]');
-    if (ctrl) { const sv = ctrl.querySelector('[class*="single-value"]'); if (sv && sv.textContent && sv.textContent.trim() && !/select/i.test(sv.textContent)) { done++; continue; } }
-    try { if (typeof pjaFillViaReactFiber === 'function' && pjaFillViaReactFiber(inp, val, 'country')) done++; } catch(_) {}
+    const committed = () => { const sv = ctrl && ctrl.querySelector('[class*="single-value"]'); return !!(sv && sv.textContent && sv.textContent.trim() && !/^\s*select/i.test(sv.textContent)); };
+    if (committed()) { done++; continue; }
+    // Fiber onChange first (fast). If it did not actually commit the display, fall to a UI-driven
+    // type-then-click: react-select only reliably commits a searchable select when its OWN input
+    // filters the options and an option element is clicked (how the candidate-location filler works).
+    try { if (typeof pjaFillViaReactFiber === 'function') pjaFillViaReactFiber(inp, val, 'country'); } catch(_) {}
+    if (committed()) { done++; continue; }
+    if (ctrl) {
+      const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value')?.set;
+      inp.focus();
+      const typed = 'United States';
+      // open the menu first (mousedown on the control), then type to filter
+      ['mousedown','mouseup'].forEach(t => ctrl.dispatchEvent(new MouseEvent(t, { bubbles: true, cancelable: true, button: 0 })));
+      await _sleep(150);
+      if (setter) setter.call(inp, 'United'); else inp.value = 'United';
+      inp.dispatchEvent(new InputEvent('input', { bubbles: true, data: 'United', inputType: 'insertText' }));
+      await _sleep(600); // react-select filters options asynchronously
+      const lb = document.getElementById('react-select-' + inp.id + '-listbox')
+        || ctrl.parentElement?.querySelector('[role="listbox"]')
+        || document.querySelector('[id^="react-select-"][id$="-listbox"]:not([hidden])');
+      const opts = lb ? Array.from(lb.querySelectorAll('[role="option"]')) : [];
+      const m = opts.find(o => /^united states$/i.test((o.textContent || '').trim())) || opts.find(o => /united states/i.test(o.textContent || ''));
+      if (m) { ['mousedown','mouseup','click'].forEach(t => m.dispatchEvent(new MouseEvent(t, { bubbles: true, cancelable: true, button: 0 }))); }
+      else { inp.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', keyCode: 13, bubbles: true })); }
+      await _sleep(250);
+      if (committed()) done++;
+    }
   }
   return done;
 }
