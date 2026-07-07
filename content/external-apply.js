@@ -898,8 +898,12 @@
     }
     let missing = findMissingRequired();
     let hardMissing = missing.filter(m => m.type !== 'wd_selectinput');
-    // Answer any still-missing required fields with AI (profile + resume + prefs), then re-check.
-    if (hardMissing.length) {
+    // Always run the answerer: findMissingRequired only sees [required]/aria-required, so it
+    // MISSES Greenhouse react-select custom questions (e.g. the Export Control acknowledgment)
+    // that are required by an asterisk in the label only. collectRequiredEmptyFields' asterisk
+    // scan catches those, and the answerer early-returns when nothing is empty — so this is
+    // safe for ATSes that had nothing missing. Without it, those questions block submit silently.
+    {
       await pjaAnswerRequiredViaAI(job);
       await sleep(600);
       if (typeof pjaForceCountryField === "function") await pjaForceCountryField((job.profile && job.profile.country) || 'United States');
@@ -2153,6 +2157,12 @@
     if (/willing to (relocate|travel|commute)|able to (relocate|commute|travel)|open to relocat/i.test(t)) return 'Yes';
     if (/background check|drug (test|screen)/i.test(t)) return 'Yes';
     if (/how did you hear|where did you (hear|find)|referral source|source of (this )?application/i.test(t)) return 'LinkedIn';
+    // Acknowledgment / certification statements ("I have read and understand the Export Control
+    // statement…", "I acknowledge…", "I certify…", "I agree…") — honest Yes: reading and agreeing
+    // to a posted statement is part of applying. Excludes eligibility/legal-status framings, which
+    // the sponsorship/authorization rules above answer, and open-ended prompts.
+    if (/^\s*i (have read|acknowledge|certify|understand|agree|consent)\b|i have read and (understand|agree)|acknowledge (that i|and (agree|understand))|i certify that/i.test(t) &&
+        !/how many|describe|explain|please (provide|list|specify)/i.test(t)) return 'Yes';
     // Yes/No experience-screening — answer ONLY from her actual resume domains (honest, no
     // fabrication): Yes for documented skills, No for documented gaps, else defer to the AI.
     // Only fires on yes/no framings; excludes open-ended ("describe/explain/what") and numeric
@@ -2305,6 +2315,7 @@
   async function pjaAnswerRequiredViaAI(job, scope) {
     const dbg = m => new Promise(r => chrome.storage.local.get('pja_dbg', d => { const a=(d.pja_dbg||[]).slice(-19); a.push(m); chrome.storage.local.set({pja_dbg:a}, r); }));
     let fields = collectRequiredEmptyFields(scope);
+    await dbg('[ai] collected(' + fields.length + '): ' + fields.map(f => f.type + ':' + (f.label || '').slice(0, 24)).join(' | ').slice(0, 170));
     if (!fields.length) return { applied: 0, asked: 0 };
     // Deterministic pre-pass: policy questions + profile fields (LinkedIn/location/website)
     // directly from truth — no AI flakiness, and covers TEXT fields (which the AI declined).

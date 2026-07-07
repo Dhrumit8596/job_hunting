@@ -104,6 +104,12 @@ module.exports = (t) => {
   t.eq(w.pjaDeterministicAnswer('What is the highest level of education you have completed?'), null, 'det: education -> null (AI handles)');
   t.eq(w.pjaDeterministicAnswer('Describe your experience with SPC'), null, 'det: open-ended "describe" -> null');
 
+  // --- acknowledgment / certification statements -> honest Yes (reading/agreeing is part of applying) ---
+  t.eq(w.pjaDeterministicAnswer('I have read and understand the Export Control statement included in the job description above.'), 'Yes', 'det: export-control ack -> Yes');
+  t.eq(w.pjaDeterministicAnswer('I acknowledge that I have read the privacy notice.'), 'Yes', 'det: acknowledge -> Yes');
+  t.eq(w.pjaDeterministicAnswer('I certify that the information provided is accurate.'), 'Yes', 'det: certify -> Yes');
+  t.eq(w.pjaDeterministicAnswer('Please describe how many years of experience you have.'), null, 'det: open-ended not mis-caught as ack -> null');
+
   // --- experience screening: honest Yes for her domains, No for documented gaps, null otherwise ---
   t.eq(w.pjaDeterministicAnswer('Do you have hands-on experience with cleanroom environments?'), 'Yes', 'det: cleanroom experience -> Yes (her domain)');
   t.eq(w.pjaDeterministicAnswer('Do you have experience with wafer inspection and metrology?'), 'Yes', 'det: wafer/metrology -> Yes');

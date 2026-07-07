@@ -885,9 +885,9 @@ function pjaFillViaReactFiber(input, value, key) {
   const ok = input.getAttribute('data-pja-fiber-done') === 'ok';
   {
     const diag = input.getAttribute('data-pja-fiber-diag');
-    // Log the walk for the country field (and any failure) so we can see its real structure.
-    if (diag && (!ok || /country/i.test(input.id || input.name || ''))) {
-      try { chrome.storage.local.get('pja_dbg', d => { const a=(d.pja_dbg||[]).slice(-40); a.push('[rsdiag] '+String(input.id||input.name||'?').slice(0,14)+' ok='+ok+' '+diag); chrome.storage.local.set({pja_dbg:a}); }); } catch(_){}
+    // Log the walk for the country field, any question_* custom react-select, and any failure.
+    if (diag && (!ok || /country|question/i.test(input.id || input.name || ''))) {
+      try { chrome.storage.local.get('pja_dbg', d => { const a=(d.pja_dbg||[]).slice(-40); a.push('[rsdiag] '+String(input.id||input.name||'?').slice(0,20)+' ok='+ok+' val="'+String(value).slice(0,10)+'" '+diag); chrome.storage.local.set({pja_dbg:a}); }); } catch(_){}
     }
   }
   input.removeAttribute('data-pja-fiber-done');
