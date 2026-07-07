@@ -149,11 +149,16 @@
     var innerCandidate = null;
     var f = el[fk];
     var depth = 0;
+    var diagOnChange = 0, diagOptionNodes = 0, diagMatched = 0, diagOptSample = '';
     while (f && depth < 50) {
       var mp = f.memoizedProps;
+      if (mp && typeof mp.onChange === 'function') diagOnChange++;
       if (mp && Array.isArray(mp.options) && mp.options.length && typeof mp.onChange === 'function') {
+        diagOptionNodes++;
+        if (!diagOptSample) diagOptSample = mp.options.slice(0, 4).map(function(o){ return lbl(o); }).join(',');
         var opt = pickOpt(mp.options);
         if (opt) {
+          diagMatched++;
           var isReactSelect = (mp.classNamePrefix !== undefined) || (typeof mp.getOptionValue === 'function') || (mp.components !== undefined);
           if (isReactSelect && !reactSelectCandidate) reactSelectCandidate = { mp: mp, opt: opt, rs: true };
           if (mp.name && !namedCandidate) namedCandidate = { mp: mp, opt: opt };
@@ -165,7 +170,11 @@
     }
 
     var chosen = reactSelectCandidate || namedCandidate || innerCandidate;
-    if (!chosen) return;
+    if (!chosen) {
+      // Expose why no candidate matched so the isolated-world caller can log it.
+      el.setAttribute('data-pja-fiber-diag', 'want="' + String(lv).slice(0,16) + '" onChangeNodes=' + diagOnChange + ' optNodes=' + diagOptionNodes + ' matched=' + diagMatched + ' opts=[' + String(diagOptSample).slice(0,50) + ']');
+      return;
+    }
 
     try {
       if (chosen.rs) {

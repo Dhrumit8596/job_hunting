@@ -883,7 +883,12 @@ function pjaFillViaReactFiber(input, value, key) {
     detail: { uid, optionLabel: String(value || ''), optionValue: String(value || ''), key: String(key || '') }
   }));
   const ok = input.getAttribute('data-pja-fiber-done') === 'ok';
+  if (!ok) {
+    const diag = input.getAttribute('data-pja-fiber-diag');
+    if (diag) { try { chrome.storage.local.get('pja_dbg', d => { const a=(d.pja_dbg||[]).slice(-40); a.push('[rsdiag] '+String(input.id||input.name||'?').slice(0,16)+' '+diag); chrome.storage.local.set({pja_dbg:a}); }); } catch(_){} }
+  }
   input.removeAttribute('data-pja-fiber-done');
+  input.removeAttribute('data-pja-fiber-diag');
   input.removeAttribute('data-pja-fiber-id');
   return ok;
 }

@@ -1882,22 +1882,30 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
       }
 
       // ── Path 1: dev server ────────────────────────────────────────────────────
+      // The dev server routes to the local Claude CLI, which can take 15-40s and
+      // occasionally drops a request under load — a SINGLE failure used to fall straight
+      // through to the direct-API path (whose key is often invalid → "invalid x-api-key",
+      // leaving screening questions unanswered → form skipped). Retry a few times before
+      // giving up, since the dev server is the reliable engine when DEV_MODE is on.
       if (DEV_MODE) {
-        try {
-          const resp = await fetch(`${DEV_SERVER}/answer-questions`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ ...msg.payload, profile, prefs })
-          });
-          if (!resp.ok) throw new Error(`Dev server ${resp.status}`);
-          const result = await resp.json();
-          if (!result.success) throw new Error(result.error || 'answer-questions failed');
-          persistAnswers(result.answers);
-          sendResponse({ success: true, answers: result.answers });
-          return;
-        } catch (devErr) {
-          console.warn('PJA: Dev server unavailable, falling back to API:', devErr.message);
-          // Fall through to API fallback below
+        for (let attempt = 0; attempt < 3; attempt++) {
+          try {
+            if (attempt > 0) await new Promise(r => setTimeout(r, 1500));
+            const resp = await fetch(`${DEV_SERVER}/answer-questions`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ ...msg.payload, profile, prefs })
+            });
+            if (!resp.ok) throw new Error(`Dev server ${resp.status}`);
+            const result = await resp.json();
+            if (!result.success) throw new Error(result.error || 'answer-questions failed');
+            persistAnswers(result.answers);
+            sendResponse({ success: true, answers: result.answers });
+            return;
+          } catch (devErr) {
+            console.warn(`PJA: Dev server answer-questions attempt ${attempt + 1}/3 failed:`, devErr.message);
+            // retry; after the last attempt fall through to API fallback below
+          }
         }
       }
 
