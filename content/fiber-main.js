@@ -159,7 +159,15 @@
         var opt = pickOpt(mp.options);
         if (opt) {
           diagMatched++;
-          var isReactSelect = (mp.classNamePrefix !== undefined) || (typeof mp.getOptionValue === 'function') || (mp.components !== undefined);
+          // react-select's <Select> node carries many internal props a plain Formik-field
+          // wrapper lacks. The original 3-prop check missed some react-select builds (e.g. the
+          // Greenhouse Country select) → the code called the outer wrapper's onChange without
+          // actionMeta → the value never committed (country-error). Broaden the signature.
+          var isReactSelect = (mp.classNamePrefix !== undefined) || (typeof mp.getOptionValue === 'function') ||
+            (mp.components !== undefined) || (typeof mp.getOptionLabel === 'function') ||
+            (typeof mp.filterOption === 'function') || (mp.isSearchable !== undefined) ||
+            (mp.menuIsOpen !== undefined) || (mp.hideSelectedOptions !== undefined) ||
+            (mp.closeMenuOnSelect !== undefined) || (mp.theme !== undefined && mp.styles !== undefined);
           if (isReactSelect && !reactSelectCandidate) reactSelectCandidate = { mp: mp, opt: opt, rs: true };
           if (mp.name && !namedCandidate) namedCandidate = { mp: mp, opt: opt };
           if (!innerCandidate && depth >= 3) innerCandidate = { mp: mp, opt: opt };
@@ -181,7 +189,9 @@
         // react-select onChange signature: (newValue, actionMeta) — drives its state + Formik.
         chosen.mp.onChange(chosen.opt, { action: 'select-option', option: chosen.opt, name: chosen.mp.name });
       } else {
-        chosen.mp.onChange(chosen.opt);
+        // Pass actionMeta anyway — harmless to a Formik wrapper, required by an undetected react-select.
+        try { chosen.mp.onChange(chosen.opt, { action: 'select-option', option: chosen.opt }); }
+        catch(_) { chosen.mp.onChange(chosen.opt); }
       }
       el.setAttribute('data-pja-fiber-done', 'ok');
     } catch(e) {
