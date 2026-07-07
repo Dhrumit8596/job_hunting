@@ -2430,6 +2430,9 @@
           else if (f.type === 'radio' && typeof pjaSelectRadio === 'function') pjaSelectRadio(f.radios || [], ans);
           else if (f.type === 'checkboxgroup' && typeof pjaCheckMatchingBox === 'function') pjaCheckMatchingBox(f.members || [], ans);
           else if (f.type === 'select' && typeof pjaFillSelect === 'function') pjaFillSelect(f.el, ans);
+          // combobox retry: the fiber onChange fired but didn't persist — use the reliable
+          // open-menu → type → click-option path (same mechanism that makes country commit).
+          else if (f.type === 'combobox' && typeof pjaForceReactSelectCommit === 'function') await pjaForceReactSelectCommit(f.el, ans);
           else if (f.type === 'combobox' && typeof pjaFillCombobox === 'function') pjaFillCombobox(f.el, ans);
           else if ((f.type === 'text' || f.type === 'textarea') && typeof pjaSetNative === 'function') pjaSetNative(f.el, ans);
         } catch (_) {}

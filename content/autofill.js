@@ -1997,7 +1997,7 @@ async function pjaForceCountryField(value) {
     // Skip intl-tel-input phone country pickers — those are handled by the phone filler.
     if (inp.closest('[class*="iti"], [class*="PhoneInput"]')) continue;
     const ctrl = inp.closest('[class*="select__control"]');
-    const committed = () => { const sv = ctrl && ctrl.querySelector('[class*="single-value"]'); return !!(sv && sv.textContent && sv.textContent.trim() && !/^\s*select/i.test(sv.textContent)); };
+    const committed = () => { const sv = ctrl && ctrl.querySelector('[class*="single-value"],[class*="singleValue"]'); return !!(sv && sv.textContent && sv.textContent.trim() && !/^\s*select/i.test(sv.textContent)); };
     if (committed()) { done++; continue; }
     // Fiber onChange first (fast). If it did not actually commit the display, fall to a UI-driven
     // type-then-click: react-select only reliably commits a searchable select when its OWN input
@@ -2028,6 +2028,64 @@ async function pjaForceCountryField(value) {
   return done;
 }
 window.pjaForceCountryField = pjaForceCountryField;
+
+// Generalized reliable react-select commit for ANY value (not just country). Mirrors
+// pjaForceCountryField's proven path: try the fiber onChange, VERIFY the display committed
+// (single-value present), and if not, drive the UI — open the menu, type the value to filter,
+// then CLICK the matching option element. react-select searchable/custom question selects
+// (Greenhouse "remix" build) commit reliably ONLY via a clicked option, not the fiber onChange
+// alone (which fires but Formik doesn't persist). Returns true iff the value is committed.
+async function pjaForceReactSelectCommit(input, value) {
+  const _sleep = ms => new Promise(r => setTimeout(r, ms));
+  if (!input) return false;
+  const ctrl = input.closest('[class*="select__control"]');
+  if (!ctrl) return false;
+  const lv = String(value == null ? '' : value).toLowerCase().trim();
+  if (!lv) return false;
+  const committed = () => { const sv = ctrl.querySelector('[class*="single-value"],[class*="singleValue"]'); return !!(sv && sv.textContent && sv.textContent.trim() && !/^\s*select/i.test(sv.textContent)); };
+  if (committed()) return true;
+  try { if (typeof pjaFillViaReactFiber === 'function') pjaFillViaReactFiber(input, value, ''); } catch (_) {}
+  if (committed()) return true;
+  const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value')?.set;
+  const findOpt = () => {
+    // The react-select input id (e.g. "react-select-N-input") does NOT map cleanly to its listbox
+    // id, and the Export Control select's listbox id differs from the input id — so search ALL
+    // currently-open listboxes (across shadow roots) and match the option there. Exclude the
+    // intl-tel-input country-code and the Places location listboxes.
+    const roots = typeof pjaGetAllRoots === 'function' ? pjaGetAllRoots() : [document];
+    let opts = [];
+    for (const root of roots) {
+      root.querySelectorAll('[role="listbox"]:not([hidden]):not([id*="iti"]), [id^="react-select-"][id$="-listbox"]:not([hidden])').forEach(lb => {
+        if (/pac-|places/i.test(lb.className || '')) return;
+        opts = opts.concat(Array.from(lb.querySelectorAll('[role="option"]')));
+      });
+    }
+    const lead = lv.match(/^(yes|no)\b/);
+    return opts.find(o => (o.textContent || '').trim().toLowerCase() === lv)
+      || (lead && opts.find(o => new RegExp('^' + lead[1] + '\\b', 'i').test((o.textContent || '').trim())))
+      || (lv.length > 2 && opts.find(o => (o.textContent || '').toLowerCase().includes(lv)))
+      || null;
+  };
+  for (let attempt = 0; attempt < 2 && !committed(); attempt++) {
+    input.focus();
+    ['mousedown', 'mouseup'].forEach(t => ctrl.dispatchEvent(new MouseEvent(t, { bubbles: true, cancelable: true, button: 0 })));
+    await _sleep(150);
+    // Type the value to filter (searchable lists); harmless when isSearchable is false.
+    if (setter) { setter.call(input, String(value)); input.dispatchEvent(new InputEvent('input', { bubbles: true, data: String(value), inputType: 'insertText' })); }
+    await _sleep(550);
+    let m = findOpt();
+    if (!m) { // typed filter may have hidden a short option (e.g. "Yes" vs a typed sentence) — clear + reopen
+      if (setter) { setter.call(input, ''); input.dispatchEvent(new InputEvent('input', { bubbles: true })); }
+      await _sleep(300); m = findOpt();
+    }
+    if (m) { ['mousedown', 'mouseup', 'click'].forEach(t => m.dispatchEvent(new MouseEvent(t, { bubbles: true, cancelable: true, button: 0 }))); }
+    else { input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', keyCode: 13, bubbles: true })); }
+    await _sleep(300);
+    try { chrome.storage.local.get('pja_dbg', d => { const a=(d.pja_dbg||[]).slice(-40); a.push('[frs] id='+String(input.id||'').slice(0,18)+' val="'+String(value).slice(0,6)+'" opt='+(m?'Y':'N')+' committed='+committed()); chrome.storage.local.set({pja_dbg:a}); }); } catch(_){}
+  }
+  return committed();
+}
+window.pjaForceReactSelectCommit = pjaForceReactSelectCommit;
 window.pjaFillTextViaFiber = pjaFillTextViaFiber;
 window.pjaFillViaFiberOnChange = pjaFillViaFiberOnChange;
 window.pjaClickRadio = pjaClickRadio;
