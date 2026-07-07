@@ -1264,7 +1264,14 @@ function pjaFillCombobox(input, value, key) {
   // question_19018428004 + self-ID selects). Verified live: sets "No" where clicks all failed.
   // Falls through to the click path (below) only if the fiber has no options/onChange (e.g. the
   // Country phone-combined select, which the CDP-open path handles).
-  if (selectCtrl && typeof pjaFillViaReactFiber === 'function') {
+  // NOTE: try the fiber bridge UNCONDITIONALLY (not gated on selectCtrl). Some Greenhouse builds
+  // (e.g. the "remix" job-boards embed) give the required combobox input a structure where
+  // input.closest('.select__control') is null even though the react-select onChange is reachable
+  // by walking up the fiber from the input — gating on selectCtrl skipped those entirely (the
+  // Export Control / custom question_* selects never reached the bridge → never committed → the
+  // form failed submit on them). The bridge walks the fiber and returns false harmlessly when no
+  // react-select onChange exists, so this is safe for genuine non-react-select comboboxes.
+  if (typeof pjaFillViaReactFiber === 'function') {
     try { if (pjaFillViaReactFiber(input, value, key)) return true; } catch (_) {}
   }
 

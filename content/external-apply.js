@@ -2325,7 +2325,13 @@
       const ans = pjaDeterministicAnswer(f.label) || pjaProfileFieldForLabel(f.label, detProfile);
       if (!ans) continue;
       try {
-        if (f.type === 'radio' && typeof pjaSelectRadio === 'function') pjaSelectRadio(f.radios || [], ans);
+        // Greenhouse Location (City) is a Google-Places autocomplete: it's often collected as a
+        // plain 'text' field (no role=combobox), but a bare value-set doesn't commit — it needs
+        // the Places listbox pick that pjaFillCombobox's candidate-location branch performs. Route
+        // any location/city field there so it commits reliably (was a ~50% flaky skip otherwise).
+        const isLocationField = /location|\bcity\b/i.test(f.label || '') && (f.el.id === 'candidate-location' || /location|city/i.test(f.el.id || '') || f.el.getAttribute('role') === 'combobox' || f.el.getAttribute('aria-autocomplete'));
+        if (isLocationField && typeof pjaFillCombobox === 'function') pjaFillCombobox(f.el, ans);
+        else if (f.type === 'radio' && typeof pjaSelectRadio === 'function') pjaSelectRadio(f.radios || [], ans);
         else if (f.type === 'select' && typeof pjaFillSelect === 'function') pjaFillSelect(f.el, ans);
         else if (f.type === 'combobox' && typeof pjaFillCombobox === 'function') pjaFillCombobox(f.el, ans);
         else if ((f.type === 'text' || f.type === 'textarea') && f.el) {
@@ -2336,7 +2342,19 @@
         detApplied++;
       } catch (_) {}
     }
-    if (detApplied) { await dbg('[ai] deterministic applied=' + detApplied); await sleep(500); fields = collectRequiredEmptyFields(scope); }
+    if (detApplied) {
+      await dbg('[ai] deterministic applied=' + detApplied);
+      // AWAIT the combobox commit chain before re-collecting: pjaFillCombobox queues its
+      // react-select commit on _pjaComboChain and returns immediately, so a re-collect after a
+      // bare sleep still sees the field EMPTY → it gets re-sent to the AI, whose answer then
+      // OVERWRITES the correct deterministic one (observed: an Export Control acknowledgment the
+      // deterministic pass set to the honest "Yes" was re-collected and the AI committed "No").
+      if (window._pjaComboChain && typeof window._pjaComboChain.then === 'function') {
+        await Promise.race([window._pjaComboChain.catch(() => {}), new Promise(r => setTimeout(r, 6000))]);
+      }
+      await sleep(500);
+      fields = collectRequiredEmptyFields(scope);
+    }
     if (!fields.length) return { applied: detApplied, asked: 0 };
     // checkboxgroup -> present to the AI as a 'select' so it sees the options and copies one exactly.
     const questions = fields.map(f => ({ label: f.label, type: f.type === 'checkboxgroup' ? 'select' : f.type, options: f.options || [], maxLength: f.maxLength || 0 }));
@@ -2353,12 +2371,18 @@
     }
     const norm = s => (s || '').toLowerCase().replace(/\s+/g, ' ').trim();
     let applied = detApplied, low = 0;
+    const answerCache = {}; // normalized label -> final answer, for the verify-and-retry pass
     for (let i = 0; i < fields.length; i++) {
       const f = fields[i];
       // Prefer exact label match; fall back to positional (dev-server returns answers in
       // question order — robust when the model reworords/truncates long legalese labels).
       const a = resp.answers.find(x => norm(x.label) === norm(f.label)) || resp.answers[i];
-      let ans = pjaAnswerValue(f.label, a);
+      // The deterministic answer (policy/acknowledgment/profile truth) MUST win over the AI's:
+      // the model sometimes returns a wrong value for a fixed-truth question (observed: it answered
+      // "No" to "I have read and understand the Export Control statement", where the honest answer
+      // is "Yes"). When a deterministic answer exists, use it and ignore the AI's for that field.
+      const det = pjaDeterministicAnswer(f.label) || pjaProfileFieldForLabel(f.label, detProfile);
+      let ans = det || pjaAnswerValue(f.label, a);
       if (!ans) { low++; continue; }
       // Option-typed fields (select/combobox/radio) need the answer to MATCH an option. The AI
       // often returns prose ("No. My background is...") for a Yes/No screen — coerce it to the
@@ -2366,6 +2390,7 @@
       if (['select', 'combobox', 'radio'].includes(f.type) && Array.isArray(f.options) && f.options.length) {
         ans = pjaCoerceToOption(ans, f.options) || ans;
       }
+      answerCache[norm(f.label)] = ans;
       try {
         if (f.type === 'checkboxgroup' && typeof pjaCheckMatchingBox === 'function') pjaCheckMatchingBox(f.members || [], ans);
         else if (f.type === 'select' && typeof pjaFillSelect === 'function') pjaFillSelect(f.el, ans);
@@ -2386,6 +2411,34 @@
         window._pjaComboChain.catch(() => {}),
         new Promise(r => setTimeout(r, 6000)),
       ]);
+    }
+    // VERIFY-AND-RETRY: the react-select fiber commit is intermittent — a single onChange call
+    // sometimes doesn't stick (observed: the Export Control ack committed on some runs, not others,
+    // failing submit on question_*-error). Re-collect the still-empty required option-fields and
+    // re-fire their answer from the cache, up to 3 rounds. This is the "verify display shows the
+    // value, then commit" step: collectRequiredEmptyFields reads the react-select single-value, so
+    // a field only reappears here if it genuinely did NOT commit.
+    for (let round = 0; round < 3; round++) {
+      const still = collectRequiredEmptyFields(scope).filter(f => answerCache[norm(f.label)]);
+      if (!still.length) break;
+      await dbg('[ai] retry round ' + (round + 1) + ': ' + still.map(f => (f.label || '').slice(0, 18)).join(' | ').slice(0, 120));
+      for (const f of still) {
+        const ans = answerCache[norm(f.label)];
+        const isLoc = /location|\bcity\b/i.test(f.label || '') && (f.el.id === 'candidate-location' || /location|city/i.test(f.el.id || '') || f.el.getAttribute('role') === 'combobox' || f.el.getAttribute('aria-autocomplete'));
+        try {
+          if (isLoc && typeof pjaFillCombobox === 'function') pjaFillCombobox(f.el, ans);
+          else if (f.type === 'radio' && typeof pjaSelectRadio === 'function') pjaSelectRadio(f.radios || [], ans);
+          else if (f.type === 'checkboxgroup' && typeof pjaCheckMatchingBox === 'function') pjaCheckMatchingBox(f.members || [], ans);
+          else if (f.type === 'select' && typeof pjaFillSelect === 'function') pjaFillSelect(f.el, ans);
+          else if (f.type === 'combobox' && typeof pjaFillCombobox === 'function') pjaFillCombobox(f.el, ans);
+          else if ((f.type === 'text' || f.type === 'textarea') && typeof pjaSetNative === 'function') pjaSetNative(f.el, ans);
+        } catch (_) {}
+        await sleep(250);
+      }
+      if (window._pjaComboChain && typeof window._pjaComboChain.then === 'function') {
+        await Promise.race([window._pjaComboChain.catch(() => {}), new Promise(r => setTimeout(r, 6000))]);
+      }
+      await sleep(400);
     }
     await dbg('[ai] applied=' + applied + ' low=' + low + ' of ' + questions.length);
     return { applied, asked: questions.length, low };
