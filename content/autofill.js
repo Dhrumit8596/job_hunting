@@ -1018,6 +1018,14 @@ async function pjaFillGreenhouseEducation(profile) {
     if (!label) {
       const fld = inp.closest('div'); const l = fld?.querySelector('label'); label = (l?.textContent || '').toLowerCase();
     }
+    // Walk up several ancestors — some fields (e.g. Greenhouse Country) nest the <label> higher
+    // than the immediate div, so the check above returned '' and the field was skipped entirely.
+    if (!label) {
+      let node = inp;
+      for (let d = 0; d < 5 && !label; d++) { node = node.parentElement; if (!node) break; const l = node.querySelector('label'); if (l) label = (l.textContent || '').toLowerCase(); }
+    }
+    // Last resort: use the input id (e.g. "country") so a known field is not skipped.
+    if (!label && inp.id) label = inp.id.toLowerCase();
     if (!label) continue;
     // decide answer
     let want = null;
