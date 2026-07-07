@@ -1106,34 +1106,48 @@ function pjaFillCombobox(input, value, key) {
   //      text starts with the city name.  If none appears, fall through to the
   //      normal combobox path so the text value is at least present.
   if (input.id === 'candidate-location') {
-    input.focus();
-    // Type the city portion only (before the first comma) to trigger the Places API.
-    // Use the native value setter + InputEvent — execCommand no-ops in an isolated
-    // content script, so the autocomplete never fired before.
     const cityOnly = value.split(',')[0].trim();
     const _setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value')?.set;
-    if (_setter) _setter.call(input, ''); else input.value = '';
-    input.dispatchEvent(new InputEvent('input', { bubbles: true }));
-    if (_setter) _setter.call(input, cityOnly); else input.value = cityOnly;
-    input.dispatchEvent(new InputEvent('input', { bubbles: true, data: cityOnly, inputType: 'insertText' }));
-    input.dispatchEvent(new KeyboardEvent('keydown', { key: cityOnly.slice(-1), bubbles: true }));
-    input.dispatchEvent(new KeyboardEvent('keyup', { key: cityOnly.slice(-1), bubbles: true }));
-    setTimeout(() => {
-      const roots = typeof pjaGetAllRoots === 'function' ? pjaGetAllRoots() : [document];
-      let listbox = null;
-      for (const root of roots) {
-        listbox = root.querySelector('[role="listbox"]:not([hidden]), .pac-container:not([style*="display: none"])');
-        if (listbox) break;
+    const _sleep = ms => new Promise(r => setTimeout(r, ms));
+    // Greenhouse CLEARS the typed text on blur unless a Places suggestion is actually selected, so
+    // plain text never satisfies the required check — only a clicked suggestion commits. Places also
+    // returns a comma'd "City, State, Country", whereas the typed cityOnly has no comma; so a comma
+    // in the field value is a reliable "a suggestion committed" signal. Retry (Places can be slow
+    // under load), poll up to ~2s for the listbox, and use a full mouse sequence on the item.
+    const committed = () => /,/.test(input.value || '');
+    window._pjaComboChain = (window._pjaComboChain || Promise.resolve()).then(async () => {
+      for (let attempt = 0; attempt < 3 && !committed(); attempt++) {
+        input.focus();
+        if (_setter) _setter.call(input, ''); else input.value = '';
+        input.dispatchEvent(new InputEvent('input', { bubbles: true }));
+        await _sleep(80);
+        if (_setter) _setter.call(input, cityOnly); else input.value = cityOnly;
+        input.dispatchEvent(new InputEvent('input', { bubbles: true, data: cityOnly, inputType: 'insertText' }));
+        input.dispatchEvent(new KeyboardEvent('keydown', { key: cityOnly.slice(-1), bubbles: true }));
+        input.dispatchEvent(new KeyboardEvent('keyup', { key: cityOnly.slice(-1), bubbles: true }));
+        let listbox = null;
+        for (let w = 0; w < 12 && !listbox; w++) {
+          await _sleep(200);
+          const roots = typeof pjaGetAllRoots === 'function' ? pjaGetAllRoots() : [document];
+          for (const root of roots) {
+            const lb = root.querySelector('[role="listbox"]:not([hidden]), .pac-container:not([style*="display: none"])');
+            if (lb && lb.querySelector('[role="option"], .pac-item')) { listbox = lb; break; }
+          }
+        }
+        if (listbox) {
+          const opts = Array.from(listbox.querySelectorAll('[role="option"], .pac-item'));
+          const match = opts.find(o => o.textContent.toLowerCase().includes(cityOnly.toLowerCase())) || opts[0];
+          if (match) { ['mousedown', 'mouseup', 'click'].forEach(t => match.dispatchEvent(new MouseEvent(t, { bubbles: true, cancelable: true, button: 0 }))); await _sleep(350); }
+        } else {
+          // No listbox — accept the highlighted suggestion via keyboard, else leave for next attempt.
+          input.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', keyCode: 40, bubbles: true }));
+          await _sleep(150);
+          input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', keyCode: 13, bubbles: true }));
+          await _sleep(300);
+        }
       }
-      if (listbox) {
-        // Google Places .pac-item or ARIA option — click the first one that matches city
-        const opts = Array.from(listbox.querySelectorAll('[role="option"], .pac-item'));
-        const match = opts.find(o => o.textContent.toLowerCase().includes(cityOnly.toLowerCase())) || opts[0];
-        if (match) { match.click(); return; }
-      }
-      // No Places listbox appeared — fall back: set the full value via native setter
-      pjaSetNative(input, value);
-    }, 600);
+      try { chrome.storage.local.get('pja_dbg', d => { const a=(d.pja_dbg||[]).slice(-40); a.push('[loc] candidate-location committed='+committed()+' val="'+String(input.value||'').slice(0,24)+'"'); chrome.storage.local.set({pja_dbg:a}); }); } catch(_){}
+    });
     return true;
   }
 
