@@ -313,7 +313,19 @@
             return;
           }
         }
-        // Neither navigation nor form appeared — give up on this job
+        // Neither navigation nor form appeared — give up on this job.
+        // DIAGNOSTIC: dump what IS in the DOM so a filler can be built for this ATS.
+        try {
+          const allInputs = Array.from(document.querySelectorAll('input,select,textarea'))
+            .filter(el => { try { const r = el.getBoundingClientRect(); return r.width > 0 && r.height > 0; } catch(_) { return true; } })
+            .slice(0, 20)
+            .map(el => (el.tagName.toLowerCase() + '[' + (el.type||'') + ']#' + (el.id||'') + '.n=' + (el.name||'') + '.ph=' + (el.placeholder||el.getAttribute('aria-label')||'').slice(0,20)));
+          const iframes = Array.from(document.querySelectorAll('iframe')).map(f => (f.src||'').slice(0, 60));
+          const btns = Array.from(document.querySelectorAll('button,a[role=button],[type=submit]')).map(b => (b.textContent||'').trim().slice(0,20)).filter(Boolean).slice(0,12);
+          dbgLog(['[noform] inputs(' + allInputs.length + '): ' + allInputs.join(' | ')]);
+          dbgLog(['[noform] iframes: ' + iframes.join(' | ')]);
+          dbgLog(['[noform] buttons: ' + btns.join(' | ')]);
+        } catch(_) {}
         console.log('PJA ext-apply: apply_btn_no_form, calling recordResult');
         sessionStorage.setItem('pja_last_action', 'recordResult:apply_btn_no_form:' + job.company);
         await recordResult(job, { success: false, reason: 'apply_btn_no_form' });
