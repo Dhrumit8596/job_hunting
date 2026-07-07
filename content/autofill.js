@@ -1932,6 +1932,39 @@ window.pjaFillUnknownTextFields = pjaFillUnknownTextFields;
 window.pjaFillCombobox = pjaFillCombobox;
 window.pjaFillGreenhouseEducation = pjaFillGreenhouseEducation;
 window.pjaFillViaReactFiber = pjaFillViaReactFiber;
+
+// Dedicated fixer for the Greenhouse "Country" react-select (a searchable 244-option select
+// that the normal fill paths miss → country-error → submit blocked). Find the country combobox
+// input by id/label and commit "United States" straight through the fiber bridge (reads all
+// options from props, no typing/rendering needed). Also handles react-select structures where the
+// input id differs from "country" by scanning for a country-labelled select__control.
+function pjaForceCountryField(value) {
+  const val = value || 'United States';
+  const cands = [];
+  const byId = document.getElementById('country');
+  if (byId) cands.push(byId);
+  const roots = typeof pjaGetAllRoots === 'function' ? pjaGetAllRoots() : [document];
+  for (const root of roots) {
+    root.querySelectorAll('input[role="combobox"], .select__control input').forEach(inp => {
+      if (cands.includes(inp)) return;
+      const lblBy = inp.getAttribute('aria-labelledby');
+      let label = lblBy ? (document.getElementById(lblBy.split(' ')[0])?.textContent || '') : '';
+      if (!label) label = inp.getAttribute('aria-label') || '';
+      if (!label) label = inp.closest('div')?.querySelector('label')?.textContent || '';
+      if (/\bcountry\b/i.test(label) || /country/i.test(inp.id || '') || /country/i.test(inp.name || '')) cands.push(inp);
+    });
+  }
+  let done = 0;
+  for (const inp of cands) {
+    // Skip intl-tel-input phone country pickers — those are handled by the phone filler.
+    if (inp.closest('[class*="iti"], [class*="PhoneInput"]')) continue;
+    const ctrl = inp.closest('[class*="select__control"]');
+    if (ctrl) { const sv = ctrl.querySelector('[class*="single-value"]'); if (sv && sv.textContent && sv.textContent.trim() && !/select/i.test(sv.textContent)) { done++; continue; } }
+    try { if (typeof pjaFillViaReactFiber === 'function' && pjaFillViaReactFiber(inp, val, 'country')) done++; } catch(_) {}
+  }
+  return done;
+}
+window.pjaForceCountryField = pjaForceCountryField;
 window.pjaFillTextViaFiber = pjaFillTextViaFiber;
 window.pjaFillViaFiberOnChange = pjaFillViaFiberOnChange;
 window.pjaClickRadio = pjaClickRadio;
