@@ -1028,6 +1028,19 @@
           return lbl;
         }).filter(Boolean);
         await addDbg('[submit-fail] errs(' + errEls.length + '): ' + errs.join(' | ') + ' | pathHint=' + location.pathname.slice(-24));
+        // Dump the ACTUAL element structure of the country + phone widgets so we know what they
+        // really are (react-select vs native <select> vs custom) instead of guessing at the fix.
+        const describe = (kw) => {
+          const wrap = pjaQueryAllExt('[class*="field"], [class*="Field"], fieldset, div')
+            .find(el => { const lb = el.querySelector('label'); return lb && new RegExp('^\\s*' + kw, 'i').test(lb.textContent || ''); });
+          if (!wrap) return kw + ': <no wrap>';
+          const inp = wrap.querySelector('input,select,textarea,[role="combobox"],[role="listbox"]');
+          const desc = inp ? (inp.tagName.toLowerCase() + '[type=' + (inp.type||'') + '][role=' + (inp.getAttribute('role')||'') + '] id=' + (inp.id||'') + ' name=' + (inp.name||'')) : '<no input>';
+          const cls = (wrap.querySelector('[class*="select__control"],[class*="iti"],[class*="Phone"],[class*="control"]')?.className || wrap.className || '').slice(0, 60);
+          return kw + ': ' + desc + ' | ctrlCls=' + cls;
+        };
+        await addDbg('[field-struct] ' + describe('Country'));
+        await addDbg('[field-struct] ' + describe('Phone'));
       } catch(_) {}
     }
     sessionStorage.setItem('pja_last_action', 'recordResult:submit:' + (success ? 'applied' : 'unclear') + ':' + job.company);
