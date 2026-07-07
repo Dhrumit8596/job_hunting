@@ -2079,6 +2079,22 @@
   // PURE: deterministic answer for common policy questions — reliable across ALL ATSes
   // (esp. Lever .application-question radios that the fieldset-based fallbacks miss). Returns
   // the answer string or null (→ let the AI handle it, e.g. education level, novel questions).
+  // Maps a custom-question label to a STANDARD profile value when the field is really a profile
+  // field mis-registered as a Greenhouse question_* custom field (e.g. "LinkedIn Profile*",
+  // "Location (City)*"). Returns the value string or null. Fixes these reaching the AI answerer
+  // (which declines/guesses) instead of filling deterministically from the profile.
+  function pjaProfileFieldForLabel(label, profile) {
+    const L = String(label || '').toLowerCase();
+    profile = profile || {};
+    if (/linkedin/.test(L)) return profile.linkedin || null;
+    if (/github/.test(L)) return profile.github || null;
+    if (/(personal )?website|portfolio\b|\bblog\b/.test(L)) return profile.website || null;
+    if (/location.*\(?city|city.*location|current location|where are you (located|based)|your location|location \(city/.test(L))
+      return profile.currentLocation || (profile.city ? (profile.city + (profile.state ? ', ' + profile.state : '')) : null);
+    return null;
+  }
+  if (typeof window !== 'undefined') window.pjaProfileFieldForLabel = pjaProfileFieldForLabel;
+
   function pjaDeterministicAnswer(label) {
     const t = String(label || '');
     if (/referr/i.test(t)) return 'No';
@@ -2243,15 +2259,21 @@
     const dbg = m => new Promise(r => chrome.storage.local.get('pja_dbg', d => { const a=(d.pja_dbg||[]).slice(-19); a.push(m); chrome.storage.local.set({pja_dbg:a}, r); }));
     let fields = collectRequiredEmptyFields(scope);
     if (!fields.length) return { applied: 0, asked: 0 };
-    // Deterministic pre-pass: answer common policy questions directly (no AI flakiness).
+    // Deterministic pre-pass: policy questions + profile fields (LinkedIn/location/website)
+    // directly from truth — no AI flakiness, and covers TEXT fields (which the AI declined).
+    const detProfile = job.profile || {};
     let detApplied = 0;
     for (const f of fields) {
-      const ans = pjaDeterministicAnswer(f.label);
+      const ans = pjaDeterministicAnswer(f.label) || pjaProfileFieldForLabel(f.label, detProfile);
       if (!ans) continue;
       try {
         if (f.type === 'radio' && typeof pjaSelectRadio === 'function') pjaSelectRadio(f.radios || [], ans);
         else if (f.type === 'select' && typeof pjaFillSelect === 'function') pjaFillSelect(f.el, ans);
         else if (f.type === 'combobox' && typeof pjaFillCombobox === 'function') pjaFillCombobox(f.el, ans);
+        else if ((f.type === 'text' || f.type === 'textarea') && f.el) {
+          if (typeof pjaFillTextViaFiber === 'function') pjaFillTextViaFiber(f.el, ans);
+          else if (typeof pjaSetNative === 'function') pjaSetNative(f.el, ans);
+        }
         else continue;
         detApplied++;
       } catch (_) {}
