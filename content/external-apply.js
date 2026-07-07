@@ -896,6 +896,11 @@
       const cf = await pjaForceCountryField((job.profile && job.profile.country) || 'United States');
       if (cf) { await addDbg('[country] forced via fiber n=' + cf); await sleep(300); }
     }
+    // Force-commit all required policy react-selects (sponsorship/work-auth/onsite/ack) via the
+    // proven fiber bridge — the collect→answer flow intermittently missed them, failing submit.
+    if (typeof pjaForceAllPolicyReactSelects === 'function') {
+      try { const pn = await pjaForceAllPolicyReactSelects(job.profile); if (pn) { await addDbg('[policy-rs] committed n=' + pn); await sleep(300); } } catch (_) {}
+    }
     let missing = findMissingRequired();
     let hardMissing = missing.filter(m => m.type !== 'wd_selectinput');
     // Always run the answerer: findMissingRequired only sees [required]/aria-required, so it
@@ -907,6 +912,7 @@
       await pjaAnswerRequiredViaAI(job);
       await sleep(600);
       if (typeof pjaForceCountryField === "function") await pjaForceCountryField((job.profile && job.profile.country) || 'United States');
+      if (typeof pjaForceAllPolicyReactSelects === 'function') { try { const pn = await pjaForceAllPolicyReactSelects(job.profile); if (pn) await addDbg('[policy-rs] post-AI committed n=' + pn); } catch (_) {} }
       missing = findMissingRequired();
       hardMissing = missing.filter(m => m.type !== 'wd_selectinput');
     }

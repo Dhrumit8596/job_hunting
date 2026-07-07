@@ -2043,6 +2043,48 @@ async function pjaForceCountryField(value) {
 }
 window.pjaForceCountryField = pjaForceCountryField;
 
+// Sweep ALL required Greenhouse policy react-selects (sponsorship, work-authorization, onsite,
+// acknowledgments, etc.) and force-commit each with its honest deterministic answer via the fiber
+// bridge (pjaFillViaReactFiber → fiber-main.js pja:reactselect). Verified live that the bridge
+// commits these reliably; the normal collect→answer flow was intermittently NOT invoking it for
+// question_* selects, so the form failed submit on question_*-error. This dedicated pass runs the
+// bridge directly on every empty required select__control combobox that has a deterministic answer,
+// so sponsorship/auth/onsite are ALWAYS committed. Returns the count committed.
+async function pjaForceAllPolicyReactSelects(profile) {
+  const _sleep = ms => new Promise(r => setTimeout(r, ms));
+  const det = (typeof window !== 'undefined' && window.pjaDeterministicAnswer) || null;
+  const roots = typeof pjaGetAllRoots === 'function' ? pjaGetAllRoots() : [document];
+  let committed = 0;
+  const inputs = [];
+  for (const root of roots) root.querySelectorAll('input[role="combobox"], .select__control input').forEach(i => { if (!inputs.includes(i)) inputs.push(i); });
+  for (const inp of inputs) {
+    const ctrl = inp.closest('[class*="select__control"]');
+    if (!ctrl) continue;
+    if (inp.closest('[class*="iti"], [class*="PhoneInput"]')) continue;       // phone country-code
+    if (/^country$/i.test(inp.id || '')) continue;                            // country handled separately
+    // NOTE: do NOT skip on a display single-value. The multi-pass fill can leave a STALE display
+    // ("No" shown) while Formik's committed value was reset — so the form fails submit even though
+    // it looks filled. Re-firing the bridge is idempotent and re-sets Formik's value fresh right
+    // before submit, which is what actually matters for validation.
+    // label: Greenhouse gives question_<id> a <label id="question_<id>-label">
+    const sv = ctrl.querySelector('[class*="single-value"],[class*="singleValue"]');
+    let label = '';
+    if (inp.id) { const l = document.getElementById(inp.id + '-label') || document.querySelector('label[for="' + CSS.escape(inp.id) + '"]'); if (l) label = l.textContent || ''; }
+    if (!label) { const al = inp.getAttribute('aria-labelledby'); if (al) label = (document.getElementById(al.split(/\s+/)[0])?.textContent) || ''; }
+    if (!label) { diag.cand.push({ id: (inp.id||'').slice(0,20), skip: 'nolabel' }); continue; }
+    const ans = det ? det(label) : null;
+    if (!ans) continue;                                                       // only fixed-truth policy Qs
+    // Try the fiber bridge (proven to commit these). Fall back to the UI forcer if it doesn't stick.
+    try { if (typeof pjaFillViaReactFiber === 'function') pjaFillViaReactFiber(inp, ans, ''); } catch (_) {}
+    await _sleep(200);
+    let ok = !!(ctrl.querySelector('[class*="single-value"],[class*="singleValue"]')?.textContent?.trim());
+    if (!ok && typeof pjaForceReactSelectCommit === 'function') { try { ok = await pjaForceReactSelectCommit(inp, ans); } catch (_) {} }
+    if (ok) committed++;
+  }
+  return committed;
+}
+window.pjaForceAllPolicyReactSelects = pjaForceAllPolicyReactSelects;
+
 // Generalized reliable react-select commit for ANY value (not just country). Mirrors
 // pjaForceCountryField's proven path: try the fiber onChange, VERIFY the display committed
 // (single-value present), and if not, drive the UI — open the menu, type the value to filter,
