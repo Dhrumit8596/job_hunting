@@ -2155,6 +2155,8 @@
     if (/worked (for|at)[\s\S]{0,30}(pricewaterhouse|pwc)/i.test(t)) return 'No';
     if (/\bat least 18\b|\bover 18\b|\b18 (years|or older)\b|are you 18/i.test(t)) return 'Yes';
     if (/willing to (relocate|travel|commute)|able to (relocate|commute|travel)|open to relocat/i.test(t)) return 'Yes';
+    // Onsite / in-office ability — honest Yes: the candidate is Bay-Area-based and these roles are Bay Area.
+    if (/able to (come|be|work|report) ?(on-?site|in.?office|in person)|come on-?site|on-?site as (required|needed)|work (on-?site|in.?office|in person)|report to (the )?office|commute to (the )?(office|site)/i.test(t)) return 'Yes';
     if (/background check|drug (test|screen)/i.test(t)) return 'Yes';
     if (/how did you hear|where did you (hear|find)|referral source|source of (this )?application/i.test(t)) return 'LinkedIn';
     // Acknowledgment / certification statements ("I have read and understand the Export Control
