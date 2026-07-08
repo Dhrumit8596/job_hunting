@@ -684,6 +684,56 @@
       "ats": "ashby",
       "slug": "PhysicalIntelligence",
       "name": "Physical Intelligence"
+    },
+    {
+      "ats": "ashby",
+      "slug": "Substrate",
+      "name": "Substrate"
+    },
+    {
+      "ats": "ashby",
+      "slug": "TandemPV",
+      "name": "Tandem PV"
+    },
+    {
+      "ats": "ashby",
+      "slug": "FormEnergy",
+      "name": "Form Energy"
+    },
+    {
+      "ats": "ashby",
+      "slug": "Bedrock-Robotics",
+      "name": "Bedrock Robotics"
+    },
+    {
+      "ats": "ashby",
+      "slug": "Nautilus Biotechnology",
+      "name": "Nautilus Biotechnology"
+    },
+    {
+      "ats": "ashby",
+      "slug": "Merge Labs",
+      "name": "Merge Labs"
+    },
+    {
+      "ats": "ashby",
+      "slug": "charge-robotics",
+      "name": "Charge Robotics"
+    },
+    {
+      "ats": "ashby",
+      "slug": "Ridealso",
+      "name": "ALSO"
+    },
+    {
+      "ats": "ashby",
+      "slug": "AtumWorks",
+      "name": "Atum Works"
+    },
+    {
+      "ats": "ashby",
+      "slug": "skip",
+      "name": "Skip"
     }
   ]
 }
