@@ -104,6 +104,15 @@ module.exports = (t) => {
   t.eq(liJob.applyUrl, 'https://www.linkedin.com/jobs/view/4430362420/', 'linkedin.normalize: view URL');
   t.eq(liJob.ats, 'linkedin', 'linkedin.normalize: ats');
   t.eq(liJob.isEasyApply, true, 'linkedin.normalize: easyApply flag');
+  const ashby = R('adapters/ashby');
+  const ashJob = ashby.normalize({ id: 'uuid-1', title: 'Process Engineer', location: 'San Jose, CA', jobUrl: 'https://jobs.ashbyhq.com/acme/uuid-1', publishedAt: '2026-06-01' }, { name: 'Acme', slug: 'acme' });
+  t.eq(ashJob.applyUrl, 'https://jobs.ashbyhq.com/acme/uuid-1/application', 'ashby.normalize: applyUrl derives /application');
+  t.eq(ashJob.company, 'Acme', 'ashby.normalize: company from source');
+  t.eq(ashJob.ats, 'ashby', 'ashby.normalize: ats');
+  const ashJob2 = ashby.normalize({ id: 'uuid-2', title: 'Metrology Engineer', location: 'Remote, US', isRemote: true, applyUrl: 'https://jobs.ashbyhq.com/acme/uuid-2/application' }, { slug: 'acme' });
+  t.eq(ashJob2.applyUrl, 'https://jobs.ashbyhq.com/acme/uuid-2/application', 'ashby.normalize: explicit applyUrl preserved');
+  t.eq(ashJob2.company, 'acme', 'ashby.normalize: company falls back to slug');
+  t.eq(ashJob2.remote, true, 'ashby.normalize: isRemote flag honored');
 
   // --- tnAdjustScore: down-weight gray-TN senior titles ---
   t.eq(tnAdjustScore('Senior Quality Engineer', 88), 88, 'tnAdjust: normal title unchanged');
