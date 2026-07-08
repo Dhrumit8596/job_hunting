@@ -604,6 +604,86 @@
       "name": "Intel",
       "apiUrl": "https://intel.wd1.myworkdayjobs.com/wday/cxs/intel/External/jobs",
       "siteBase": "https://intel.wd1.myworkdayjobs.com/en-US/External"
+    },
+    {
+      "ats": "lever",
+      "slug": "velo3d",
+      "name": "Velo3D"
+    },
+    {
+      "ats": "lever",
+      "slug": "cellares",
+      "name": "Cellares"
+    },
+    {
+      "ats": "lever",
+      "slug": "mainspringenergy",
+      "name": "Mainspring Energy"
+    },
+    {
+      "ats": "lever",
+      "slug": "cyngn",
+      "name": "Cyngn"
+    },
+    {
+      "ats": "lever",
+      "slug": "ChefRobotics",
+      "name": "Chef Robotics"
+    },
+    {
+      "ats": "lever",
+      "slug": "arcadiascience",
+      "name": "Arcadia Science"
+    },
+    {
+      "ats": "lever",
+      "slug": "foundry-robotics",
+      "name": "Foundry Robotics"
+    },
+    {
+      "ats": "ashby",
+      "slug": "cobot",
+      "name": "Collaborative Robotics"
+    },
+    {
+      "ats": "ashby",
+      "slug": "foundry-robotics",
+      "name": "Foundry Robotics"
+    },
+    {
+      "ats": "ashby",
+      "slug": "AtomicSemi",
+      "name": "Atomic Semi"
+    },
+    {
+      "ats": "ashby",
+      "slug": "remedyrobotics",
+      "name": "Remedy Robotics"
+    },
+    {
+      "ats": "ashby",
+      "slug": "sesame",
+      "name": "Sesame"
+    },
+    {
+      "ats": "ashby",
+      "slug": "span",
+      "name": "SPAN"
+    },
+    {
+      "ats": "ashby",
+      "slug": "echo",
+      "name": "Echo Neurotechnologies"
+    },
+    {
+      "ats": "ashby",
+      "slug": "eightsleep",
+      "name": "Eight Sleep"
+    },
+    {
+      "ats": "ashby",
+      "slug": "PhysicalIntelligence",
+      "name": "Physical Intelligence"
     }
   ]
 }
