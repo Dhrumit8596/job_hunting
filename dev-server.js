@@ -867,7 +867,7 @@ Answer each question below for the candidate's application. Return a JSON array 
 Questions:
 ${questionList}`;
 
-        const raw = await runClaudeWithSystemPrompt(ANSWER_SYSTEM_PROMPT, userPrompt);
+        const raw = await runClaudeWithSystemPrompt(ANSWER_SYSTEM_PROMPT, userPrompt, 180000);
         const start = raw.indexOf('[');
         const end   = raw.lastIndexOf(']');
         let answers = [];

@@ -410,6 +410,200 @@
       "ats": "greenhouse",
       "slug": "seurat",
       "name": "Seurat"
+    },
+    {
+      "ats": "greenhouse",
+      "slug": "psiquantum",
+      "name": "PsiQuantum"
+    },
+    {
+      "ats": "greenhouse",
+      "slug": "tenstorrent",
+      "name": "Tenstorrent"
+    },
+    {
+      "ats": "greenhouse",
+      "slug": "etchedai",
+      "name": "Etched"
+    },
+    {
+      "ats": "greenhouse",
+      "slug": "bayasystems",
+      "name": "Baya Systems"
+    },
+    {
+      "ats": "greenhouse",
+      "slug": "attotude",
+      "name": "AttoTude"
+    },
+    {
+      "ats": "greenhouse",
+      "slug": "atomicmachines",
+      "name": "Atomic Machines"
+    },
+    {
+      "ats": "greenhouse",
+      "slug": "densityai",
+      "name": "DensityAI"
+    },
+    {
+      "ats": "greenhouse",
+      "slug": "graphcore",
+      "name": "Graphcore"
+    },
+    {
+      "ats": "greenhouse",
+      "slug": "skhynixmemorysolutionsamericainc",
+      "name": "SK hynix memory solutions America"
+    },
+    {
+      "ats": "greenhouse",
+      "slug": "asm",
+      "name": "ASM International"
+    },
+    {
+      "ats": "greenhouse",
+      "slug": "meshopticaltechnologies",
+      "name": "Mesh Optical Technologies"
+    },
+    {
+      "ats": "greenhouse",
+      "slug": "cspeed",
+      "name": "Cspeed"
+    },
+    {
+      "ats": "greenhouse",
+      "slug": "samsungsemiconductor",
+      "name": "Samsung Semiconductor"
+    },
+    {
+      "ats": "greenhouse",
+      "slug": "aurorainnovation",
+      "name": "Aurora Innovation"
+    },
+    {
+      "ats": "greenhouse",
+      "slug": "elementscience",
+      "name": "Element Science"
+    },
+    {
+      "ats": "greenhouse",
+      "slug": "ceribell",
+      "name": "Ceribell"
+    },
+    {
+      "ats": "greenhouse",
+      "slug": "neptunemedical",
+      "name": "Neptune Medical"
+    },
+    {
+      "ats": "greenhouse",
+      "slug": "jupiterendovascular",
+      "name": "Jupiter Endovascular"
+    },
+    {
+      "ats": "greenhouse",
+      "slug": "willowinnovations",
+      "name": "Willow"
+    },
+    {
+      "ats": "greenhouse",
+      "slug": "unchainedlabs",
+      "name": "Unchained Labs"
+    },
+    {
+      "ats": "lever",
+      "slug": "rigetti",
+      "name": "Rigetti Computing"
+    },
+    {
+      "ats": "lever",
+      "slug": "eliyan",
+      "name": "Eliyan"
+    },
+    {
+      "ats": "lever",
+      "slug": "neye-systems-inc.",
+      "name": "nEye Systems"
+    },
+    {
+      "ats": "lever",
+      "slug": "lumotive",
+      "name": "Lumotive"
+    },
+    {
+      "ats": "lever",
+      "slug": "mashgin",
+      "name": "Mashgin"
+    },
+    {
+      "ats": "ashby",
+      "slug": "1x",
+      "name": "1X Technologies"
+    },
+    {
+      "ats": "ashby",
+      "slug": "d-matrix",
+      "name": "d-Matrix"
+    },
+    {
+      "ats": "ashby",
+      "slug": "crusoe",
+      "name": "Crusoe"
+    },
+    {
+      "ats": "workday",
+      "name": "KLA",
+      "apiUrl": "https://kla.wd1.myworkdayjobs.com/wday/cxs/kla/Search/jobs",
+      "siteBase": "https://kla.wd1.myworkdayjobs.com/en-US/Search"
+    },
+    {
+      "ats": "workday",
+      "name": "NVIDIA",
+      "apiUrl": "https://nvidia.wd5.myworkdayjobs.com/wday/cxs/nvidia/NVIDIAExternalCareerSite/jobs",
+      "siteBase": "https://nvidia.wd5.myworkdayjobs.com/en-US/NVIDIAExternalCareerSite"
+    },
+    {
+      "ats": "workday",
+      "name": "Bloom Energy",
+      "apiUrl": "https://bloomenergy.wd1.myworkdayjobs.com/wday/cxs/bloomenergy/BloomEnergyCareers/jobs",
+      "siteBase": "https://bloomenergy.wd1.myworkdayjobs.com/en-US/BloomEnergyCareers"
+    },
+    {
+      "ats": "workday",
+      "name": "Marvell",
+      "apiUrl": "https://marvell.wd1.myworkdayjobs.com/wday/cxs/marvell/MarvellCareers/jobs",
+      "siteBase": "https://marvell.wd1.myworkdayjobs.com/en-US/MarvellCareers"
+    },
+    {
+      "ats": "workday",
+      "name": "Lumentum",
+      "apiUrl": "https://lumentum.wd5.myworkdayjobs.com/wday/cxs/lumentum/LITE/jobs",
+      "siteBase": "https://lumentum.wd5.myworkdayjobs.com/en-US/LITE"
+    },
+    {
+      "ats": "workday",
+      "name": "FormFactor",
+      "apiUrl": "https://formfactor.wd1.myworkdayjobs.com/wday/cxs/formfactor/FFI-Careers/jobs",
+      "siteBase": "https://formfactor.wd1.myworkdayjobs.com/en-US/FFI-Careers"
+    },
+    {
+      "ats": "workday",
+      "name": "Onto Innovation",
+      "apiUrl": "https://onto.wd1.myworkdayjobs.com/wday/cxs/onto/ONTO_Careers/jobs",
+      "siteBase": "https://onto.wd1.myworkdayjobs.com/en-US/ONTO_Careers"
+    },
+    {
+      "ats": "workday",
+      "name": "Broadcom",
+      "apiUrl": "https://broadcom.wd1.myworkdayjobs.com/wday/cxs/broadcom/External_Career/jobs",
+      "siteBase": "https://broadcom.wd1.myworkdayjobs.com/en-US/External_Career"
+    },
+    {
+      "ats": "workday",
+      "name": "Intel",
+      "apiUrl": "https://intel.wd1.myworkdayjobs.com/wday/cxs/intel/External/jobs",
+      "siteBase": "https://intel.wd1.myworkdayjobs.com/en-US/External"
     }
   ]
 }
