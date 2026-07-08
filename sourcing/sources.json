@@ -734,6 +734,56 @@
       "ats": "ashby",
       "slug": "skip",
       "name": "Skip"
+    },
+    {
+      "ats": "lever",
+      "slug": "genefab",
+      "name": "GeneFab"
+    },
+    {
+      "ats": "ashby",
+      "slug": "periodic-labs",
+      "name": "Periodic Labs"
+    },
+    {
+      "ats": "ashby",
+      "slug": "lumilens",
+      "name": "Lumilens"
+    },
+    {
+      "ats": "ashby",
+      "slug": "AeroVect",
+      "name": "AeroVect"
+    },
+    {
+      "ats": "ashby",
+      "slug": "plasmidsaurus",
+      "name": "Plasmidsaurus"
+    },
+    {
+      "ats": "ashby",
+      "slug": "rivianvw.tech",
+      "name": "Rivian-VW Technologies"
+    },
+    {
+      "ats": "ashby",
+      "slug": "windborne-systems",
+      "name": "WindBorne Systems"
+    },
+    {
+      "ats": "ashby",
+      "slug": "MaticRobots",
+      "name": "Matic Robots"
+    },
+    {
+      "ats": "ashby",
+      "slug": "human-computer-lab",
+      "name": "Human Computer Lab"
+    },
+    {
+      "ats": "ashby",
+      "slug": "normalcomputing",
+      "name": "Normal Computing"
     }
   ]
 }
