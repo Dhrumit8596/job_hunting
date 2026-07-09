@@ -187,10 +187,17 @@
     console.log('PJA ext-apply:', job.company, '|', job.ats, '| profile.firstName:', profile.firstName || 'MISSING', '| descClicks:', descClicks);
 
     // --- Check if this is a job description page (no form inputs yet) ---
-    const hasFormInputs = !!document.querySelector(
-      'form input:not([type=hidden]):not([type=file]), form select, form textarea,' +
-      'input[required]:not([type=hidden]):not([type=file]), select[required], textarea[required]'
-    );
+    const formInputSel = 'form input:not([type=hidden]):not([type=file]), form select, form textarea,' +
+      'input[required]:not([type=hidden]):not([type=file]), select[required], textarea[required]';
+    let hasFormInputs = !!document.querySelector(formInputSel);
+    // Some ATS apply forms are SPAs that render fields progressively AFTER a bare initial page
+    // (e.g. SmartRecruiters "one-click" /oneclick-ui, which first shows only a resume file input).
+    // If the URL is already an application form, POLL a few seconds so we fill it instead of
+    // wrongly treating it as a description page and hunting for a non-existent Apply button.
+    const looksLikeFormUrl = /oneclick-ui|\/apply(\b|\/|\?)|application|job_app|\/embed\//i.test(location.href);
+    if (!hasFormInputs && looksLikeFormUrl) {
+      for (let _i = 0; _i < 12 && !hasFormInputs; _i++) { await sleep(500); hasFormInputs = !!document.querySelector(formInputSel); }
+    }
     // Workday SPA uses React without <form>/required attributes and handles auth state
     // internally — bypass the description-page check entirely for Workday sites.
     const isWorkdaySite = /workday\.com|myworkdayjobs\.com/i.test(location.hostname);

@@ -14,13 +14,19 @@ function normalize(raw, source) {
   const locStr = loc.fullLocation ||
     [loc.city, loc.region, loc.country].filter(Boolean).join(', ');
   const slug = source.slug || (raw.company && raw.company.identifier) || '';
+  // Land DIRECTLY on the guest-applyable one-click form (no login). The job page's
+  // "I'm interested" link resolves to this URL; the posting's `uuid` IS the publication id.
+  // Verified live: this form is on jobs.smartrecruiters.com (extension-covered) and needs no sign-in.
+  const applyUrl = (slug && raw.uuid)
+    ? `https://jobs.smartrecruiters.com/oneclick-ui/company/${slug}/publication/${raw.uuid}?dcr_ci=${slug}`
+    : (slug && raw.id ? `https://jobs.smartrecruiters.com/${slug}/${raw.id}` : '');
   return makeJob({
     id: raw.id,
     title: raw.name,
     company: source.name || (raw.company && raw.company.name) || slug,
     location: locStr,
     remote: loc.remote != null ? !!loc.remote : undefined,
-    applyUrl: slug && raw.id ? `https://jobs.smartrecruiters.com/${slug}/${raw.id}` : '',
+    applyUrl,
     ats: ATS,
     postedAt: raw.releasedDate || '',
   });

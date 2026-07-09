@@ -114,8 +114,8 @@ module.exports = (t) => {
   t.eq(ashJob2.company, 'acme', 'ashby.normalize: company falls back to slug');
   t.eq(ashJob2.remote, true, 'ashby.normalize: isRemote flag honored');
   const sr = R('adapters/smartrecruiters');
-  const srJob = sr.normalize({ id: '744000134849699', name: 'Staff Process Engineer - Electroplating and CMP', company: { identifier: 'WesternDigital', name: 'Western Digital' }, location: { city: 'Fremont', region: 'CA', country: 'us', remote: false, fullLocation: 'Fremont, CA, United States' }, releasedDate: '2026-07-01' }, { slug: 'WesternDigital', name: 'Western Digital' });
-  t.eq(srJob.applyUrl, 'https://jobs.smartrecruiters.com/WesternDigital/744000134849699', 'sr.normalize: applyUrl');
+  const srJob = sr.normalize({ id: '744000134849699', uuid: 'abc-123-uuid', name: 'Staff Process Engineer - Electroplating and CMP', company: { identifier: 'WesternDigital', name: 'Western Digital' }, location: { city: 'Fremont', region: 'CA', country: 'us', remote: false, fullLocation: 'Fremont, CA, United States' }, releasedDate: '2026-07-01' }, { slug: 'WesternDigital', name: 'Western Digital' });
+  t.eq(srJob.applyUrl, 'https://jobs.smartrecruiters.com/oneclick-ui/company/WesternDigital/publication/abc-123-uuid?dcr_ci=WesternDigital', 'sr.normalize: applyUrl → guest one-click form');
   t.eq(srJob.company, 'Western Digital', 'sr.normalize: company from source');
   t.eq(srJob.location, 'Fremont, CA, United States', 'sr.normalize: fullLocation');
   t.eq(srJob.ats, 'smartrecruiters', 'sr.normalize: ats');
