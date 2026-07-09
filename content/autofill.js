@@ -1121,10 +1121,14 @@ function pjaFillCombobox(input, value, key) {
         if (_setter) _setter.call(input, ''); else input.value = '';
         input.dispatchEvent(new InputEvent('input', { bubbles: true }));
         await _sleep(80);
-        if (_setter) _setter.call(input, cityOnly); else input.value = cityOnly;
-        input.dispatchEvent(new InputEvent('input', { bubbles: true, data: cityOnly, inputType: 'insertText' }));
-        input.dispatchEvent(new KeyboardEvent('keydown', { key: cityOnly.slice(-1), bubbles: true }));
-        input.dispatchEvent(new KeyboardEvent('keyup', { key: cityOnly.slice(-1), bubbles: true }));
+        // Google Places (like the education async lists) only fetches suggestions from GENUINE
+        // keystrokes — synthetic value-setting yields no listbox. CDP-type the city at the input's
+        // coords so the suggestion dropdown actually appears, then CDP-click the match below.
+        const lr = input.getBoundingClientRect();
+        const lx = lr.left + lr.width / 2, ly = lr.top + lr.height / 2;
+        await new Promise(res => { let dn = false; const to = setTimeout(() => { if (!dn) { dn = true; res(); } }, 5000);
+          try { chrome.runtime.sendMessage({ type: 'CDP_TYPE_AT', x: lx, y: ly, text: cityOnly }, () => { if (!dn) { dn = true; clearTimeout(to); res(); } }); }
+          catch (_) { if (!dn) { dn = true; clearTimeout(to); res(); } } });
         let listbox = null;
         for (let w = 0; w < 12 && !listbox; w++) {
           await _sleep(200);
@@ -1137,7 +1141,8 @@ function pjaFillCombobox(input, value, key) {
         if (listbox) {
           const opts = Array.from(listbox.querySelectorAll('[role="option"], .pac-item'));
           const match = opts.find(o => o.textContent.toLowerCase().includes(cityOnly.toLowerCase())) || opts[0];
-          if (match) { ['mousedown', 'mouseup', 'click'].forEach(t => match.dispatchEvent(new MouseEvent(t, { bubbles: true, cancelable: true, button: 0 }))); await _sleep(350); }
+          // Google Places / remix suggestions ignore synthetic clicks — commit with a trusted CDP click.
+          if (match) { await cdpClickEl(match); await _sleep(350); }
         } else {
           // No listbox — accept the highlighted suggestion via keyboard, else leave for next attempt.
           input.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', keyCode: 40, bubbles: true }));
