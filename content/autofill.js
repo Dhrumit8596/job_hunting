@@ -2124,9 +2124,22 @@ async function pjaForceReactSelectCommit(input, value) {
   if (!lv) return false;
   const committed = () => { const sv = ctrl.querySelector('[class*="single-value"],[class*="singleValue"]'); return !!(sv && sv.textContent && sv.textContent.trim() && !/^\s*select/i.test(sv.textContent)); };
   if (committed()) return true;
-  try { if (typeof pjaFillViaReactFiber === 'function') pjaFillViaReactFiber(input, value, ''); } catch (_) {}
-  if (committed()) return true;
+  // NOTE: skip the fiber onChange — on Greenhouse's remix build it throws or only sets the
+  // display (fooling committed()); the option must be committed with a trusted CDP click below.
   const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value')?.set;
+  // Greenhouse remix react-selects commit ONLY on a trusted (CDP) click — synthetic option
+  // clicks are ignored (verified live). Click the matched option element at its coords via CDP.
+  const cdpClickOpt = (el) => new Promise(resolve => {
+    el.scrollIntoView({ block: 'center', behavior: 'instant' });
+    const r = el.getBoundingClientRect();
+    const x = r.left + r.width / 2, y = r.top + r.height / 2;
+    let fin = false;
+    const to = setTimeout(() => { if (!fin) { fin = true; resolve('timeout'); } }, 3000);
+    try { chrome.runtime.sendMessage({ type: 'LINKEDIN_TRUSTED_CLICK', x, y }, (resp) => {
+      if (fin) return; fin = true; clearTimeout(to);
+      resolve(chrome.runtime.lastError || resp?.error ? 'fail' : 'cdp');
+    }); } catch (_) { if (!fin) { fin = true; clearTimeout(to); resolve('catch'); } }
+  });
   const findOpt = () => {
     // The react-select input id (e.g. "react-select-N-input") does NOT map cleanly to its listbox
     // id, and the Export Control select's listbox id differs from the input id — so search ALL
@@ -2158,10 +2171,11 @@ async function pjaForceReactSelectCommit(input, value) {
       if (setter) { setter.call(input, ''); input.dispatchEvent(new InputEvent('input', { bubbles: true })); }
       await _sleep(300); m = findOpt();
     }
-    if (m) { ['mousedown', 'mouseup', 'click'].forEach(t => m.dispatchEvent(new MouseEvent(t, { bubbles: true, cancelable: true, button: 0 }))); }
+    let how = 'noopt';
+    if (m) { how = await cdpClickOpt(m); }
     else { input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', keyCode: 13, bubbles: true })); }
     await _sleep(300);
-    try { chrome.storage.local.get('pja_dbg', d => { const a=(d.pja_dbg||[]).slice(-40); a.push('[frs] id='+String(input.id||'').slice(0,18)+' val="'+String(value).slice(0,6)+'" opt='+(m?'Y':'N')+' committed='+committed()); chrome.storage.local.set({pja_dbg:a}); }); } catch(_){}
+    try { chrome.storage.local.get('pja_dbg', d => { const a=(d.pja_dbg||[]).slice(-40); a.push('[frs] id='+String(input.id||'').slice(0,18)+' val="'+String(value).slice(0,6)+'" opt='+(m?'Y':'N')+' via='+how+' committed='+committed()); chrome.storage.local.set({pja_dbg:a}); }); } catch(_){}
   }
   return committed();
 }
