@@ -195,6 +195,18 @@
     // If the URL is already an application form, POLL a few seconds so we fill it instead of
     // wrongly treating it as a description page and hunting for a non-existent Apply button.
     const looksLikeFormUrl = /oneclick-ui|\/apply(\b|\/|\?)|application|job_app|\/embed\//i.test(location.href);
+    // SmartRecruiters one-click is RESUME-FIRST: only a file input renders until the resume is
+    // uploaded+parsed, which then reveals name/email/question fields. Upload the resume FIRST so
+    // the form appears, instead of timing out and misreading it as a description page.
+    const isResumeFirst = /oneclick-ui/i.test(location.href)
+      && !hasFormInputs && !!document.querySelector('input[type=file]');
+    if (isResumeFirst) {
+      try { await tryInjectResume(profile, answers); } catch (_) {}
+      // After the resume parses, SmartRecruiters reveals fields OUTSIDE a <form> and unmarked,
+      // so the strict formInputSel misses them — also accept standalone text/email inputs.
+      const anyFieldSel = formInputSel + ', input[type=text], input[type=email], input:not([type]):not([type=file])';
+      for (let _i = 0; _i < 25 && !hasFormInputs; _i++) { await sleep(600); hasFormInputs = !!document.querySelector(anyFieldSel); }
+    }
     if (!hasFormInputs && looksLikeFormUrl) {
       for (let _i = 0; _i < 12 && !hasFormInputs; _i++) { await sleep(500); hasFormInputs = !!document.querySelector(formInputSel); }
     }
