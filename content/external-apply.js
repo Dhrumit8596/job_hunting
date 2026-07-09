@@ -206,6 +206,21 @@
       // so the strict formInputSel misses them — also accept standalone text/email inputs.
       const anyFieldSel = formInputSel + ', input[type=text], input[type=email], input:not([type]):not([type=file])';
       for (let _i = 0; _i < 25 && !hasFormInputs; _i++) { await sleep(600); hasFormInputs = !!document.querySelector(anyFieldSel); }
+      // DIAGNOSTIC: if the form still didn't appear, dump where it might be (iframe? same-origin?
+      // buttons to advance?) so we can see the real post-upload structure without claude-in-chrome.
+      if (!hasFormInputs) {
+        try {
+          const frames = Array.from(document.querySelectorAll('iframe')).map(f => {
+            let host = '?'; try { host = new URL(f.src, location.href).host; } catch (_) {}
+            let inner = 'x-origin'; try { inner = f.contentDocument ? f.contentDocument.querySelectorAll('input,select,textarea').length + 'fld' : 'null-doc'; } catch (_) { inner = 'blocked'; }
+            return host + ':' + inner;
+          });
+          const btns = Array.from(document.querySelectorAll('button,a[role=button],[class*=btn]')).filter(b => b.offsetParent).map(b => (b.textContent || '').trim().slice(0, 18)).filter(Boolean).slice(0, 8);
+          const allInputs = document.querySelectorAll('input:not([type=hidden])').length;
+          const line = '[sr-diag] frames=[' + frames.join(' ') + '] inputs=' + allInputs + ' btns=[' + btns.join('|') + ']';
+          await new Promise(r => chrome.storage.local.get('pja_dbg', d => { const a = (d.pja_dbg || []).slice(-40); a.push(line); chrome.storage.local.set({ pja_dbg: a }, r); }));
+        } catch (_) {}
+      }
     }
     if (!hasFormInputs && looksLikeFormUrl) {
       for (let _i = 0; _i < 12 && !hasFormInputs; _i++) { await sleep(500); hasFormInputs = !!document.querySelector(formInputSel); }
