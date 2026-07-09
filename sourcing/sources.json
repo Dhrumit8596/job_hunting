@@ -969,6 +969,21 @@
       "ats": "greenhouse",
       "slug": "aralezbio",
       "name": "Aralez Bio"
+    },
+    {
+      "ats": "greenhouse",
+      "slug": "magrathea",
+      "name": "Magrathea Metals"
+    },
+    {
+      "ats": "greenhouse",
+      "slug": "alumis",
+      "name": "Alumis"
+    },
+    {
+      "ats": "greenhouse",
+      "slug": "slingshotbiosciences",
+      "name": "Slingshot Biosciences"
     }
   ]
 }
