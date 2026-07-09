@@ -2013,29 +2013,42 @@ async function pjaForceCountryField(value) {
     const ctrl = inp.closest('[class*="select__control"]');
     const committed = () => { const sv = ctrl && ctrl.querySelector('[class*="single-value"],[class*="singleValue"]'); return !!(sv && sv.textContent && sv.textContent.trim() && !/^\s*select/i.test(sv.textContent)); };
     if (committed()) { done++; continue; }
-    // Fiber onChange first (fast). If it did not actually commit the display, fall to a UI-driven
-    // type-then-click: react-select only reliably commits a searchable select when its OWN input
-    // filters the options and an option element is clicked (how the candidate-location filler works).
-    try { if (typeof pjaFillViaReactFiber === 'function') pjaFillViaReactFiber(inp, val, 'country'); } catch(_) {}
-    if (committed()) { done++; continue; }
+    // NOTE: do NOT try the fiber onChange for country. On Greenhouse's "remix" build the fiber
+    // onChange THROWS (or sets only the display single-value while the form value stays empty),
+    // which fools committed() into skipping the real commit → country-error at submit. Go straight
+    // to the trusted CDP click, which is the only thing that actually commits this react-select.
     if (ctrl) {
-      const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value')?.set;
-      inp.focus();
-      const typed = 'United States';
-      // open the menu first (mousedown on the control), then type to filter
-      ['mousedown','mouseup'].forEach(t => ctrl.dispatchEvent(new MouseEvent(t, { bubbles: true, cancelable: true, button: 0 })));
-      await _sleep(150);
-      if (setter) setter.call(inp, 'United'); else inp.value = 'United';
-      inp.dispatchEvent(new InputEvent('input', { bubbles: true, data: 'United', inputType: 'insertText' }));
-      await _sleep(600); // react-select filters options asynchronously
-      const lb = document.getElementById('react-select-' + inp.id + '-listbox')
-        || ctrl.parentElement?.querySelector('[role="listbox"]')
-        || document.querySelector('[id^="react-select-"][id$="-listbox"]:not([hidden])');
-      const opts = lb ? Array.from(lb.querySelectorAll('[role="option"]')) : [];
-      const m = opts.find(o => /^united states$/i.test((o.textContent || '').trim())) || opts.find(o => /united states/i.test(o.textContent || ''));
-      if (m) { ['mousedown','mouseup','click'].forEach(t => m.dispatchEvent(new MouseEvent(t, { bubbles: true, cancelable: true, button: 0 }))); }
-      else { inp.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', keyCode: 13, bubbles: true })); }
-      await _sleep(250);
+      // Greenhouse's newer "remix" react-select IGNORES synthetic option clicks — it commits
+      // ONLY on a trusted (CDP) click, exactly like the school/degree/discipline fields. Open
+      // the menu, find the "United States" option (labels here are dial-code style e.g.
+      // "United States +1"), and CDP-click it at its coords. Verified live: synthetic clicks
+      // leave single-value EMPTY; a CDP click commits.
+      const cdpClick = (el) => new Promise(resolve => {
+        el.scrollIntoView({ block: 'center', behavior: 'instant' });
+        const r = el.getBoundingClientRect();
+        const x = r.left + r.width / 2, y = r.top + r.height / 2;
+        let fin = false;
+        const to = setTimeout(() => { if (!fin) { fin = true; resolve('timeout'); } }, 3000);
+        try { chrome.runtime.sendMessage({ type: 'LINKEDIN_TRUSTED_CLICK', x, y }, (resp) => {
+          if (fin) return; fin = true; clearTimeout(to);
+          resolve(chrome.runtime.lastError || resp?.error ? 'fail' : 'cdp');
+        }); } catch (_) { if (!fin) { fin = true; clearTimeout(to); resolve('catch'); } }
+      });
+      for (let attempt = 0; attempt < 2 && !committed(); attempt++) {
+        inp.focus();
+        ['mousedown','mouseup'].forEach(t => ctrl.dispatchEvent(new MouseEvent(t, { bubbles: true, cancelable: true, button: 0, buttons: 1 })));
+        await _sleep(450);
+        let lb = document.getElementById('react-select-' + inp.id + '-listbox')
+          || ctrl.parentElement?.querySelector('[role="listbox"]')
+          || document.querySelector('[id^="react-select-"][id$="-listbox"]:not([hidden])');
+        let opts = lb ? Array.from(lb.querySelectorAll('[role="option"]')) : [];
+        // prefix match: value "United States" → option "United States +1"
+        let m = opts.find(o => /^united states\b/i.test((o.textContent || '').trim()))
+          || opts.find(o => /^united states$/i.test((o.textContent || '').trim()));
+        if (m) { const how = await cdpClick(m); await _sleep(300);
+          try { chrome.storage.local.get('pja_dbg', d => { const a=(d.pja_dbg||[]).slice(-40); a.push('[country] cdp-click "'+(m.textContent||'').trim().slice(0,18)+'" via '+how+' committed='+committed()); chrome.storage.local.set({pja_dbg:a}); }); } catch(_){}
+        }
+      }
       if (committed()) done++;
     }
   }

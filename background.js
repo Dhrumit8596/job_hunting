@@ -900,6 +900,30 @@ async function cdpTrustedClick(tabId, selector) {
   await chrome.storage.local.set({ pja_dbg_btnevents: captured });
 }
 
+// Surface CDP/debugger failures to pja_dbg (rolling) — attach errors were silently
+// swallowed, hiding the real reason Greenhouse remix react-selects never commit
+// (e.g. "Another debugger is already attached to the tab", i.e. claude-in-chrome
+// contention). Distinguishes benign self-reattach from a fatal foreign attach.
+async function cdpDbg(msg) {
+  try {
+    const d = await chrome.storage.local.get('pja_dbg');
+    const a = (d.pja_dbg || []).slice(-40);
+    a.push('[cdp] ' + msg);
+    await chrome.storage.local.set({ pja_dbg: a });
+  } catch (_) {}
+}
+// Attach that reports WHY it failed. "already attached" by us is benign (returns ok);
+// a foreign-debugger error is fatal for trusted events → caller falls back to synthetic.
+async function cdpAttachDiag(tabId, where) {
+  try { await chrome.debugger.attach({ tabId }, '1.3'); return true; }
+  catch (e) {
+    const m = String(e && e.message || e);
+    if (/already attached to (this|the) (extension|debuggee)|Another debugger.*this extension/i.test(m)) return true; // us — fine
+    await cdpDbg(where + ' attach-FAIL: ' + m.slice(0, 90));
+    return false;
+  }
+}
+
 // ── CDP trusted click for LinkedIn Easy Apply step buttons ──────────────────
 // LinkedIn checks event.isTrusted on Easy Apply step-advance clicks (Next/Review/
 // Submit) and reloads the page on any synthetic click. A real CDP mouse click
@@ -911,7 +935,8 @@ async function cdpLinkedInClick(tabId, x, y) {
   if (typeof x !== 'number' || typeof y !== 'number') throw new Error('no coords for LinkedIn click');
   const xr = Math.round(x), yr = Math.round(y);
 
-  try { await chrome.debugger.attach({ tabId }, '1.3'); } catch (_) {}
+  const attachedC = await cdpAttachDiag(tabId, 'click');
+  if (!attachedC) throw new Error('cdp-attach-failed');
   await chrome.debugger.sendCommand({ tabId }, 'Input.dispatchMouseEvent', {
     type: 'mouseMoved', x: xr, y: yr, button: 'none', buttons: 0, clickCount: 0, modifiers: 0
   });
@@ -934,18 +959,21 @@ async function cdpTypeAt(tabId, x, y, text) {
   await activateTab(tabId);
   if (typeof x !== 'number' || typeof y !== 'number') throw new Error('no coords for CDP type');
   const xr = Math.round(x), yr = Math.round(y);
-  try { await chrome.debugger.attach({ tabId }, '1.3'); } catch (_) {}
-  // focus via trusted click
-  await chrome.debugger.sendCommand({ tabId }, 'Input.dispatchMouseEvent', { type: 'mousePressed', x: xr, y: yr, button: 'left', buttons: 1, clickCount: 1 });
-  await new Promise(r => setTimeout(r, 50));
-  await chrome.debugger.sendCommand({ tabId }, 'Input.dispatchMouseEvent', { type: 'mouseReleased', x: xr, y: yr, button: 'left', buttons: 0, clickCount: 1 });
-  await new Promise(r => setTimeout(r, 120));
-  // type each char as keyDown(char)+keyUp via insertText (fires real input events)
-  for (const ch of String(text)) {
-    await chrome.debugger.sendCommand({ tabId }, 'Input.insertText', { text: ch });
-    await new Promise(r => setTimeout(r, 70));
-  }
-  try { await chrome.debugger.detach({ tabId }); } catch (_) {}
+  const attached = await cdpAttachDiag(tabId, 'typeAt');
+  if (!attached) throw new Error('cdp-attach-failed'); // surfaces to caller → synthetic fallback + visible dbg
+  try {
+    // focus via trusted click
+    await chrome.debugger.sendCommand({ tabId }, 'Input.dispatchMouseEvent', { type: 'mousePressed', x: xr, y: yr, button: 'left', buttons: 1, clickCount: 1 });
+    await new Promise(r => setTimeout(r, 50));
+    await chrome.debugger.sendCommand({ tabId }, 'Input.dispatchMouseEvent', { type: 'mouseReleased', x: xr, y: yr, button: 'left', buttons: 0, clickCount: 1 });
+    await new Promise(r => setTimeout(r, 120));
+    // type each char as keyDown(char)+keyUp via insertText (fires real input events)
+    for (const ch of String(text)) {
+      await chrome.debugger.sendCommand({ tabId }, 'Input.insertText', { text: ch });
+      await new Promise(r => setTimeout(r, 70));
+    }
+  } catch (e) { await cdpDbg('typeAt send-FAIL: ' + String(e && e.message || e).slice(0, 90)); throw e; }
+  finally { try { await chrome.debugger.detach({ tabId }); } catch (_) {} }
 }
 
 // ── CDP date spinner fill: types digits into Workday date spinbuttons ───────
