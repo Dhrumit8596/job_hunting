@@ -113,6 +113,15 @@ module.exports = (t) => {
   t.eq(ashJob2.applyUrl, 'https://jobs.ashbyhq.com/acme/uuid-2/application', 'ashby.normalize: explicit applyUrl preserved');
   t.eq(ashJob2.company, 'acme', 'ashby.normalize: company falls back to slug');
   t.eq(ashJob2.remote, true, 'ashby.normalize: isRemote flag honored');
+  const sr = R('adapters/smartrecruiters');
+  const srJob = sr.normalize({ id: '744000134849699', name: 'Staff Process Engineer - Electroplating and CMP', company: { identifier: 'WesternDigital', name: 'Western Digital' }, location: { city: 'Fremont', region: 'CA', country: 'us', remote: false, fullLocation: 'Fremont, CA, United States' }, releasedDate: '2026-07-01' }, { slug: 'WesternDigital', name: 'Western Digital' });
+  t.eq(srJob.applyUrl, 'https://jobs.smartrecruiters.com/WesternDigital/744000134849699', 'sr.normalize: applyUrl');
+  t.eq(srJob.company, 'Western Digital', 'sr.normalize: company from source');
+  t.eq(srJob.location, 'Fremont, CA, United States', 'sr.normalize: fullLocation');
+  t.eq(srJob.ats, 'smartrecruiters', 'sr.normalize: ats');
+  const srJob2 = sr.normalize({ id: 'x1', name: 'Metrology Engineer', company: { identifier: 'Acme', name: 'Acme' }, location: { city: 'San Jose', region: 'CA', country: 'us', remote: true } }, { slug: 'Acme' });
+  t.eq(srJob2.remote, true, 'sr.normalize: remote flag honored');
+  t.eq(srJob2.location, 'San Jose, CA, us', 'sr.normalize: location falls back to city/region/country');
 
   // --- tnAdjustScore: down-weight gray-TN senior titles ---
   t.eq(tnAdjustScore('Senior Quality Engineer', 88), 88, 'tnAdjust: normal title unchanged');

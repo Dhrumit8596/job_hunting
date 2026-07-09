@@ -6,9 +6,10 @@ const lever = require('./lever');
 const workday = require('./workday');
 const linkedin = require('./linkedin');
 const ashby = require('./ashby');
-// Phase 2: icims, etc.
+const smartrecruiters = require('./smartrecruiters');
+// Phase 2: icims, jobvite, etc.
 
-const ADAPTERS = { greenhouse, lever, workday, linkedin, ashby };
+const ADAPTERS = { greenhouse, lever, workday, linkedin, ashby, smartrecruiters };
 
 function getAdapter(ats) {
   return ADAPTERS[String(ats || '').toLowerCase()] || null;
