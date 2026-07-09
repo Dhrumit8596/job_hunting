@@ -19,7 +19,8 @@ const http  = require('http');
 const fs    = require('fs');
 const path  = require('path');
 const { WebSocketServer } = require('ws');
-const { spawn } = require('child_process');
+const { spawn, exec } = require('child_process');
+const { buildRestartPlan } = require('./chrome-restart');
 
 const PORT = 6174;
 
@@ -309,6 +310,41 @@ async function handleRequest(req, res) {
       res.writeHead(200, CORS);
       res.end(JSON.stringify({ ok: true, pushed, url }));
       console.log(`[PJA] /open-tab → ${url} to ${pushed} client(s)`);
+    });
+    return;
+  }
+
+  // ── /restart-chrome: P1c self-heal last rung — graceful Chrome quit + relaunch so a
+  // degraded CDP session is replaced by a fresh one. The EXTENSION owns detection + the
+  // notify/countdown; it calls this only after the lighter rungs (debugger re-attach,
+  // /reload) fail. Graceful quit lets Chrome restore tabs (incl. the in-flight apply tab);
+  // the queue resumes from pja_ext_queue.currentIndex on reconnect. macOS only. ──
+  if (req.method === 'POST' && req.url === '/restart-chrome') {
+    let body = '';
+    req.on('data', d => body += d);
+    req.on('end', () => {
+      let reopenUrl = null;
+      try { reopenUrl = JSON.parse(body || '{}').reopenUrl || null; } catch (_) {}
+      const plan = buildRestartPlan({ reopenUrl });
+      if (!plan.supported) {
+        res.writeHead(200, CORS);
+        res.end(JSON.stringify({ ok: false, reason: plan.reason }));
+        console.log(`[PJA] /restart-chrome unsupported: ${plan.reason}`);
+        return;
+      }
+      // Respond BEFORE quitting — the WS drops the instant Chrome exits.
+      res.writeHead(200, CORS);
+      res.end(JSON.stringify({ ok: true, waitMs: plan.waitMs, reopenUrl: plan.reopenUrl }));
+      console.log(`[PJA] /restart-chrome → graceful quit, relaunch in ${plan.waitMs}ms${plan.reopenUrl ? ' → ' + plan.reopenUrl : ''}`);
+      exec(plan.quitCmd, (err) => {
+        if (err) console.error(`[PJA] restart quit error: ${err.message}`);
+        setTimeout(() => {
+          exec(plan.relaunchCmd, (e2) => {
+            if (e2) console.error(`[PJA] restart relaunch error: ${e2.message}`);
+            else console.log('[PJA] Chrome relaunched — awaiting extension reconnect');
+          });
+        }, plan.waitMs);
+      });
     });
     return;
   }
