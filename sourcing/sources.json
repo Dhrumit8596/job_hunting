@@ -914,6 +914,31 @@
       "ats": "greenhouse",
       "slug": "aircapture",
       "name": "AirCapture"
+    },
+    {
+      "ats": "lever",
+      "slug": "humble-robotics",
+      "name": "Humble Robotics"
+    },
+    {
+      "ats": "lever",
+      "slug": "teleo",
+      "name": "Teleo"
+    },
+    {
+      "ats": "lever",
+      "slug": "pivotal",
+      "name": "Pivotal"
+    },
+    {
+      "ats": "ashby",
+      "slug": "heron-power",
+      "name": "Heron Power"
+    },
+    {
+      "ats": "ashby",
+      "slug": "wayve",
+      "name": "Wayve (Ashby)"
     }
   ]
 }
