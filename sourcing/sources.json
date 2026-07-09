@@ -859,6 +859,61 @@
       "ats": "greenhouse",
       "slug": "torcrobotics",
       "name": "Torc Robotics"
+    },
+    {
+      "ats": "lever",
+      "slug": "lightship",
+      "name": "Lightship"
+    },
+    {
+      "ats": "lever",
+      "slug": "agtonomy",
+      "name": "Agtonomy"
+    },
+    {
+      "ats": "ashby",
+      "slug": "serverobotics",
+      "name": "Serve Robotics"
+    },
+    {
+      "ats": "greenhouse",
+      "slug": "lunarenergy",
+      "name": "Lunar Energy"
+    },
+    {
+      "ats": "greenhouse",
+      "slug": "amperesand",
+      "name": "Amperesand"
+    },
+    {
+      "ats": "greenhouse",
+      "slug": "wing",
+      "name": "Wing"
+    },
+    {
+      "ats": "greenhouse",
+      "slug": "gotion",
+      "name": "Gotion"
+    },
+    {
+      "ats": "greenhouse",
+      "slug": "nimblerobotics",
+      "name": "Nimble Robotics"
+    },
+    {
+      "ats": "greenhouse",
+      "slug": "rondoenergy",
+      "name": "Rondo Energy"
+    },
+    {
+      "ats": "greenhouse",
+      "slug": "hpiq",
+      "name": "HP IQ"
+    },
+    {
+      "ats": "greenhouse",
+      "slug": "aircapture",
+      "name": "AirCapture"
     }
   ]
 }
