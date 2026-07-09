@@ -3,7 +3,7 @@
   "name": "Job Application Assistant",
   "version": "1.0.0",
   "description": "AI-powered job search assistant for semiconductor/medtech roles",
-  "permissions": ["storage", "alarms", "scripting", "activeTab", "tabs", "debugger"],
+  "permissions": ["storage", "alarms", "scripting", "activeTab", "tabs", "debugger", "notifications"],
   "host_permissions": [
     "*://*.linkedin.com/*",
     "*://*.linkedin.com/in/*",

@@ -1133,7 +1133,48 @@ async function cdpEnterKey(tabId) {
 }
 
 // ── Message handler ────────────────────────────────────────────────────────
+// ── P1c CDP self-heal ladder (extension side) ──────────────────────────────
+// Mirrors the unit-tested cdp-selfheal.js policy. external-apply reports each apply
+// outcome; on K consecutive fill-but-no-submit-with-react-select-error (degraded CDP),
+// escalate: reattach debugger → reload extension → dev-server /restart-chrome (with a
+// notify + ~15s cancelable countdown). A real submit resets the ladder.
+let _selfHeal = { consecutiveDegraded: 0, rungIndex: 0 };
+const SELFHEAL_RUNGS = ['none', 'reattach', 'reload', 'restart'];
+function _isDegraded(o) { return !!(o && o.filled && !o.submitted && o.reactSelectError); }
+function _nextSelfHeal(o, threshold) {
+  threshold = threshold || 2;
+  if (!_isDegraded(o)) { if (o && o.submitted) _selfHeal = { consecutiveDegraded: 0, rungIndex: 0 }; return 'none'; }
+  _selfHeal.consecutiveDegraded += 1;
+  if (_selfHeal.consecutiveDegraded < threshold) return 'none';
+  _selfHeal.rungIndex = Math.min(_selfHeal.rungIndex + 1, SELFHEAL_RUNGS.length - 1);
+  return SELFHEAL_RUNGS[_selfHeal.rungIndex];
+}
+async function _selfHealRestart(applyUrl) {
+  await chrome.storage.local.set({ pja_restart_pending: true, pja_cancel_restart: false });
+  try { if (chrome.notifications) chrome.notifications.create('pja-restart', { type: 'basic', iconUrl: 'icons/icon128.png', title: 'Job Assistant: self-healing', message: 'CDP degraded — restarting Chrome in 15s to recover. Set pja_cancel_restart=true to cancel.' }); } catch (_) {}
+  for (let i = 0; i < 15; i++) {
+    await new Promise(r => setTimeout(r, 1000));
+    const d = await chrome.storage.local.get('pja_cancel_restart');
+    if (d.pja_cancel_restart) { await chrome.storage.local.set({ pja_cancel_restart: false, pja_restart_pending: false }); await cdpDbg('selfheal restart CANCELED by user'); return; }
+  }
+  try { await fetch('http://localhost:6174/restart-chrome', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ reopenUrl: applyUrl }) }); await cdpDbg('selfheal /restart-chrome sent reopen=' + (applyUrl ? 'y' : 'n')); }
+  catch (e) { await cdpDbg('selfheal restart fetch-fail: ' + (e && e.message || e)); }
+}
+async function _selfHealAct(action, tabId, applyUrl) {
+  await cdpDbg('selfheal action=' + action + ' streak=' + _selfHeal.consecutiveDegraded);
+  if (action === 'reattach' && tabId != null) { try { await chrome.debugger.detach({ tabId }); } catch (_) {} await cdpAttachDiag(tabId, 'selfheal-reattach'); }
+  else if (action === 'reload') { setTimeout(() => { try { chrome.runtime.reload(); } catch (_) {} }, 800); }  // queue resumes from currentIndex on reconnect
+  else if (action === 'restart') { await _selfHealRestart(applyUrl); }
+}
+
 chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
+  if (msg.type === 'PJA_APPLY_OUTCOME') {
+    const action = _nextSelfHeal(msg.outcome, 2);
+    if (action !== 'none') _selfHealAct(action, _sender.tab && _sender.tab.id, msg.applyUrl).catch(() => {});
+    sendResponse({ ok: true, action });
+    return true;
+  }
+
   if (msg.type === 'WORKDAY_TRUSTED_CLICK') {
     cdpTrustedClick(_sender.tab.id, msg.selector)
       .then(() => sendResponse({ ok: true }))

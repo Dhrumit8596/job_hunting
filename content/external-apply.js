@@ -159,6 +159,13 @@
     // legitimately need longer than 4min, and were being force-skipped mid-fill (watchdog_timeout).
     setTimeout(() => {
       try { sessionStorage.setItem('pja_last_action', 'watchdog_timeout:' + job.company); } catch (_) {}
+      // A hung form (filled but never submits) is the dominant degraded-CDP signal — report it so
+      // the self-heal ladder can escalate. If a react-select-commit control is still erroring, flag it.
+      try {
+        const rsErr = (typeof pjaQueryAllExt === 'function' ? pjaQueryAllExt('[class*="select__control--error"],[class*="select__control--is-invalid"],[aria-invalid="true"]').length : 0) > 0
+          || !!document.querySelector('[class*="select__control--error"]');
+        chrome.runtime.sendMessage({ type: 'PJA_APPLY_OUTCOME', outcome: { filled: true, submitted: false, reactSelectError: rsErr }, applyUrl: job.applyUrl });
+      } catch (_) {}
       try { recordResult(job, { success: false, reason: 'watchdog_timeout' }).then(() => navigateBack(job), () => navigateBack(job)); }
       catch (_) { try { navigateBack(job); } catch (__) {} }
     }, 420000);
@@ -1063,10 +1070,16 @@
     console.log('PJA ext-apply: post-submit success:', success, '| url:', location.href.slice(0,80), '| pageText snippet:', document.body.innerText.slice(0,120));
     // DIAGNOSTIC: on submit_unclear, dump Greenhouse/ATS validation errors so we can see WHICH
     // field blocked the submit (the form stays up with error text / aria-invalid on the culprit).
+    let reactSelectError = false;
     if (!success) {
       try {
         const errEls = pjaQueryAllExt('[aria-invalid="true"], [class*="error"]:not([class*="error-"]), [role="alert"], .field--error, [class*="invalid"]')
           .filter(el => { try { const r = el.getBoundingClientRect(); return r.width > 0 && r.height > 0; } catch(_) { return false; } });
+        // A react-select-commit failure (degraded-CDP signature) = the blocking fields are
+        // country/state/education/location/question comboboxes, or an errored select__control.
+        reactSelectError = errEls.some(el => /country|\bstate\b|school|degree|discipline|location|question_|select__control/i.test(
+          (el.getAttribute('aria-label') || el.id || el.className || '') + ' ' + (el.closest('[class*="field"]')?.querySelector('label')?.textContent || '')))
+          || pjaQueryAllExt('[class*="select__control--error"],[class*="select__control--is-invalid"]').length > 0;
         const errs = errEls.slice(0, 8).map(el => {
           const lbl = (el.getAttribute('aria-label') || el.id || el.name || (el.closest('[class*="field"]')?.querySelector('label')?.textContent) || el.textContent || '').trim().replace(/\s+/g,' ').slice(0, 40);
           return lbl;
@@ -1088,6 +1101,9 @@
       } catch(_) {}
     }
     sessionStorage.setItem('pja_last_action', 'recordResult:submit:' + (success ? 'applied' : 'unclear') + ':' + job.company);
+    // P1c: report the outcome so background's self-heal ladder can detect degraded CDP
+    // (K consecutive fill-but-no-submit-with-react-select-error) and escalate recovery.
+    try { chrome.runtime.sendMessage({ type: 'PJA_APPLY_OUTCOME', outcome: { filled: true, submitted: !!success, reactSelectError }, applyUrl: job.applyUrl }); } catch (_) {}
     await recordResult(job, { success, reason: success ? 'applied' : 'submit_unclear' });
     navigateBack(job);
     } catch(e) {
