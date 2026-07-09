@@ -784,6 +784,51 @@
       "ats": "ashby",
       "slug": "normalcomputing",
       "name": "Normal Computing"
+    },
+    {
+      "ats": "greenhouse",
+      "slug": "mill",
+      "name": "Mill"
+    },
+    {
+      "ats": "greenhouse",
+      "slug": "pronto",
+      "name": "Pronto AI"
+    },
+    {
+      "ats": "greenhouse",
+      "slug": "industrialelectricmanufacturing",
+      "name": "IEM"
+    },
+    {
+      "ats": "greenhouse",
+      "slug": "latitude",
+      "name": "Latitude AI"
+    },
+    {
+      "ats": "greenhouse",
+      "slug": "kodiak",
+      "name": "Kodiak Robotics"
+    },
+    {
+      "ats": "greenhouse",
+      "slug": "altentechnologyusa",
+      "name": "ALTEN Technology USA"
+    },
+    {
+      "ats": "greenhouse",
+      "slug": "swiftsolar",
+      "name": "Swift Solar"
+    },
+    {
+      "ats": "ashby",
+      "slug": "openai",
+      "name": "OpenAI"
+    },
+    {
+      "ats": "ashby",
+      "slug": "aureliussystems",
+      "name": "Aurelius Systems"
     }
   ]
 }
