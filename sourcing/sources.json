@@ -829,6 +829,36 @@
       "ats": "ashby",
       "slug": "aureliussystems",
       "name": "Aurelius Systems"
+    },
+    {
+      "ats": "greenhouse",
+      "slug": "wayve",
+      "name": "Wayve"
+    },
+    {
+      "ats": "greenhouse",
+      "slug": "calyxo",
+      "name": "Calyxo"
+    },
+    {
+      "ats": "greenhouse",
+      "slug": "rocketems",
+      "name": "Rocket EMS"
+    },
+    {
+      "ats": "greenhouse",
+      "slug": "purestorage",
+      "name": "Pure Storage"
+    },
+    {
+      "ats": "greenhouse",
+      "slug": "heartflowinc",
+      "name": "HeartFlow"
+    },
+    {
+      "ats": "greenhouse",
+      "slug": "torcrobotics",
+      "name": "Torc Robotics"
     }
   ]
 }
