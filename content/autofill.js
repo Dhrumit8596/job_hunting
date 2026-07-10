@@ -1568,6 +1568,10 @@ function pjaFillCombobox(input, value, key) {
     if (selectCtrl && optionCount() === 0) {
       let opened = await cdpTrustedOpen();
       await sleep(450);
+      // Definitive CDP-health signal: cdpTrustedOpen's resp.ok + whether the menu actually
+      // populated. If open=false or opts=0 here, trusted events are NOT firing (debugger
+      // contended) — the singular remix blocker. Persist it so one form tells the whole story.
+      { const _m = _inputId+' cdp-open resp='+opened+' opts='+optionCount(); _dbg(_m); try { if (typeof pjaRDbg==='function') pjaRDbg('[combo] '+_m); } catch(_){} }
       if (optionCount() === 0) { opened = await cdpTrustedOpen(); await sleep(450); }
       if (isAutocomplete && optionCount() > 20) { typeToFilter(value); await sleep(500); }
       if (doSelect()) { _dbg(_inputId+' OK-cdp opened='+opened+' opts='+optionCount()); return; }
