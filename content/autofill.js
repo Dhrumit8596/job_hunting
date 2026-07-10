@@ -2104,14 +2104,27 @@ async function pjaForceAllPolicyReactSelects(profile) {
       else if (/discipline|field of study|\bmajor\b/.test(L)) { ans = profile.major; isEdu = true; }
       else if (/\bschool\b|university|college|institution/.test(L)) { ans = profile.university; isEdu = true; }
     }
+    try { const _cc = (ctrl.className||'').slice(0,40); chrome.storage.local.get('pja_dbg', d => { const a=(d.pja_dbg||[]).slice(-40); a.push('[psweep] id='+String(inp.id||'').slice(0,18)+' ans="'+String(ans==null?'null':ans).slice(0,5)+'" remix='+/remix-css/.test(ctrl.className||'')+' cc='+_cc); chrome.storage.local.set({pja_dbg:a}); }); } catch(_){}
     if (!ans) continue;                                                       // fixed-truth policy + education
     // Education fields: don't re-fire if already committed (re-opening could toggle the selection).
     if (isEdu) { const svc = ctrl.querySelector('[class*="single-value"],[class*="singleValue"]'); if (svc && svc.textContent && svc.textContent.trim() && !/^\s*select/i.test(svc.textContent)) continue; }
-    // Try the fiber bridge (proven to commit these). Fall back to the UI forcer if it doesn't stick.
-    try { if (typeof pjaFillViaReactFiber === 'function') pjaFillViaReactFiber(inp, ans, ''); } catch (_) {}
-    await _sleep(200);
-    let ok = !!(ctrl.querySelector('[class*="single-value"],[class*="singleValue"]')?.textContent?.trim());
-    if (!ok && typeof pjaForceReactSelectCommit === 'function') { try { ok = await pjaForceReactSelectCommit(inp, ans); } catch (_) {} }
+    // REMIX BUILD (Greenhouse "remix-css-*"): the fiber onChange sets ONLY the display single-value
+    // — it does NOT persist Formik's validated value — so a fiber pre-fill produces a stale "Yes"
+    // display that makes the ok-check pass while the form still fails submit on question_*-error.
+    // The trusted CDP click (pjaForceReactSelectCommit) is the ONLY path that commits Formik on
+    // remix. Detect remix by the control class and go straight to the forced CDP click, skipping
+    // the fiber pre-fill entirely and ignoring any stale display.
+    const isRemix = /remix-css/.test(ctrl.className || '');
+    let ok;
+    if (isRemix && typeof pjaForceReactSelectCommit === 'function') {
+      try { ok = await pjaForceReactSelectCommit(inp, ans, { force: true }); } catch (_) { ok = false; }
+    } else {
+      // Non-remix react-selects commit via the fiber bridge (proven). Fall back to the UI forcer.
+      try { if (typeof pjaFillViaReactFiber === 'function') pjaFillViaReactFiber(inp, ans, ''); } catch (_) {}
+      await _sleep(200);
+      ok = !!(ctrl.querySelector('[class*="single-value"],[class*="singleValue"]')?.textContent?.trim());
+      if (!ok && typeof pjaForceReactSelectCommit === 'function') { try { ok = await pjaForceReactSelectCommit(inp, ans); } catch (_) {} }
+    }
     if (ok) committed++;
   }
   return committed;
@@ -2124,15 +2137,18 @@ window.pjaForceAllPolicyReactSelects = pjaForceAllPolicyReactSelects;
 // then CLICK the matching option element. react-select searchable/custom question selects
 // (Greenhouse "remix" build) commit reliably ONLY via a clicked option, not the fiber onChange
 // alone (which fires but Formik doesn't persist). Returns true iff the value is committed.
-async function pjaForceReactSelectCommit(input, value) {
+async function pjaForceReactSelectCommit(input, value, opts) {
   const _sleep = ms => new Promise(r => setTimeout(r, ms));
   if (!input) return false;
   const ctrl = input.closest('[class*="select__control"]');
   if (!ctrl) return false;
   const lv = String(value == null ? '' : value).toLowerCase().trim();
   if (!lv) return false;
+  // force: on remix builds a stale fiber display makes committed() a false positive, so the caller
+  // asks us to drive the trusted CDP click regardless of the current display state.
+  const force = !!(opts && opts.force);
   const committed = () => { const sv = ctrl.querySelector('[class*="single-value"],[class*="singleValue"]'); return !!(sv && sv.textContent && sv.textContent.trim() && !/^\s*select/i.test(sv.textContent)); };
-  if (committed()) return true;
+  if (!force && committed()) return true;
   // NOTE: skip the fiber onChange — on Greenhouse's remix build it throws or only sets the
   // display (fooling committed()); the option must be committed with a trusted CDP click below.
   const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value')?.set;
@@ -2168,7 +2184,10 @@ async function pjaForceReactSelectCommit(input, value) {
       || (lv.length > 2 && opts.find(o => (o.textContent || '').toLowerCase().includes(lv)))
       || null;
   };
-  for (let attempt = 0; attempt < 2 && !committed(); attempt++) {
+  // When forced, committed() is an unreliable stop signal (stale display), so gate on a real CDP
+  // click landing (clicked=true) instead; otherwise stop as soon as the display commits.
+  let clicked = false;
+  for (let attempt = 0; attempt < 2 && (force ? !clicked : !committed()); attempt++) {
     input.focus();
     ['mousedown', 'mouseup'].forEach(t => ctrl.dispatchEvent(new MouseEvent(t, { bubbles: true, cancelable: true, button: 0 })));
     await _sleep(150);
@@ -2181,12 +2200,12 @@ async function pjaForceReactSelectCommit(input, value) {
       await _sleep(300); m = findOpt();
     }
     let how = 'noopt';
-    if (m) { how = await cdpClickOpt(m); }
+    if (m) { how = await cdpClickOpt(m); if (how === 'cdp') clicked = true; }
     else { input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', keyCode: 13, bubbles: true })); }
     await _sleep(300);
     try { chrome.storage.local.get('pja_dbg', d => { const a=(d.pja_dbg||[]).slice(-40); a.push('[frs] id='+String(input.id||'').slice(0,18)+' val="'+String(value).slice(0,6)+'" opt='+(m?'Y':'N')+' via='+how+' committed='+committed()); chrome.storage.local.set({pja_dbg:a}); }); } catch(_){}
   }
-  return committed();
+  return force ? clicked : committed();
 }
 window.pjaForceReactSelectCommit = pjaForceReactSelectCommit;
 window.pjaFillTextViaFiber = pjaFillTextViaFiber;
