@@ -374,6 +374,19 @@
         navigateBack(job);
         return;
       }
+      // Dead/closed posting: a stale queued applyUrl often 404s or shows a "no longer accepting"
+      // shell (e.g. Ashby renders a "Page not found" page whose only controls are footer links).
+      // Detect this BEFORE the generic no_apply_btn path so we record a distinct, honest reason
+      // and don't waste retry cycles hunting for an Apply button that will never exist.
+      const _bodyTxt = (document.body.innerText || '').slice(0, 400);
+      if (pjaIsClosedPosting(_bodyTxt)) {
+        await new Promise(r => chrome.storage.local.get('pja_dbg', d => { const a=(d.pja_dbg||[]).slice(-40); a.push(new Date().toISOString().slice(11,19)+' [EXT] posting_not_found host='+location.hostname+' url='+location.pathname.slice(-40)); chrome.storage.local.set({pja_dbg:a}, r); }));
+        console.log('PJA ext-apply: posting_not_found (404/closed) — skipping.');
+        sessionStorage.setItem('pja_last_action', 'recordResult:posting_not_found:' + job.company);
+        await recordResult(job, { success: false, reason: 'posting_not_found' });
+        navigateBack(job);
+        return;
+      }
       // No apply button found on description page — log all candidate controls (durable, to pja_dbg)
       const cand = Array.from(document.querySelectorAll('button,a[href],[role=button],input[type=submit]'))
         .filter(b => b.offsetParent !== null)
@@ -2004,6 +2017,15 @@
 
     return null;
   }
+
+  // Detect a dead/closed posting from visible page text — a stale queued applyUrl that 404s or
+  // shows a "no longer accepting / filled / closed" shell (e.g. Ashby renders a "Page not found"
+  // page whose only controls are footer links). Kept as a small pure function so it's unit-tested.
+  function pjaIsClosedPosting(bodyText) {
+    const t = String(bodyText || '');
+    return /page not found|the page you requested was not found|no longer accepting applications|this (job|position|posting) (is )?(no longer|has been) (available|filled|closed)|position (has been )?(filled|closed)|posting (is )?closed|job (is )?(no longer available|has been filled)/i.test(t);
+  }
+  if (typeof window !== 'undefined') window.pjaIsClosedPosting = pjaIsClosedPosting;
 
   // Shadow-DOM-aware query: use pjaQueryAll if available (loaded by autofill.js), else document
   const pjaQueryAllExt = typeof pjaQueryAll === 'function'
