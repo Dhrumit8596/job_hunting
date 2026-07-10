@@ -1114,42 +1114,46 @@ function pjaFillCombobox(input, value, key) {
     // returns a comma'd "City, State, Country", whereas the typed cityOnly has no comma; so a comma
     // in the field value is a reliable "a suggestion committed" signal. Retry (Places can be slow
     // under load), poll up to ~2s for the listbox, and use a full mouse sequence on the item.
-    const committed = () => /,/.test(input.value || '');
+    // candidate-location is a react-select (aria-autocomplete=list, remix build) — NOT Google Places
+    // on newer forms. Committed = a single-value in ITS OWN control (or a comma'd input.value for the
+    // legacy Places variant). Checking only `,` missed react-select selections → never committed.
+    const _lctrl = input.closest('[class*="select__control"]');
+    const committed = () => {
+      const sv = _lctrl && _lctrl.querySelector('[class*="single-value"],[class*="singleValue"]');
+      if (sv && sv.textContent && sv.textContent.trim() && !/^\s*select/i.test(sv.textContent)) return true;
+      return /,/.test(input.value || '');
+    };
     window._pjaComboChain = (window._pjaComboChain || Promise.resolve()).then(async () => {
       for (let attempt = 0; attempt < 3 && !committed(); attempt++) {
         input.focus();
         if (_setter) _setter.call(input, ''); else input.value = '';
         input.dispatchEvent(new InputEvent('input', { bubbles: true }));
         await _sleep(80);
-        // Google Places (like the education async lists) only fetches suggestions from GENUINE
-        // keystrokes — synthetic value-setting yields no listbox. CDP-type the city at the input's
-        // coords so the suggestion dropdown actually appears, then CDP-click the match below.
+        // Async option fetch (Places OR react-select) only fires on GENUINE keystrokes — CDP-type the
+        // city at the input's coords so the option list actually appears, then CDP-click the match.
         const lr = input.getBoundingClientRect();
         const lx = lr.left + lr.width / 2, ly = lr.top + lr.height / 2;
         await new Promise(res => { let dn = false; const to = setTimeout(() => { if (!dn) { dn = true; res(); } }, 5000);
           try { chrome.runtime.sendMessage({ type: 'CDP_TYPE_AT', x: lx, y: ly, text: cityOnly }, () => { if (!dn) { dn = true; clearTimeout(to); res(); } }); }
           catch (_) { if (!dn) { dn = true; clearTimeout(to); res(); } } });
-        let listbox = null;
-        for (let w = 0; w < 12 && !listbox; w++) {
+        // Find THIS field's option list (react-select-candidate-location-listbox, or the menu inside
+        // its own select wrapper, or a Places .pac-container) — NOT a stale country listbox.
+        let match = null;
+        for (let w = 0; w < 14 && !match; w++) {
           await _sleep(200);
           const roots = typeof pjaGetAllRoots === 'function' ? pjaGetAllRoots() : [document];
+          let opts = [];
           for (const root of roots) {
-            const lb = root.querySelector('[role="listbox"]:not([hidden]), .pac-container:not([style*="display: none"])');
-            if (lb && lb.querySelector('[role="option"], .pac-item')) { listbox = lb; break; }
+            const own = root.getElementById && root.getElementById('react-select-' + input.id + '-listbox');
+            const menu = _lctrl && _lctrl.closest('[class*="select"]') && _lctrl.closest('[class*="select"]').querySelector('[role="listbox"] ,[class*="select__menu"]');
+            const pac = root.querySelector('.pac-container:not([style*="display: none"])');
+            [own, menu, pac].forEach(lb => { if (lb) opts = opts.concat(Array.from(lb.querySelectorAll('[role="option"], .pac-item'))); });
           }
+          // Only accept an option that actually contains the city — never a fallback opts[0]
+          // (that was clicking "Afghanistan" from a stale country listbox).
+          match = opts.find(o => (o.textContent || '').toLowerCase().includes(cityOnly.toLowerCase())) || null;
         }
-        if (listbox) {
-          const opts = Array.from(listbox.querySelectorAll('[role="option"], .pac-item'));
-          const match = opts.find(o => o.textContent.toLowerCase().includes(cityOnly.toLowerCase())) || opts[0];
-          // Google Places / remix suggestions ignore synthetic clicks — commit with a trusted CDP click.
-          if (match) { await cdpClickEl(match); await _sleep(350); }
-        } else {
-          // No listbox — accept the highlighted suggestion via keyboard, else leave for next attempt.
-          input.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', keyCode: 40, bubbles: true }));
-          await _sleep(150);
-          input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', keyCode: 13, bubbles: true }));
-          await _sleep(300);
-        }
+        if (match) { await cdpClickEl(match); await _sleep(350); }
       }
       try { chrome.storage.local.get('pja_dbg', d => { const a=(d.pja_dbg||[]).slice(-40); a.push('[loc] candidate-location committed='+committed()+' val="'+String(input.value||'').slice(0,24)+'"'); chrome.storage.local.set({pja_dbg:a}); }); } catch(_){}
     });
