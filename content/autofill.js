@@ -887,7 +887,7 @@ function pjaFillViaReactFiber(input, value, key) {
     const diag = input.getAttribute('data-pja-fiber-diag');
     // Log the walk for the country field, any question_* custom react-select, and any failure.
     if (diag && (!ok || /country|question/i.test(input.id || input.name || ''))) {
-      try { chrome.storage.local.get('pja_dbg', d => { const a=(d.pja_dbg||[]).slice(-40); a.push('[rsdiag] '+String(input.id||input.name||'?').slice(0,20)+' ok='+ok+' val="'+String(value).slice(0,10)+'" '+diag); chrome.storage.local.set({pja_dbg:a}); }); } catch(_){}
+      try { chrome.storage.local.get('pja_dbg', d => { const a=(d.pja_dbg||[]).slice(-160); a.push('[rsdiag] '+String(input.id||input.name||'?').slice(0,20)+' ok='+ok+' val="'+String(value).slice(0,10)+'" '+diag); chrome.storage.local.set({pja_dbg:a}); }); } catch(_){}
     }
   }
   input.removeAttribute('data-pja-fiber-done');
@@ -908,7 +908,7 @@ function pjaFillViaReactFiber(input, value, key) {
 async function pjaFillGreenhouseEducation(profile) {
   if (!/greenhouse\.io/i.test(location.hostname)) return;
   const sleep = ms => new Promise(r => setTimeout(r, ms));
-  const dbg = m => { try { chrome.storage.local.get('pja_dbg', d => { const a=(d.pja_dbg||[]).slice(-40); a.push('[gh-edu] '+m); chrome.storage.local.set({pja_dbg:a}); }); } catch(_){} };
+  const dbg = m => { try { chrome.storage.local.get('pja_dbg', d => { const a=(d.pja_dbg||[]).slice(-160); a.push('[gh-edu] '+m); chrome.storage.local.set({pja_dbg:a}); }); } catch(_){} };
 
   // Click a react-select option via a TRUSTED CDP mouse click (commits the selection —
   // synthetic MouseEvents don't reliably commit react-select). Falls back to synthetic.
@@ -1155,7 +1155,7 @@ function pjaFillCombobox(input, value, key) {
         }
         if (match) { await cdpClickEl(match); await _sleep(350); }
       }
-      try { chrome.storage.local.get('pja_dbg', d => { const a=(d.pja_dbg||[]).slice(-40); a.push('[loc] candidate-location committed='+committed()+' val="'+String(input.value||'').slice(0,24)+'"'); chrome.storage.local.set({pja_dbg:a}); }); } catch(_){}
+      try { chrome.storage.local.get('pja_dbg', d => { const a=(d.pja_dbg||[]).slice(-160); a.push('[loc] candidate-location committed='+committed()+' val="'+String(input.value||'').slice(0,24)+'"'); chrome.storage.local.set({pja_dbg:a}); }); } catch(_){}
     });
     return true;
   }
@@ -1519,7 +1519,7 @@ function pjaFillCombobox(input, value, key) {
   if (typeof window._pjaComboChain === 'undefined') window._pjaComboChain = Promise.resolve();
   // Autocomplete options arrive async (often via network) — wait longer between attempts.
   const w = isAutocomplete ? 700 : 200;
-  const _dbg = (m) => { try { chrome.storage.local.get('pja_dbg', d => { const a=(d.pja_dbg||[]).slice(-40); a.push('[combo] '+m); chrome.storage.local.set({pja_dbg:a}); }); } catch(_){} };
+  const _dbg = (m) => { try { chrome.storage.local.get('pja_dbg', d => { const a=(d.pja_dbg||[]).slice(-160); a.push('[combo] '+m); chrome.storage.local.set({pja_dbg:a}); }); } catch(_){} };
 
   // CDP trusted-open for react-select v5 controls: some (e.g. Greenhouse job-boards Country,
   // 244 opts) refuse to open from an isolated-world synthetic mousedown — the menu only renders
@@ -1636,7 +1636,7 @@ function pjaFillForm(profile, answers) {
     }
     // DIAGNOSTIC: education combobox routing
     if (/^(school|degree|discipline)/.test(el.id || '')) {
-      try { chrome.storage.local.get('pja_dbg', d => { const a=(d.pja_dbg||[]).slice(-40); a.push('[ff] '+el.id+' label="'+String(rawLabel).slice(0,18)+'" key='+key+' role='+el.getAttribute('role')+' val="'+(el.value||'').slice(0,12)+'"'); chrome.storage.local.set({pja_dbg:a}); }); } catch(_){}
+      try { chrome.storage.local.get('pja_dbg', d => { const a=(d.pja_dbg||[]).slice(-160); a.push('[ff] '+el.id+' label="'+String(rawLabel).slice(0,18)+'" key='+key+' role='+el.getAttribute('role')+' val="'+(el.value||'').slice(0,12)+'"'); chrome.storage.local.set({pja_dbg:a}); }); } catch(_){}
     }
     // Skip already-filled fields only when we have no profile key for them.
     // If we have a profile value, always overwrite — prevents stale bfcache
@@ -2021,7 +2021,7 @@ async function pjaForceCountryField(value) {
     if (inp.closest('[class*="iti"], [class*="PhoneInput"]')) continue;
     const ctrl = inp.closest('[class*="select__control"]');
     const committed = () => { const sv = ctrl && ctrl.querySelector('[class*="single-value"],[class*="singleValue"]'); return !!(sv && sv.textContent && sv.textContent.trim() && !/^\s*select/i.test(sv.textContent)); };
-    if (committed()) { done++; continue; }
+    if (committed()) { try { if (typeof pjaRDbg==='function') pjaRDbg('[country] SKIP cdp (display already committed, remix='+/remix-css/.test(ctrl&&ctrl.className||'')+')'); } catch(_){} done++; continue; }
     // NOTE: do NOT try the fiber onChange for country. On Greenhouse's "remix" build the fiber
     // onChange THROWS (or sets only the display single-value while the form value stays empty),
     // which fools committed() into skipping the real commit → country-error at submit. Go straight
@@ -2055,7 +2055,9 @@ async function pjaForceCountryField(value) {
         let m = opts.find(o => /^united states\b/i.test((o.textContent || '').trim()))
           || opts.find(o => /^united states$/i.test((o.textContent || '').trim()));
         if (m) { const how = await cdpClick(m); await _sleep(300);
-          try { chrome.storage.local.get('pja_dbg', d => { const a=(d.pja_dbg||[]).slice(-40); a.push('[country] cdp-click "'+(m.textContent||'').trim().slice(0,18)+'" via '+how+' committed='+committed()); chrome.storage.local.set({pja_dbg:a}); }); } catch(_){}
+          const _cmsg = '[country] cdp-click "'+(m.textContent||'').trim().slice(0,18)+'" via '+how+' committed='+committed();
+          try { if (typeof pjaRDbg === 'function') pjaRDbg(_cmsg); } catch(_){}
+          try { chrome.storage.local.get('pja_dbg', d => { const a=(d.pja_dbg||[]).slice(-160); a.push(_cmsg); chrome.storage.local.set({pja_dbg:a}); }); } catch(_){}
         }
       }
       if (committed()) done++;
@@ -2072,6 +2074,14 @@ window.pjaForceCountryField = pjaForceCountryField;
 // question_* selects, so the form failed submit on question_*-error. This dedicated pass runs the
 // bridge directly on every empty required select__control combobox that has a deterministic answer,
 // so sponsorship/auth/onsite are ALWAYS committed. Returns the count committed.
+// Non-rolling remix diagnostic sink (cap 400) — the normal pja_dbg buffer is capped tiny
+// (19-40) by many writers and rolls before a full form's remix sequence can be read. This
+// dedicated key survives so [country]/[psweep]/[frs] can be inspected end-to-end.
+function pjaRDbg(msg) {
+  try { chrome.storage.local.get('pja_dbg_remix', d => { const a=(d.pja_dbg_remix||[]).slice(-400); a.push(msg); chrome.storage.local.set({pja_dbg_remix:a}); }); } catch(_){}
+}
+if (typeof window !== 'undefined') window.pjaRDbg = pjaRDbg;
+
 async function pjaForceAllPolicyReactSelects(profile) {
   const _sleep = ms => new Promise(r => setTimeout(r, ms));
   const det = (typeof window !== 'undefined' && window.pjaDeterministicAnswer) || null;
@@ -2104,7 +2114,7 @@ async function pjaForceAllPolicyReactSelects(profile) {
       else if (/discipline|field of study|\bmajor\b/.test(L)) { ans = profile.major; isEdu = true; }
       else if (/\bschool\b|university|college|institution/.test(L)) { ans = profile.university; isEdu = true; }
     }
-    try { const _cc = (ctrl.className||'').slice(0,40); chrome.storage.local.get('pja_dbg', d => { const a=(d.pja_dbg||[]).slice(-40); a.push('[psweep] id='+String(inp.id||'').slice(0,18)+' ans="'+String(ans==null?'null':ans).slice(0,5)+'" remix='+/remix-css/.test(ctrl.className||'')+' cc='+_cc); chrome.storage.local.set({pja_dbg:a}); }); } catch(_){}
+    { const _pmsg = '[psweep] id='+String(inp.id||'').slice(0,18)+' ans="'+String(ans==null?'null':ans).slice(0,5)+'" remix='+/remix-css/.test(ctrl.className||'')+' cc='+(ctrl.className||'').slice(0,40); pjaRDbg(_pmsg); try { chrome.storage.local.get('pja_dbg', d => { const a=(d.pja_dbg||[]).slice(-160); a.push(_pmsg); chrome.storage.local.set({pja_dbg:a}); }); } catch(_){} }
     if (!ans) continue;                                                       // fixed-truth policy + education
     // Education fields: don't re-fire if already committed (re-opening could toggle the selection).
     if (isEdu) { const svc = ctrl.querySelector('[class*="single-value"],[class*="singleValue"]'); if (svc && svc.textContent && svc.textContent.trim() && !/^\s*select/i.test(svc.textContent)) continue; }
@@ -2203,7 +2213,9 @@ async function pjaForceReactSelectCommit(input, value, opts) {
     if (m) { how = await cdpClickOpt(m); if (how === 'cdp') clicked = true; }
     else { input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', keyCode: 13, bubbles: true })); }
     await _sleep(300);
-    try { chrome.storage.local.get('pja_dbg', d => { const a=(d.pja_dbg||[]).slice(-40); a.push('[frs] id='+String(input.id||'').slice(0,18)+' val="'+String(value).slice(0,6)+'" opt='+(m?'Y':'N')+' via='+how+' committed='+committed()); chrome.storage.local.set({pja_dbg:a}); }); } catch(_){}
+    const _frsMsg = '[frs] id='+String(input.id||'').slice(0,18)+' val="'+String(value).slice(0,6)+'" opt='+(m?'Y':'N')+' via='+how+' committed='+committed();
+    try { chrome.storage.local.get('pja_dbg', d => { const a=(d.pja_dbg||[]).slice(-160); a.push(_frsMsg); chrome.storage.local.set({pja_dbg:a}); }); } catch(_){}
+    try { if (typeof pjaRDbg === 'function') pjaRDbg(_frsMsg); } catch(_){}
   }
   return force ? clicked : committed();
 }
