@@ -189,6 +189,11 @@
     // Merge stored profile on top of defaults so new profile keys always have fallback values.
     const defaultProfile = (typeof window.PJA_DEFAULT_PROFILE !== 'undefined') ? window.PJA_DEFAULT_PROFILE : {};
     profile = Object.assign({}, defaultProfile, profile);
+    // Write the merged profile back onto the job so downstream helpers that read job.profile —
+    // notably pjaAnswerRequiredViaAI's deterministic pre-pass (LinkedIn/website/location) — get the
+    // real data. The queue seeds jobs with profile:{}, so without this the deterministic answerer
+    // saw an empty profile and asked the LLM for fields like "LinkedIn Profile" (which then failed).
+    job.profile = profile;
     const descClicks = job._descClicks || 0;
 
     console.log('PJA ext-apply:', job.company, '|', job.ats, '| profile.firstName:', profile.firstName || 'MISSING', '| descClicks:', descClicks);
