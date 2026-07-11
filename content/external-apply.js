@@ -2681,8 +2681,16 @@
     const hasSubmitButton = snap.hasSubmitButton !== false;
     const hasFormFields = snap.hasFormFields !== false;
     const iterations = Number.isFinite(snap.iterations) ? snap.iterations : 99;
-    // 1. Confirmation text in title or body.
-    if (PJA_SUBMIT_SUCCESS_RE.test((title + ' ' + text).slice(0, 6000))) return true;
+    // 1. Confirmation text in title or body (generic + per-ATS phrases via PJAAccount.matchesSuccess,
+    // e.g. iCIMS "congratulations", so a real submit isn't misread as submit_unclear).
+    const body6k = (title + ' ' + text).slice(0, 6000);
+    if (PJA_SUBMIT_SUCCESS_RE.test(body6k)) return true;
+    try {
+      if (typeof window.PJAAccount !== 'undefined' && window.PJAAccount.matchesSuccess) {
+        const ats = (typeof window.PJADetectAts !== 'undefined' && window.PJADetectAts.detectAts) ? window.PJADetectAts.detectAts(url) : '';
+        if (window.PJAAccount.matchesSuccess(body6k, ats)) return true;
+      }
+    } catch (_) {}
     // 2. Landed on a confirmation/post-apply route.
     if (/thank|confirm|success|submitted|post-?apply|application[-_]?(complete|received|confirmation|success)|\/applied\b/i.test(url)) return true;
     // 3. Redirected to a DIFFERENT path AND the form is gone → submission went through + redirect.

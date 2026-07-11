@@ -85,7 +85,7 @@
     },
     {
       "matches": ["<all_urls>"],
-      "js": ["sourcing/detect-ats.js", "sourcing/apply-select.js", "content/apply-router.js", "content/external-apply.js"],
+      "js": ["sourcing/detect-ats.js", "sourcing/apply-select.js", "content/apply-router.js", "content/apply-account.js", "content/external-apply.js"],
       "run_at": "document_idle",
       "all_frames": false,
       "exclude_matches": [
