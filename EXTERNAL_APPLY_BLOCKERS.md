@@ -1,176 +1,94 @@
 # External Apply — Blocker Analysis
-Generated: 2026-06-02 | Based on: Greenhouse (Harbinger), Workday (Applied Materials), Lever (SQA Services)
+
+**Original analysis:** 2026-06-02 (Greenhouse / Workday / Lever).
+**Status refresh:** 2026-07-10 — the Tier-1 form-fill blockers that stopped *every* application are
+**resolved**. What remains are external-service limits (rate-limits, daily caps, account locks) and
+inherently manual steps, not code gaps. This file records how each was addressed so the mechanisms
+aren't accidentally removed.
 
 ---
 
-## ATS Platforms Tested
+## ATS platforms in scope
 
-| ATS | Example Company | Form Type | Account Required | Standard `<select>`? |
-|-----|----------------|-----------|-----------------|---------------------|
-| Greenhouse (job-boards) | Harbinger Motors, CHAOS, Astranis | Single-page | No | ❌ Custom comboboxes |
-| Workday | Applied Materials, KLA, Intel | 7-step wizard | ✅ Yes | Mix |
-| Lever | SQA Services, HRL Labs | Single-page | No | ✅ EEO fields |
-| Tesla (custom) | Tesla | Single-page | No | Unknown |
+| ATS | Public API adapter | Auto-apply status |
+|-----|--------------------|-------------------|
+| Greenhouse | ✅ `sourcing/adapters/greenhouse.js` | Works (comboboxes + CDP commit) |
+| Lever | ✅ `lever.js` | Works |
+| Ashby | ✅ `ashby.js` | Works (bypasses degraded-CDP) |
+| Workday | ✅ `workday.js` (per-tenant CXS) | Works e2e incl. account creation |
+| SmartRecruiters | ✅ `smartrecruiters.js` | Guest one-click form |
+| LinkedIn | scrape-only (no API) | Easy Apply engine |
+| Indeed | scrape-only | Indeed Apply engine (pauses on anti-bot) |
 
----
-
-## TIER 1 — Blocks Every Application
-
-### BLOCKER 1: Greenhouse custom comboboxes (all dropdowns)
-**Files:** `content/autofill.js`
-**Scope:** Affects ~50% of ATS forms (Greenhouse is the most popular ATS for tech companies)
-
-All Greenhouse dropdowns are ARIA combobox widgets — `<input type="text" role="combobox">` + toggle button + flyout `<listbox>`. Not `<select>` elements.
-
-- `pjaFillSelect` only handles `<select>` — skips these entirely
-- `pjaSetNative` sets the text input value but doesn't trigger the flyout or select an option
-- Result: sponsorship, gender, veteran, disability, relocate all left at "Select..." → form blocks submission
-
-**Fields affected:** requireSponsorship, willingToRelocate, gender, veteran, disability, school, degree
-
-**Fix:** Add `pjaFillCombobox(input, value)` that:
-1. Focuses the input, sets its value via pjaSetNative
-2. Dispatches `input` event to trigger the flyout
-3. Waits up to 500ms for a listbox to appear (MutationObserver or polling)
-4. Clicks the option whose text best matches the value
-5. Update `pjaFillForm` Pass 1 to detect `el.getAttribute('role') === 'combobox'` and route to `pjaFillCombobox`
-
-**Status:** ⬜ Not fixed
+Registry: `sourcing/sources.json`, **195 companies**.
 
 ---
 
-### BLOCKER 2: Workday requires account creation before showing form
-**Files:** `content/external-apply.js`
-**Scope:** Blocks all Workday companies (Applied Materials, KLA, Intel, TSMC, Lam Research, GlobalFoundries)
+## TIER 1 — resolved (were "blocks every application")
 
-Workday apply flow: Step 1 = "Create Account" with Email + Password fields. Our `handleSignIn` detects a password field and bails with `needs_login`. User is never shown the application form.
+### BLOCKER 1 — Greenhouse custom comboboxes — ✅ RESOLVED
+ARIA `role="combobox"` widgets (not `<select>`) are handled by **`pjaFillCombobox(input, value, key)`**
+(`content/autofill.js` ~L1097). It opens the flyout, matches the option, and commits via the React
+fiber bridge (`pja:reactselect` → `fiber-main.js`) or a **trusted CDP click**
+(`pjaForceReactSelectCommit` / `pjaForceCountryField` / `pjaForceAllPolicyReactSelects`) for the
+Greenhouse "remix" selects that only persist on `isTrusted` events. Covered by `test/unit/combobox.test.js`.
 
-Can't fully automate (password creation requires user), but we can:
-- Fill the email field automatically
-- Prompt user to type a password and click "Create Account"
-- Resume filling after account creation (via a "Resume external apply" button in sidebar)
+### BLOCKER 2 — Workday account creation before the form — ✅ RESOLVED
+`content/workday-auth.js` (`window.pjaWorkdayAuth.run`) is a full `detectScreen()` state machine:
+sign-in, **create-account** (`runCreateAccount`), forgot-password, and **Gmail email verification**
+(`runGmailVerify` → `WD_OPEN_GMAIL_TAB` scrapes the confirmation link). Per-tenant accounts persist in
+`pja_workday_accounts[hostname]`; the tenant password comes from `pja_job_password` (Settings).
+Fresh accounts usually auto-sign-in (plus-addressed email); verified tenants resume via `pja_wd_pending_apply`.
 
-**Fix:** Change `handleSignIn` to NOT bail on Workday account-creation pages — instead fill email, leave password for user, show sidebar prompt "Please enter a password to create your Workday account, then click Resume."
+### BLOCKER 3 — Resume file upload — ✅ RESOLVED
+Resume is stored as base64 in Settings (`pja_resume_b64` / `pja_resume_filename`, ≤9 MB) and injected
+via `DataTransfer` in `tryInjectResume(profile, answers)` (`content/external-apply.js` ~L1427).
 
-**Status:** ⬜ Not fixed
-
----
-
-### BLOCKER 3: Resume file upload required on every ATS
-**Files:** `content/external-apply.js`, `settings/settings.js`
-**Scope:** Blocks 100% of applications
-
-All ATS forms require a resume file upload as their first required field. File inputs can't be set programmatically (browser security blocks `input[type=file].value = ...`).
-
-Options:
-- (a) **Manual**: Show a persistent "Please attach your resume" notification; mark the field so user knows which file input to use
-- (b) **Settings**: Add a "Resume file" setting where user can store a base64 data-URL of their resume; then use `DataTransfer` to set the file input value (works in Chrome extensions with `scripting` permission)
-
-`DataTransfer` approach:
-```javascript
-const dt = new DataTransfer();
-dt.items.add(new File([base64Blob], 'resume.pdf', { type: 'application/pdf' }));
-fileInput.files = dt.files;
-fileInput.dispatchEvent(new Event('change', { bubbles: true }));
-```
-
-**Fix:** (a) Add resume data-URL field to settings page. (b) In `pjaFillForm`, detect `input[type=file]` and attempt DataTransfer fill if `profile.resumeDataUrl` is set. 
-
-**Status:** ⬜ Not fixed
+### BLOCKER 4 — Empty email/phone in default profile — ⚙️ USER ACTION
+Still user-supplied via Settings; Settings now shows a warning when email/phone/resume/Workday-password
+are missing. No code fix needed — required inputs.
 
 ---
 
-### BLOCKER 4: Email and phone are empty in default profile
-**Files:** `content/autofill.js` (`PJA_DEFAULT_PROFILE`)
-**Scope:** Every application — email and phone are required fields everywhere
+## TIER 2 — resolved
 
-`PJA_DEFAULT_PROFILE.email = ''` and `PJA_DEFAULT_PROFILE.phone = ''`. The `if (key && key in profile) return` guard prevents answer bank from filling them, but they stay blank. Every form has these as required.
+### BLOCKER 5 — Open-ended / custom screening questions — ✅ RESOLVED
+`pjaFillUnknownTextFields` batches unmatched required text/select/radio questions into one
+`ANSWER_QUESTIONS` message → dev-server `/answer-questions`, which generates truthful answers from
+profile + resume + `pja_prefs`. Answers are persisted to `pja_answers` so repeats are instant.
 
-**Fix:** User action required — must fill email and phone in Settings page. Add a warning banner in the extension popup/settings if email or phone is empty.
+### BLOCKER 6 — Shadow DOM not traversed — ✅ RESOLVED
+`findMissingRequired()` and `findButton()` now use **`pjaQueryAllExt`** (shadow-root-aware) instead of
+`document.querySelectorAll`, so Workday / Rippling inputs inside shadow roots are found.
 
-**Status:** ⬜ User must act
-
----
-
-## TIER 2 — Blocks Specific Platforms or Forms
-
-### BLOCKER 5: Custom/open-ended questions on Lever forms
-**Files:** `content/external-apply.js`
-**Scope:** Any ATS with job-specific free-text questions
-
-Lever (and many ATS) add job-specific required text questions: "How many years experience with PCBA?", "Describe your IPC-610 knowledge", etc. These:
-- Don't match any PJA_FIELD_RULES key
-- Often have no entry in pja_answers
-- Are required → findMissingRequired detects them → apply fails
-
-**Fix:** When findMissingRequired finds open-ended text questions and the dev server is available, send them to `/analyze` with the candidate's profile for AI-generated answers. Cache responses in pja_answers. This turns one-time failures into learned answers.
-
-**Status:** ⬜ Not fixed
+### BLOCKER 7 — Greenhouse phone country-code picker — ✅ RESOLVED
+`retryPhoneFill(profile)` (`content/external-apply.js` ~L2043) re-fills the `tel` input and handles the
+adjacent country picker after the initial pass.
 
 ---
 
-### BLOCKER 6: Shadow DOM not traversed in external-apply.js
-**Files:** `content/external-apply.js`
-**Scope:** Workday (heavy shadow DOM), Rippling, some Greenhouse modals
+## TIER 3 — handled
 
-`findMissingRequired()` and `findButton()` use `document.querySelectorAll` directly, not `pjaQueryAll` (which traverses all shadow roots). On Workday and Rippling, form inputs live in shadow DOM and won't be found.
-
-**Fix:** Replace `root.querySelectorAll(...)` in `findMissingRequired` with `pjaQueryAll(...)` calls. Replace `document.querySelectorAll('button...')` in `findButton` similarly.
-
-**Status:** ⬜ Not fixed
-
----
-
-### BLOCKER 7: Greenhouse phone field uses country-code picker widget
-**Files:** `content/autofill.js`
-**Scope:** Greenhouse job boards
-
-The Greenhouse phone field is two parts: a country-code combobox (opens a 244-country dialog) and a `type="tel"` input. Our code fills the tel input correctly but leaves the country code as whatever default the browser or form set.
-
-For a US number, the country code must be US (+1). The dialog is triggered by a separate "Select country" button.
-
-**Fix:** After filling a `type="tel"` input, check if there's an adjacent country-picker button. If the profile phone doesn't start with `+`, prepend +1 (US) and look for a "United States" option in the adjacent listbox.
-
-**Status:** ⬜ Not fixed
+- **BLOCKER 8 — Google SSO:** external-apply detects SSO-only forms and records `google_sso_only`
+  instead of blindly filling Google's OAuth page.
+- **BLOCKER 9 — Workday "Save and Continue" variants:** the multi-step loop matches
+  `bottomNavigationNext` / `pageFooterNextButton` / Workday `click_filter` next buttons.
+- **Dead / closed postings:** detected via `pjaIsClosedPosting` → recorded as `posting_not_found`
+  (previously misread as `no_apply_btn`).
+- **Chatbot-apply pages:** short-circuit to `chatbot_apply_manual` rather than failing opaquely.
 
 ---
 
-## TIER 3 — Edge Cases / Minor
+## What actually limits throughput now
 
-### BLOCKER 8: Google Sign-In click proceeds to OAuth page
-After clicking "Apply with Google" or "Continue with Google", `handleSignIn` returns `'google_clicked'` and `runExternalApply` proceeds to fill the form — but the page is now Google's OAuth page, not the ATS form. Fills nothing, then tries to submit Google's page.
+Not form-filling — the remaining constraints are external and per-service:
 
-**Fix:** After clicking Google SSO, wait up to 10s for a redirect back to the ATS. If no ATS form appears, bail with reason: 'google_sso_redirect'.
+- **LinkedIn Easy Apply daily submission cap** (engine halts on `daily_limit`).
+- **Indeed anti-bot interstitials** (engine pauses the queue with `reason:'captcha'`, does not advance).
+- **Workday account lock / captcha** on some tenants (`workday_account_locked` / `workday_captcha`).
+- **Degraded CDP** — trusted clicks stop landing; recovered by the self-heal ladder
+  (`cdp-selfheal.js` → detach/reattach → `/reload` → `/restart-chrome`). Ashby & Lever bypass it entirely.
+- **Genuine-fit supply** — after prior batches, fresh 70+ TN-eligible CA roles are the real ceiling,
+  not the tooling.
 
----
-
-### BLOCKER 9: Workday "Save and Continue" button text not matched
-`findButton(/^next$|^continue$|^next step$/i)` won't match "Save and Continue", "Next Step", or Workday's "Next" buttons which have icon-only labels or ARIA labels.
-
-**Fix:** Add "save" and "save and continue" to the Next button regex.
-
----
-
-### BLOCKER 10: Apply button found on description page may open new tab
-Some ATS "Apply" buttons open a new tab instead of navigating. The SPA-detection loop (`location.href !== urlBefore`) correctly handles navigation, but a new-tab open would leave the original tab stuck.
-
-**Fix:** Already partially handled by the max 3 descClick guard. Low priority.
-
----
-
-## Priority Fix Order
-
-| # | Blocker | Impact | Effort | Status |
-|---|---------|--------|--------|--------|
-| 1 | Greenhouse comboboxes | High — 50% of forms | Medium | ⬜ |
-| 2 | Shadow DOM in external-apply | High — Workday/Rippling | Low | ⬜ |
-| 3 | Resume file upload | High — all forms | High | ⬜ |
-| 4 | Empty email/phone warning | High — all forms | Low | ⬜ |
-| 5 | Open-ended question AI answers | Medium — Lever/custom | Medium | ⬜ |
-| 6 | Workday account creation flow | High — top employers | High | ⬜ |
-| 7 | Phone country-code picker | Low — Greenhouse | Low | ⬜ |
-| 8 | Google SSO handling | Low — rare | Low | ⬜ |
-| 9 | Workday Next button variants | Low — post-account | Low | ⬜ |
-
-## Test Dataset
-See `test/test-jobs.json` for 8 real job URLs covering Greenhouse, Workday, Lever, Tesla ATS platforms.
+See `test/test-jobs.json` for the e2e fixture set.

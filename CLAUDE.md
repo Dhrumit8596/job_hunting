@@ -117,22 +117,26 @@ Plain DOM value assignment doesn't update React state. For any React-based ATS (
 
 ## Known bugs (do not re-introduce)
 
-See `BUGS.md` for full details. Critical ones that affect every application:
+The 10 bugs in `BUGS.md` are **all resolved as of 2026-07-10** (line numbers there are historical). The
+file is kept as a regression guard — the fixes are load-bearing. Most important not to re-break:
 
-- **BUG 1** (`autofill.js:172`): `noMatch` for sponsorship contains inverted conditions — selects "Yes, I will require sponsorship" for a No-sponsorship profile.
-- **BUG 2** (`autofill.js:480`): `pjaSetNative` called on `<select>` in answer-bank path — silently fails on React selects.
-- **BUG 3** (`autofill.js:368`): `pjaClickRadio` missing `input` event — React radio state never updates.
-- **BUG 5** (`background.js:801,893`): `BATCH_SCORE_JOBS` and `FIND_OUTREACH_PEOPLE` always call dev server, no `DEV_MODE` guard.
-- **BUG 6** (`background.js:7`): `DEV_MODE = true` hardcoded — Gemini Nano permanently disabled.
+- **BUG 1** — sponsorship is semantically inverted vs work-auth; `pjaFillSelect` handles `requireSponsorship` on its own branch.
+- **BUG 2** — answer-bank fallback must route `SELECT → pjaFillSelect`, combobox → `pjaFillCombobox` (never `pjaSetNative` on a select).
+- **BUG 3** — `pjaClickRadio` must use the native `checked` setter + dispatch `input` before `change`/`click`.
+- **BUG 5** — `BATCH_SCORE_JOBS` / `FIND_OUTREACH_PEOPLE` are `DEV_MODE`-guarded.
+- **BUG 6** — `DEV_MODE = true` is **intentional** here (dev server / `claude` CLI is the AI engine; Nano is bypassed on purpose).
+
+Run `npm test` after touching the fill paths (`autofill.test.js`, `combobox.test.js`, `selfid.test.js`).
 
 ## Known ATS blockers
 
-See `EXTERNAL_APPLY_BLOCKERS.md` for full details. Top unresolved:
+The Tier-1 form-fill blockers in `EXTERNAL_APPLY_BLOCKERS.md` are **resolved as of 2026-07-10**
+(comboboxes → `pjaFillCombobox`; shadow DOM → `pjaQueryAllExt`; resume → `tryInjectResume` + `pja_resume_b64`;
+Workday account creation → `workday-auth.js` state machine + Gmail verify). What remains is **not code**:
 
-- **Greenhouse comboboxes**: All dropdowns are `<input role="combobox">` + listbox, not `<select>`. `pjaFillSelect` skips them entirely. Need `pjaFillCombobox()`.
-- **Shadow DOM**: `findMissingRequired()` and `findButton()` in `external-apply.js` use `document.querySelectorAll` — misses inputs inside shadow roots (Workday, Rippling). Should use `pjaQueryAll()`.
-- **Resume upload**: `input[type=file]` can't be set programmatically without a stored `profile.resumeDataUrl` + `DataTransfer` approach.
-- **Workday account creation**: Requires user-created password. Flow currently bails with `needs_login` unless `WORKDAY_SUBMIT_FORM` can complete the create-account step.
+- **External-service limits** — LinkedIn Easy Apply daily cap, Indeed anti-bot interstitials, Workday account lock/captcha.
+- **Degraded CDP** — trusted clicks stop landing; recovered by the self-heal ladder (`cdp-selfheal.js` → reattach → `/reload` → `/restart-chrome`). Ashby & Lever bypass it.
+- **Genuine-fit supply** — the real throughput ceiling after prior batches, not the tooling.
 
 ## `PJA_FIELD_RULES` ordering rule
 
