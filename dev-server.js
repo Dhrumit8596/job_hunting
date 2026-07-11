@@ -847,10 +847,11 @@ BEST FITS (TN-eligible, score 85-95): Wafer Inspection/Metrology/Yield/Defect/Pr
         const rescore = !!o.rescore;
         const stopBeforeSubmit = !!o.stopBeforeSubmit;
         const dryRun = !!o.dryRun; // build + return the plan, but DON'T seed the queue or open tabs (no real applies)
+        const atsAllow = Array.isArray(o.atsAllow) ? o.atsAllow : null; // restrict to these ATS strategies (e.g. no-account trial)
         if (![...wsClients].some(c => c.readyState === 1)) { res.writeHead(503, CORS); res.end(JSON.stringify({ error: 'no extension connected' })); return; }
 
         // 1. apply-set from the corpus (fit>=threshold, not applied, retryable), heuristic-gated.
-        const setResp = await wsAsk('getApplySet', { threshold, dailyCap }, 'applySetReply', 10000);
+        const setResp = await wsAsk('getApplySet', { threshold, dailyCap, atsAllow }, 'applySetReply', 10000);
         let jobs = (setResp && setResp.jobs) || [];
         if (setResp.error) { res.writeHead(502, CORS); res.end(JSON.stringify({ error: 'getApplySet: ' + setResp.error })); return; }
 
