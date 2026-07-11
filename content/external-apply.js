@@ -2661,6 +2661,17 @@
       await pjaWriteAppliedLog(job, { status: 'applied', reason: result.reason });
     }
 
+    // Write the outcome back into the corpus (pja_job_state) so the pool reflects progress and
+    // re-runs are idempotent. Fire-and-forget; background maps the reason via PJAApplySelect and
+    // skips jobs that aren't in the corpus (non-corpus queues are a no-op).
+    try {
+      chrome.runtime.sendMessage({
+        type: 'UPDATE_CORPUS_STATE',
+        id: job.id,
+        reason: result.success ? 'applied' : (result.reason || 'unknown'),
+      }, () => void chrome.runtime.lastError);
+    } catch (_) {}
+
     return new Promise(resolve => {
       chrome.storage.local.get('pja_ext_queue', data => {
         const queue = data.pja_ext_queue;

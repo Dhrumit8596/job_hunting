@@ -164,6 +164,33 @@ function setStorageToExtension(obj) {
   return pushed;
 }
 
+// Fire-and-forget WS command to the extension (e.g. openTab).
+function wsSend(cmd, extra = {}) {
+  const client = [...wsClients].find(c => c.readyState === 1);
+  if (!client) return false;
+  client.send(JSON.stringify(Object.assign({ cmd }, extra)));
+  return true;
+}
+
+// Generic WS round-trip: send {cmd, ...payload, reqId}, resolve with the matching {replyCmd, reqId}.data.
+function wsAsk(cmd, payload, replyCmd, timeoutMs = 8000) {
+  return new Promise(resolve => {
+    const client = [...wsClients].find(c => c.readyState === 1);
+    if (!client) return resolve({ error: 'no extension connected' });
+    const reqId = Date.now() + '_' + Math.random().toString(36).slice(2, 6);
+    let done = false;
+    const onMsg = raw => {
+      try {
+        const m = JSON.parse(raw);
+        if (m.cmd === replyCmd && m.reqId === reqId && !done) { done = true; client.removeListener('message', onMsg); resolve(m.data || {}); }
+      } catch (_) {}
+    };
+    client.on('message', onMsg);
+    client.send(JSON.stringify(Object.assign({ cmd, reqId }, payload || {})));
+    setTimeout(() => { if (!done) { done = true; client.removeListener('message', onMsg); resolve({ error: 'timeout' }); } }, timeoutMs);
+  });
+}
+
 // Score one chunk (<=10) of jobs via the same prompt /batch-score uses.
 const SCORE_SYSTEM_PROMPT = `You score job fit for the candidate, a Canadian moving to California on a TN visa. Her ACTUAL skills (from resume): wafer inspection (~2,500/day), thin film metrology, photolithography, defect detection, thickness measurement, cleanroom, yield improvement, GMP, SPC, quality management/control, 5S, root cause analysis, EH&S, SDS handling, data management. She has a B.E. (Environmental Engineering). She does NOT have: FMEA, 8D, ISO 13485, optical metrology, supplier audits, Python, CAD.
 TN VISA RULE (critical): TN status is only for PROFESSIONAL roles (Engineer/Scientist + degree). Any Technician/Tech/Operator/Associate/Assembler/Supervisor/Manager/Coordinator/Lead title is NOT TN-eligible → score it 0-25 no matter how well skills match. Engineer/Scientist titles are eligible. No H-1B available; roles needing US citizenship/clearance → ≤30.
@@ -801,6 +828,62 @@ BEST FITS (TN-eligible, score 85-95): Wafer Inspection/Metrology/Yield/Defect/Pr
         console.error('[PJA] /source-v2 error:', e.message);
         res.writeHead(500, CORS);
         res.end(JSON.stringify({ success: false, error: e.message }));
+      }
+    });
+    return;
+  }
+
+  // ── /apply-run: the corpus→apply driver (Phase B). Build the apply-set from the corpus, optionally
+  // LLM-rescore, seed pja_ext_queue, and kick off the autonomous apply loop. The extension's
+  // external-apply.js auto-advances and writes each result back to the corpus (UPDATE_CORPUS_STATE).
+  if (req.method === 'POST' && req.url === '/apply-run') {
+    let body = '';
+    req.on('data', d => body += d);
+    req.on('end', async () => {
+      try {
+        const o = body ? JSON.parse(body) : {};
+        const threshold = o.threshold != null ? o.threshold : 70;
+        const dailyCap = o.dailyCap != null ? o.dailyCap : 30;
+        const rescore = !!o.rescore;
+        const stopBeforeSubmit = !!o.stopBeforeSubmit;
+        const dryRun = !!o.dryRun; // build + return the plan, but DON'T seed the queue or open tabs (no real applies)
+        if (![...wsClients].some(c => c.readyState === 1)) { res.writeHead(503, CORS); res.end(JSON.stringify({ error: 'no extension connected' })); return; }
+
+        // 1. apply-set from the corpus (fit>=threshold, not applied, retryable), heuristic-gated.
+        const setResp = await wsAsk('getApplySet', { threshold, dailyCap }, 'applySetReply', 10000);
+        let jobs = (setResp && setResp.jobs) || [];
+        if (setResp.error) { res.writeHead(502, CORS); res.end(JSON.stringify({ error: 'getApplySet: ' + setResp.error })); return; }
+
+        // 2. optional LLM rescore → write real fit back to corpus → re-gate.
+        if (rescore && jobs.length) {
+          const scored = await scoreAll(jobs);
+          await wsAsk('updateScores', { scores: scored.map(j => ({ id: j.id, fitScore: j.fitScore })) }, 'updateScoresReply', 20000);
+          jobs = scored.filter(j => j.fitScore != null && j.fitScore >= threshold)
+            .sort((a, b) => (b.fitScore || 0) - (a.fitScore || 0)).slice(0, dailyCap);
+        }
+
+        if (!jobs.length) { res.writeHead(200, CORS); res.end(JSON.stringify({ success: true, planned: 0, note: 'nothing eligible', corpusTotal: setResp.total })); return; }
+
+        // 3. build the queue + seed current, then open the first job's tab to start the loop.
+        const queueJobs = jobs.map(j => ({ id: j.id, title: j.title, company: j.company, ats: j.ats || j.strategy,
+          applyUrl: j.applyUrl, location: j.location, fitScore: j.fitScore, profile: {}, answers: {} }));
+        const runId = 'apply-' + Date.now();
+        const queue = { status: 'applying', jobs: queueJobs, currentIndex: 0, results: { applied: [], skipped: [] }, runId, startedAt: Date.now() };
+        const byStrategy = {};
+        for (const j of queueJobs) { const k = j.ats || 'generic'; byStrategy[k] = (byStrategy[k] || 0) + 1; }
+
+        if (!dryRun) {
+          const first = Object.assign({}, queueJobs[0], { returnUrl: 'https://www.linkedin.com/jobs/search/?f_AL=true', runId });
+          setStorageToExtension({ pja_ext_queue: queue, pja_ext_current: first, pja_ext_stop_before_submit: stopBeforeSubmit, pja_navigate_to: queueJobs[0].applyUrl });
+          wsSend('openTab', { url: queueJobs[0].applyUrl });
+        }
+        console.log(`[PJA] /apply-run${dryRun ? ' (dry-run)' : ''}: ${dryRun ? 'planned' : 'queued'} ${queueJobs.length} (threshold=${threshold}, rescore=${rescore}) byStrategy=${JSON.stringify(byStrategy)}`);
+        res.writeHead(200, CORS);
+        res.end(JSON.stringify({ success: true, dryRun, planned: queueJobs.length, runId, byStrategy, corpusTotal: setResp.total,
+          top: queueJobs.slice(0, 12).map(j => ({ fit: j.fitScore, company: j.company, title: j.title, ats: j.ats })) }));
+      } catch (e) {
+        console.error('[PJA] /apply-run error:', e.message);
+        res.writeHead(500, CORS); res.end(JSON.stringify({ success: false, error: e.message }));
       }
     });
     return;

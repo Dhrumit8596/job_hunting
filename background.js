@@ -1,8 +1,10 @@
 'use strict';
 
-// Load the IndexedDB job corpus module into the SW global scope (self.PJAIdb). Wrapped so a
-// load failure can never brick the whole service worker.
-try { importScripts('idb-store.js'); } catch (e) { console.error('PJA: idb-store load failed', e); }
+// Load the IndexedDB corpus + apply-selection modules into the SW global scope. Wrapped so a load
+// failure can never brick the whole service worker. Order matters: apply-select needs detect-ats.
+try {
+  importScripts('idb-store.js', 'sourcing/detect-ats.js', 'sourcing/apply-select.js');
+} catch (e) { console.error('PJA: module load failed', e); }
 
 // ── Dev mode ──────────────────────────────────────────────────────────────────
 // Set DEV_MODE = true to route all analysis through the local dev server.
@@ -40,6 +42,22 @@ async function pjaIngestCorpus(index, state) {
   const s = await self.PJAIdb.corpusSummary({ topN: 0 });
   await new Promise(r => chrome.storage.local.set({ pja_job_corpus_count: s.count, pja_schema_version: 1 }, r));
   return s.count;
+}
+
+// Build the apply-set from the IndexedDB corpus (shared by the GET_APPLY_SET message + the WS
+// getApplySet command the dev-server /apply-run driver calls).
+async function pjaBuildApplySet(opts) {
+  if (!self.PJAIdb || !self.PJAApplySelect) return { jobs: [], error: 'modules not loaded' };
+  const corpus = await self.PJAIdb.getAll();
+  const st = await new Promise(r => chrome.storage.local.get(['pja_applied_log', 'pja_jobs'], d => r(d)));
+  const recs = [...(st.pja_applied_log || []), ...(st.pja_jobs || [])];
+  const appliedRoleKeys = recs.map(x => self.PJAApplySelect.roleKey({ company: x.company || x.companyName, title: x.title || x.role || x.jobTitle }));
+  const set = self.PJAApplySelect.buildApplySet(corpus, {
+    threshold: opts && opts.threshold != null ? opts.threshold : 70,
+    dailyCap: opts && opts.dailyCap != null ? opts.dailyCap : 30,
+    appliedRoleKeys,
+  });
+  return { jobs: set, total: Object.keys(corpus.index).length };
 }
 
 // One-time migration: fold legacy whole-blob arrays (pja_shortlist / pja_jobs) into the corpus so
@@ -102,6 +120,21 @@ if (DEV_MODE) {
                 try { if (self.PJAIdb) data = await self.PJAIdb.gateReport({ target: msg.target || 200 }); }
                 catch (e) { data = { error: e.message }; }
                 _wsReloadSocket.send(JSON.stringify({ cmd: 'corpusReply', reqId: msg.reqId, data }));
+              })();
+            } else if (msg.cmd === 'getApplySet') {
+              // Build the apply-set from the corpus for the dev-server /apply-run driver.
+              (async () => {
+                let data = { jobs: [] };
+                try { data = await pjaBuildApplySet(msg); } catch (e) { data = { jobs: [], error: e.message }; }
+                _wsReloadSocket.send(JSON.stringify({ cmd: 'applySetReply', reqId: msg.reqId, data }));
+              })();
+            } else if (msg.cmd === 'updateScores') {
+              // Write LLM fit scores back into the corpus (from /apply-run rescore pass).
+              (async () => {
+                let n = 0;
+                try { if (self.PJAIdb) for (const s of (msg.scores || [])) { if (s && s.id) { await self.PJAIdb.updateState(s.id, { fitScore: s.fitScore }); n++; } } }
+                catch (e) { console.error('PJA: updateScores failed', e); }
+                _wsReloadSocket.send(JSON.stringify({ cmd: 'updateScoresReply', reqId: msg.reqId, data: { updated: n } }));
               })();
             } else if (msg.cmd === 'openTab') {
               chrome.tabs.create({ url: msg.url });
@@ -1937,6 +1970,32 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
 
   if (msg.type === 'GET_SHORTLIST') {
     chrome.storage.local.get('pja_shortlist', r => sendResponse({ jobs: r.pja_shortlist || [] }));
+    return true;
+  }
+
+  // Build the apply-set from the IndexedDB corpus: fit>=threshold, not already applied, retryable.
+  // Used by the dev-server /apply-run driver to know what to apply to.
+  if (msg.type === 'GET_APPLY_SET') {
+    pjaBuildApplySet(msg).then(sendResponse).catch(e => sendResponse({ jobs: [], error: e.message }));
+    return true;
+  }
+
+  // Write an apply result back into the corpus (pja_job_state) so the pool reflects progress and
+  // re-runs are idempotent. reason comes from external-apply.js recordResult.
+  if (msg.type === 'UPDATE_CORPUS_STATE') {
+    (async () => {
+      try {
+        if (!self.PJAIdb || !self.PJAApplySelect) return sendResponse({ ok: false, error: 'modules not loaded' });
+        const cur = await self.PJAIdb.getJob(msg.id);
+        if (!cur) return sendResponse({ ok: false, skipped: 'not in corpus' }); // non-corpus queue → no-op
+        const attempts = (cur && cur.state && cur.state.attempts) || 0;
+        const next = self.PJAApplySelect.resultToState(msg.reason, attempts);
+        const patch = { status: next.status, reason: next.reason, attempts: next.attempts != null ? next.attempts : attempts };
+        if (next.status === 'applied') patch.appliedAt = Date.now();
+        await self.PJAIdb.updateState(msg.id, patch);
+        sendResponse({ ok: true, state: patch });
+      } catch (e) { sendResponse({ ok: false, error: e.message }); }
+    })();
     return true;
   }
 

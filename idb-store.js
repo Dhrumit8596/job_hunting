@@ -131,6 +131,39 @@
     finally { db.close(); }
   }
 
+  // Full corpus as { index, state } maps — for the apply driver's selection pass.
+  async function getAll() {
+    const db = await openDb();
+    try {
+      const index = {}, state = {};
+      await new Promise((res, rej) => {
+        const cur = db.transaction('index', 'readonly').objectStore('index').openCursor();
+        cur.onsuccess = () => { const c = cur.result; if (!c) return res(); index[c.value.id] = c.value; c.continue(); };
+        cur.onerror = () => rej(cur.error);
+      });
+      await new Promise((res, rej) => {
+        const cur = db.transaction('state', 'readonly').objectStore('state').openCursor();
+        cur.onsuccess = () => { const c = cur.result; if (!c) return res(); state[c.value.id] = c.value; c.continue(); };
+        cur.onerror = () => rej(cur.error);
+      });
+      return { index, state };
+    } finally { db.close(); }
+  }
+
+  // Merge a patch into one job's mutable state (per-record write; used for apply results + rescoring).
+  async function updateState(id, patch) {
+    const db = await openDb();
+    try {
+      const t = db.transaction('state', 'readwrite');
+      const st = t.objectStore('state');
+      const cur = await reqP(st.get(id));
+      const next = Object.assign({ id, status: 'sourced', fitScore: null }, cur || {}, patch || {}, { id });
+      st.put(next);
+      await txDone(t);
+      return next;
+    } finally { db.close(); }
+  }
+
   async function getJob(id) {
     const db = await openDb();
     try {
@@ -231,7 +264,7 @@
   }
 
   const API = { DB_NAME, SCHEMA_VERSION, canonicalId, roleKey, openDb, upsertJobs, importNormalized,
-    migrateFromLegacy, count, getJob, setMeta, getMeta, excludeApplied, corpusSummary, gateReport, clearAll };
+    migrateFromLegacy, count, getAll, updateState, getJob, setMeta, getMeta, excludeApplied, corpusSummary, gateReport, clearAll };
 
   if (root) root.PJAIdb = API;                                   // service worker: self.PJAIdb
   if (typeof module !== 'undefined' && module.exports) module.exports = API; // node: require
