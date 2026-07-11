@@ -765,6 +765,47 @@ BEST FITS (TN-eligible, score 85-95): Wafer Inspection/Metrology/Yield/Defect/Pr
     return;
   }
 
+  // ── /source-v2: multi-modal sourcing into the NORMALIZED store (Find-200 goal) ────────────
+  // Runs Modality A (API registry) + Modality B (discovery) via sourcing/source-run, dedupes on
+  // the canonical id + role-key, excludes already-applied, and writes pja_job_index/pja_job_state
+  // (compact — no descriptions — so it stays well under the chrome.storage quota; the scale-safe
+  // IndexedDB corpus is populated extension-side via idb-store.importNormalized). Additive: the
+  // legacy /source (pja_shortlist) path is untouched.
+  if (req.method === 'POST' && req.url === '/source-v2') {
+    let body = '';
+    req.on('data', d => body += d);
+    req.on('end', async () => {
+      try {
+        const o = body ? JSON.parse(body) : {};
+        const write = o.write !== false;
+        const st = await getStorageFromExtension(['pja_jobs', 'pja_ext_queue', 'pja_shortlist', 'pja_applied_log']);
+        const { pjaCollectAppliedRecords, appliedKeySet } = require('./sourcing/dedupe');
+        const appliedRoleKeys = Array.from(appliedKeySet(pjaCollectAppliedRecords(st)));
+
+        const { sourceAll } = require('./sourcing/source-run');
+        const { store, report } = await sourceAll({ appliedRoleKeys, target: o.target || 200 });
+
+        let wrote = 0;
+        if (write) {
+          setStorageToExtension({
+            pja_job_index: store.index,
+            pja_job_state: store.state,
+            pja_schema_version: 1,
+          });
+          wrote = Object.keys(store.index).length;
+        }
+        console.log(`[PJA] /source-v2: unique=${report.gate.uniqueIds} modalities=${report.gate.modalities.join('+')} gate=${report.gate.pass ? 'PASS' : 'FAIL'}`);
+        res.writeHead(200, CORS);
+        res.end(JSON.stringify({ success: true, wrote, report }));
+      } catch (e) {
+        console.error('[PJA] /source-v2 error:', e.message);
+        res.writeHead(500, CORS);
+        res.end(JSON.stringify({ success: false, error: e.message }));
+      }
+    });
+    return;
+  }
+
   // ── /outreach: generate DM + email for an approved job ────────────────────
   if (req.method === 'POST' && req.url === '/outreach') {
     let body = '';
