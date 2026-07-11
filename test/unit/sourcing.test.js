@@ -91,9 +91,11 @@ module.exports = (t) => {
   t.ok(keys.has(jobKey({ company: 'Gamma', title: 'Equipment Engineer' })), 'collectApplied: current-queue role deduped');
 
   // --- adapter normalize (synthetic raw) ---
-  const ghJob = gh.normalize({ id: 99, title: 'Quality Engineer', location: { name: 'San Diego, CA' }, absolute_url: 'https://boards.greenhouse.io/x/jobs/99', updated_at: '2026-06-01' }, { name: 'Acme', slug: 'acme' });
+  const ghJob = gh.normalize({ id: 99, title: 'Quality Engineer', location: { name: 'San Diego, CA' }, absolute_url: 'https://www.acme.com/careers?gh_jid=99', updated_at: '2026-06-01' }, { name: 'Acme', slug: 'acme' });
   t.eq(ghJob.company, 'Acme', 'gh.normalize: company from source');
-  t.eq(ghJob.applyUrl, 'https://boards.greenhouse.io/x/jobs/99', 'gh.normalize: applyUrl');
+  t.eq(ghJob.applyUrl, 'https://job-boards.greenhouse.io/acme/jobs/99', 'gh.normalize: applyUrl = canonical form URL (not company careers page)');
+  const ghJob2 = gh.normalize({ id: 5, title: 'Process Engineer', absolute_url: 'https://x/y' }, { slug: '' });
+  t.eq(ghJob2.applyUrl, 'https://x/y', 'gh.normalize: falls back to absolute_url when no slug');
   t.eq(ghJob.ats, 'greenhouse', 'gh.normalize: ats');
   const levJob = lever.normalize({ id: 'abc', text: 'Equipment Engineer', categories: { location: 'Alameda, CA' }, hostedUrl: 'https://jobs.lever.co/acme/abc' }, { name: 'Acme', slug: 'acme' });
   t.eq(levJob.applyUrl, 'https://jobs.lever.co/acme/abc/apply', 'lever.normalize: applyUrl gets /apply');

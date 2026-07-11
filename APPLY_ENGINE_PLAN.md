@@ -224,6 +224,26 @@ review queue the user finishes by hand, and re-runs retry it automatically.
 
 ---
 
+## 5b. Build status — 2026-07-11 (branch `apply-engine`)
+
+**All five build phases done, unit-tested (577 green), and smoke-verified live in the real extension.**
+
+| Phase | Shipped | Verified |
+|-------|---------|----------|
+| A | `apply-router.js` dispatcher + 17-strategy registry (`detectAts` + DOM sniff) | unit + live (strategy selection) |
+| B | `/apply-run` corpus→apply driver, `apply-select.js` (gate/resultToState/poolStatus), corpus write-back | unit + **live dry-run**: 21→18 after LLM rescore persisted to corpus |
+| C | `apply-preflight.js` (classify + verify + no-false-applied guard), `/reconcile` (Gmail ground-truth) | unit |
+| D | `apply-account.js` (plus-address account creation generalized, iframe traversal, ATS success phrases) | unit |
+| E | corpus status breakdown + shortlist review banner (matching/applied/needs-manual counts) | unit |
+
+Live regression check: reloaded the extension with all four new content scripts + background changes;
+`/apply-run` dry-run and `/corpus-status` both work, corpus intact. **Zero real applications submitted
+during verification** (dry-run only).
+
+**Not yet done — the overnight apply run (criteria 6–10):** submits real applications + creates real
+accounts over hours in the user's Chrome (agent-free for Easy Apply). The machinery is built and
+dry-run-proven end-to-end; launching the real unattended run is the user's step (see §6 verify).
+
 ## 6. Success criteria (the whole feature)
 
 1. From a fresh corpus, one action reviews every job and applies to **every genuine-fit, TN-eligible,

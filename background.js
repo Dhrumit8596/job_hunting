@@ -1,8 +1,10 @@
 'use strict';
 
-// Load the IndexedDB job corpus module into the SW global scope (self.PJAIdb). Wrapped so a
-// load failure can never brick the whole service worker.
-try { importScripts('idb-store.js'); } catch (e) { console.error('PJA: idb-store load failed', e); }
+// Load the IndexedDB corpus + apply-selection modules into the SW global scope. Wrapped so a load
+// failure can never brick the whole service worker. Order matters: apply-select needs detect-ats.
+try {
+  importScripts('idb-store.js', 'sourcing/detect-ats.js', 'sourcing/apply-select.js');
+} catch (e) { console.error('PJA: module load failed', e); }
 
 // ── Dev mode ──────────────────────────────────────────────────────────────────
 // Set DEV_MODE = true to route all analysis through the local dev server.
@@ -41,6 +43,75 @@ async function pjaIngestCorpus(index, state) {
   await new Promise(r => chrome.storage.local.set({ pja_job_corpus_count: s.count, pja_schema_version: 1 }, r));
   return s.count;
 }
+
+// Build the apply-set from the IndexedDB corpus (shared by the GET_APPLY_SET message + the WS
+// getApplySet command the dev-server /apply-run driver calls).
+async function pjaBuildApplySet(opts) {
+  if (!self.PJAIdb || !self.PJAApplySelect) return { jobs: [], error: 'modules not loaded' };
+  const corpus = await self.PJAIdb.getAll();
+  const st = await new Promise(r => chrome.storage.local.get(['pja_applied_log', 'pja_jobs'], d => r(d)));
+  const recs = [...(st.pja_applied_log || []), ...(st.pja_jobs || [])];
+  const appliedRoleKeys = recs.map(x => self.PJAApplySelect.roleKey({ company: x.company || x.companyName, title: x.title || x.role || x.jobTitle }));
+  const set = self.PJAApplySelect.buildApplySet(corpus, {
+    threshold: opts && opts.threshold != null ? opts.threshold : 70,
+    dailyCap: opts && opts.dailyCap != null ? opts.dailyCap : 30,
+    atsAllow: opts && opts.atsAllow,
+    appliedRoleKeys,
+  });
+  return { jobs: set, total: Object.keys(corpus.index).length };
+}
+
+// Service-worker apply watchdog: the content-script setTimeout watchdog is throttled on backgrounded
+// tabs (MV3), so a job stuck in a single-page hang (e.g. a react-select that never commits) can block
+// the whole queue. This runs on a chrome.alarm (wakes the SW) and force-advances a job that's been
+// the active one past the hard cap — marks it needs_manual, closes its hung tab, opens the next job.
+async function pjaApplyWatchdogTick() {
+  if (!self.PJAApplySelect) return;
+  const d = await new Promise(r => chrome.storage.local.get(['pja_ext_queue', 'pja_apply_wd'], r));
+  const q = d.pja_ext_queue;
+  const now = Date.now();
+  const dec = self.PJAApplySelect.watchdogDecision(q, d.pja_apply_wd, now, {});
+  if (dec.action === 'idle' || dec.action === 'wait') return;
+  if (dec.action === 'reset') { await new Promise(r => chrome.storage.local.set({ pja_apply_wd: dec.wd }, r)); return; }
+  // action === 'advance' → the active job has been stuck past the cap; force the queue forward.
+  const idx = dec.idx;
+  const job = (q.jobs || [])[idx];
+  if (!job) return;
+  if (!q.results || Array.isArray(q.results)) q.results = { applied: [], skipped: [] };
+  q.results.skipped.push({ ...job, skipReason: 'stuck_watchdog' });
+  try {
+    if (self.PJAIdb && job.id) {
+      const st = self.PJAApplySelect.resultToState('stuck_budget', 0);
+      await self.PJAIdb.updateState(job.id, { status: st.status, reason: 'stuck_watchdog', attempts: st.attempts });
+    }
+  } catch (_) {}
+  q.currentIndex = idx + 1;
+  const nextJob = (q.jobs || [])[q.currentIndex];
+  if (q.currentIndex >= (q.jobs || []).length) q.status = 'done';
+  const writeObj = { pja_ext_queue: q, pja_apply_wd: { runId: q.runId, idx: q.currentIndex, startedAt: now } };
+  if (nextJob && nextJob.applyUrl) {
+    writeObj.pja_ext_current = Object.assign({}, nextJob, { returnUrl: 'https://www.linkedin.com/jobs/', runId: q.runId });
+    writeObj.pja_navigate_to = nextJob.applyUrl;
+  }
+  await new Promise(r => chrome.storage.local.set(writeObj, r));
+  console.log('PJA apply-watchdog: force-advanced stuck job', job.company, '→ idx', q.currentIndex, q.status);
+  // Close the hung tab(s) for the stuck job (match its applyUrl prefix so we don't close siblings).
+  try {
+    const tabs = await new Promise(r => chrome.tabs.query({}, r));
+    for (const t of tabs) { if (t.url && job.applyUrl && (t.url === job.applyUrl || t.url.indexOf(job.applyUrl) === 0)) chrome.tabs.remove(t.id).catch(() => {}); }
+  } catch (_) {}
+  if (nextJob && nextJob.applyUrl) { try { chrome.tabs.create({ url: nextJob.applyUrl }); } catch (_) {} }
+  try {
+    fetch('http://localhost:6174/queue-status', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ status: q.status, currentIndex: q.currentIndex, total: (q.jobs || []).length, watchdog: 'force-advanced ' + job.company, ts: new Date().toISOString() }) }).catch(() => {});
+  } catch (_) {}
+}
+
+// Poll the apply watchdog on an alarm (wakes the SW even when idle; not throttled like a bg tab).
+try {
+  chrome.alarms.create('pja_apply_watchdog', { periodInMinutes: 1 });
+  chrome.alarms.onAlarm.addListener(a => { if (a.name === 'pja_apply_watchdog') pjaApplyWatchdogTick().catch(() => {}); });
+} catch (e) { console.error('PJA: apply-watchdog alarm setup failed', e); }
 
 // One-time migration: fold legacy whole-blob arrays (pja_shortlist / pja_jobs) into the corpus so
 // nothing is lost when the corpus becomes the source of truth. Idempotent; gated by pja_schema_version.
@@ -102,6 +173,21 @@ if (DEV_MODE) {
                 try { if (self.PJAIdb) data = await self.PJAIdb.gateReport({ target: msg.target || 200 }); }
                 catch (e) { data = { error: e.message }; }
                 _wsReloadSocket.send(JSON.stringify({ cmd: 'corpusReply', reqId: msg.reqId, data }));
+              })();
+            } else if (msg.cmd === 'getApplySet') {
+              // Build the apply-set from the corpus for the dev-server /apply-run driver.
+              (async () => {
+                let data = { jobs: [] };
+                try { data = await pjaBuildApplySet(msg); } catch (e) { data = { jobs: [], error: e.message }; }
+                _wsReloadSocket.send(JSON.stringify({ cmd: 'applySetReply', reqId: msg.reqId, data }));
+              })();
+            } else if (msg.cmd === 'updateScores') {
+              // Write LLM fit scores back into the corpus (from /apply-run rescore pass).
+              (async () => {
+                let n = 0;
+                try { if (self.PJAIdb) for (const s of (msg.scores || [])) { if (s && s.id) { await self.PJAIdb.updateState(s.id, { fitScore: s.fitScore }); n++; } } }
+                catch (e) { console.error('PJA: updateScores failed', e); }
+                _wsReloadSocket.send(JSON.stringify({ cmd: 'updateScoresReply', reqId: msg.reqId, data: { updated: n } }));
               })();
             } else if (msg.cmd === 'openTab') {
               chrome.tabs.create({ url: msg.url });
@@ -1940,13 +2026,40 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     return true;
   }
 
+  // Build the apply-set from the IndexedDB corpus: fit>=threshold, not already applied, retryable.
+  // Used by the dev-server /apply-run driver to know what to apply to.
+  if (msg.type === 'GET_APPLY_SET') {
+    pjaBuildApplySet(msg).then(sendResponse).catch(e => sendResponse({ jobs: [], error: e.message }));
+    return true;
+  }
+
+  // Write an apply result back into the corpus (pja_job_state) so the pool reflects progress and
+  // re-runs are idempotent. reason comes from external-apply.js recordResult.
+  if (msg.type === 'UPDATE_CORPUS_STATE') {
+    (async () => {
+      try {
+        if (!self.PJAIdb || !self.PJAApplySelect) return sendResponse({ ok: false, error: 'modules not loaded' });
+        const cur = await self.PJAIdb.getJob(msg.id);
+        if (!cur) return sendResponse({ ok: false, skipped: 'not in corpus' }); // non-corpus queue → no-op
+        const attempts = (cur && cur.state && cur.state.attempts) || 0;
+        const next = self.PJAApplySelect.resultToState(msg.reason, attempts);
+        const patch = { status: next.status, reason: next.reason, attempts: next.attempts != null ? next.attempts : attempts };
+        if (next.status === 'applied') patch.appliedAt = Date.now();
+        await self.PJAIdb.updateState(msg.id, patch);
+        sendResponse({ ok: true, state: patch });
+      } catch (e) { sendResponse({ ok: false, error: e.message }); }
+    })();
+    return true;
+  }
+
   // Read the IndexedDB job corpus (source of truth) for the shortlist review page.
   if (msg.type === 'GET_JOB_CORPUS') {
     (async () => {
       try {
         if (!self.PJAIdb) return sendResponse({ count: 0, jobs: [] });
-        const s = await self.PJAIdb.corpusSummary({ topN: msg.topN || 25 });
-        sendResponse({ count: s.count, distinctCompanies: s.distinctCompanies, modalities: s.modalities, jobs: s.top });
+        const s = await self.PJAIdb.corpusSummary({ topN: msg.topN || 25, statusFilter: msg.statusFilter, matchThreshold: msg.matchThreshold });
+        sendResponse({ count: s.count, distinctCompanies: s.distinctCompanies, modalities: s.modalities,
+          statusCounts: s.statusCounts, matching: s.matching, jobs: s.top });
       } catch (e) { sendResponse({ error: e.message }); }
     })();
     return true;

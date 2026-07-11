@@ -169,6 +169,35 @@
       try { recordResult(job, { success: false, reason: 'watchdog_timeout' }).then(() => navigateBack(job), () => navigateBack(job)); }
       catch (_) { try { navigateBack(job); } catch (__) {} }
     }, 420000);
+
+    // Persistent cross-reload budget: the setTimeout watchdog above is reset every time the page
+    // reloads, so a job that reload-loops (e.g. a required react-select that never commits, like the
+    // Greenhouse country/degree remix selects) never hits it and blocks the whole batch. Track
+    // {firstSeen, loads} per job in storage (survives reloads); when the wall-clock budget or reload
+    // count is exceeded, defer this job to needs_manual and advance so the batch keeps moving.
+    try {
+      const clockKey = (job.runId || 'norun') + '::' + (job.id || job.applyUrl || job.company || 'job');
+      const now = Date.now();
+      const clock = await new Promise(r => chrome.storage.local.get('pja_ext_jobclock', d => r(d.pja_ext_jobclock || {})));
+      // prune stale entries (>6h) so the map can't grow unbounded across runs
+      for (const k of Object.keys(clock)) { if (now - (clock[k].firstSeen || now) > 21600000) delete clock[k]; }
+      const entry = clock[clockKey] || { firstSeen: now, loads: 0 };
+      entry.loads += 1;
+      clock[clockKey] = entry;
+      await new Promise(r => chrome.storage.local.set({ pja_ext_jobclock: clock }, r));
+      const overBudget = (typeof window.PJAApplySelect !== 'undefined' && window.PJAApplySelect.exceededBudget)
+        ? window.PJAApplySelect.exceededBudget(entry, now, {})
+        : (now - entry.firstSeen > 240000 || entry.loads > 4);
+      if (overBudget) {
+        try { chrome.runtime.sendMessage({ type: 'PJA_APPLY_OUTCOME', outcome: { filled: true, submitted: false, reactSelectError: true }, applyUrl: job.applyUrl }); } catch (_) {}
+        const detail = entry.loads > 4 ? entry.loads + ' loads' : Math.round((now - entry.firstSeen) / 1000) + 's';
+        console.log('PJA ext-apply: stuck_budget exceeded (' + detail + ') — deferring', job.company);
+        await recordResult(job, { success: false, reason: 'stuck_budget', fields: ['budget:' + detail] });
+        navigateBack(job);
+        return;
+      }
+    } catch (_) {}
+
     await sleep(1500); // let dynamic forms settle
 
     // Fall back to stored profile/answers if the job object doesn't include them
@@ -189,6 +218,11 @@
     // Merge stored profile on top of defaults so new profile keys always have fallback values.
     const defaultProfile = (typeof window.PJA_DEFAULT_PROFILE !== 'undefined') ? window.PJA_DEFAULT_PROFILE : {};
     profile = Object.assign({}, defaultProfile, profile);
+    // Write the merged profile back onto the job so downstream helpers that read job.profile —
+    // notably pjaAnswerRequiredViaAI's deterministic pre-pass (LinkedIn/website/location) — get the
+    // real data. The queue seeds jobs with profile:{}, so without this the deterministic answerer
+    // saw an empty profile and asked the LLM for fields like "LinkedIn Profile" (which then failed).
+    job.profile = profile;
     const descClicks = job._descClicks || 0;
 
     console.log('PJA ext-apply:', job.company, '|', job.ats, '| profile.firstName:', profile.firstName || 'MISSING', '| descClicks:', descClicks);
@@ -556,6 +590,18 @@
       }
     }
 
+    // Phase logger + per-step timeout so NO single fill sub-step can hang the whole apply. The
+    // Antora watchdog_timeout was an unbounded await in a fill sub-step (e.g. pjaFillUnknownTextFields'
+    // AI round-trip never calling back). On timeout we log and proceed — findMissingRequired then
+    // catches anything still empty → missing_required (fast), instead of burning the 7-min watchdog.
+    const phaseLog = m => { try { chrome.storage.local.get('pja_dbg', d => { const a = (d.pja_dbg || []).slice(-39); a.push('[phase] ' + m); chrome.storage.local.set({ pja_dbg: a }); }); } catch (_) {} };
+    const withTimeout = (p, ms, label) => {
+      let to;
+      const timeout = new Promise(res => { to = setTimeout(() => { phaseLog(label + ' TIMEOUT ' + ms + 'ms'); res(); }, ms); });
+      const wrapped = Promise.resolve(p).then(() => phaseLog(label + ' done')).catch(e => phaseLog(label + ' err ' + ((e && e.message) || e))).finally(() => clearTimeout(to));
+      return Promise.race([wrapped, timeout]);
+    };
+
     // --- Fill all form fields ---
     await new Promise(r => chrome.storage.local.get('pja_dbg', d => {
       const arr = (d.pja_dbg || []).slice(-19);
@@ -566,7 +612,7 @@
       window._pjaComboChain = Promise.resolve(); // reset sequential combobox queue
       pjaFillForm(profile, answers);
       // Await sequential combobox fills (each takes up to ~550ms; 8 comboboxes ≈ 4.4s max)
-      if (window._pjaComboChain) await window._pjaComboChain;
+      if (window._pjaComboChain) await withTimeout(window._pjaComboChain, 30000, 'comboChain1');
       await sleep(300);
       // Phone retry: fill any still-empty phone fields (uses label-classification, not just type/id)
       retryPhoneFill(profile);
@@ -577,31 +623,32 @@
       await sleep(800);
       window._pjaComboChain = Promise.resolve();
       pjaFillForm(profile, answers);
-      if (window._pjaComboChain) await window._pjaComboChain;
+      if (window._pjaComboChain) await withTimeout(window._pjaComboChain, 30000, 'comboChain2');
       await sleep(300);
       // Greenhouse Education react-selects render late + ignore programmatic sets —
       // dedicated late pass (degree/discipline reliable; school best-effort).
       try { chrome.storage.local.get('pja_dbg', d => { const a=(d.pja_dbg||[]).slice(-40); a.push('[gh-edu] call reached, typeof='+(typeof pjaFillGreenhouseEducation)+' host='+location.hostname); chrome.storage.local.set({pja_dbg:a}); }); } catch(_){}
       if (typeof pjaFillGreenhouseEducation === 'function') {
-        try { await pjaFillGreenhouseEducation(profile); } catch(e) { try { chrome.storage.local.get('pja_dbg', d => { const a=(d.pja_dbg||[]).slice(-40); a.push('[gh-edu] ERROR '+(e.message||e)); chrome.storage.local.set({pja_dbg:a}); }); } catch(_){} }
+        await withTimeout(pjaFillGreenhouseEducation(profile), 45000, 'gh-edu');
       }
     }
 
     // --- AI-fill open-ended required questions not in profile/answer bank ---
     if (typeof pjaFillUnknownTextFields === 'function') {
       const jobCtx = { title: job.title || '', company: job.company || '' };
-      await new Promise(resolve => pjaFillUnknownTextFields(profile, answers, jobCtx, () => resolve()));
+      // Bounded: the AI answerer makes dev-server round-trips; if one hangs, don't stall the apply.
+      await withTimeout(new Promise(resolve => pjaFillUnknownTextFields(profile, answers, jobCtx, () => resolve())), 120000, 'ai-answerer');
       await sleep(300);
     }
 
     // --- Best-effort resume upload ---
-    await tryInjectResume(profile, answers);
+    await withTimeout(tryInjectResume(profile, answers), 90000, 'resume');
 
     // --- Workday Application Questions (formField-* dropdowns) ---
-    await pjaFillWorkdayAppQuestions(profile);
+    await withTimeout(pjaFillWorkdayAppQuestions(profile), 45000, 'wd-appq');
 
     // --- Workday Work Experience subsection (My Experience step) ---
-    await pjaFillWorkdayWorkExperience(profile);
+    await withTimeout(pjaFillWorkdayWorkExperience(profile), 45000, 'wd-workexp');
 
     // --- Fallback fills ---
     if (typeof pjaFillRequiredRadioFallback === 'function') pjaFillRequiredRadioFallback();
@@ -2634,8 +2681,16 @@
     const hasSubmitButton = snap.hasSubmitButton !== false;
     const hasFormFields = snap.hasFormFields !== false;
     const iterations = Number.isFinite(snap.iterations) ? snap.iterations : 99;
-    // 1. Confirmation text in title or body.
-    if (PJA_SUBMIT_SUCCESS_RE.test((title + ' ' + text).slice(0, 6000))) return true;
+    // 1. Confirmation text in title or body (generic + per-ATS phrases via PJAAccount.matchesSuccess,
+    // e.g. iCIMS "congratulations", so a real submit isn't misread as submit_unclear).
+    const body6k = (title + ' ' + text).slice(0, 6000);
+    if (PJA_SUBMIT_SUCCESS_RE.test(body6k)) return true;
+    try {
+      if (typeof window.PJAAccount !== 'undefined' && window.PJAAccount.matchesSuccess) {
+        const ats = (typeof window.PJADetectAts !== 'undefined' && window.PJADetectAts.detectAts) ? window.PJADetectAts.detectAts(url) : '';
+        if (window.PJAAccount.matchesSuccess(body6k, ats)) return true;
+      }
+    } catch (_) {}
     // 2. Landed on a confirmation/post-apply route.
     if (/thank|confirm|success|submitted|post-?apply|application[-_]?(complete|received|confirmation|success)|\/applied\b/i.test(url)) return true;
     // 3. Redirected to a DIFFERENT path AND the form is gone → submission went through + redirect.
@@ -2660,6 +2715,17 @@
     if (result.success) {
       await pjaWriteAppliedLog(job, { status: 'applied', reason: result.reason });
     }
+
+    // Write the outcome back into the corpus (pja_job_state) so the pool reflects progress and
+    // re-runs are idempotent. Fire-and-forget; background maps the reason via PJAApplySelect and
+    // skips jobs that aren't in the corpus (non-corpus queues are a no-op).
+    try {
+      chrome.runtime.sendMessage({
+        type: 'UPDATE_CORPUS_STATE',
+        id: job.id,
+        reason: result.success ? 'applied' : (result.reason || 'unknown'),
+      }, () => void chrome.runtime.lastError);
+    } catch (_) {}
 
     return new Promise(resolve => {
       chrome.storage.local.get('pja_ext_queue', data => {

@@ -91,21 +91,41 @@
     } finally { db.close(); }
   }
 
-  // Import an in-memory {index, state} map (from a source-run) into IDB, per-record.
+  // Import an in-memory {index, state} map (from a source-run) into IDB, per-record. Re-sourcing
+  // refreshes the posting + fitScore but PRESERVES apply-progress: a job already applied /
+  // needs_manual / needs_login / dead keeps that status (and attempts/reason/appliedAt) so re-runs
+  // are idempotent and a re-source can't silently reset a completed job back to 'sourced'.
   async function importNormalized(store) {
     const db = await openDb();
     try {
+      // read existing state first (separate txn) so we can merge progress
+      const existing = {};
+      await new Promise((res, rej) => {
+        const cur = db.transaction('state', 'readonly').objectStore('state').openCursor();
+        cur.onsuccess = () => { const c = cur.result; if (!c) return res(); existing[c.value.id] = c.value; c.continue(); };
+        cur.onerror = () => rej(cur.error);
+      });
       const t = db.transaction(['index', 'state'], 'readwrite');
       const idxS = t.objectStore('index'), stS = t.objectStore('state');
-      let n = 0;
+      let n = 0, preserved = 0;
       for (const id of Object.keys(store.index || {})) {
         idxS.put(store.index[id]);
-        stS.put(Object.assign({ id }, store.state && store.state[id] ? store.state[id] : { status: 'sourced', fitScore: null }));
+        const incoming = (store.state && store.state[id]) || { status: 'sourced', fitScore: null };
+        const prev = existing[id];
+        let merged;
+        if (prev && prev.status && prev.status !== 'sourced') {
+          // keep apply progress; refresh fitScore from the new source run
+          merged = Object.assign({}, prev, { id, fitScore: incoming.fitScore != null ? incoming.fitScore : prev.fitScore });
+          preserved++;
+        } else {
+          merged = Object.assign({ id }, incoming);
+        }
+        stS.put(merged);
         n++;
       }
       await txDone(t);
       await setMeta('schemaVersion', SCHEMA_VERSION);
-      return n;
+      return { imported: n, preserved };
     } finally { db.close(); }
   }
 
@@ -129,6 +149,39 @@
     const db = await openDb();
     try { return await reqP(db.transaction('index', 'readonly').objectStore('index').count()); }
     finally { db.close(); }
+  }
+
+  // Full corpus as { index, state } maps — for the apply driver's selection pass.
+  async function getAll() {
+    const db = await openDb();
+    try {
+      const index = {}, state = {};
+      await new Promise((res, rej) => {
+        const cur = db.transaction('index', 'readonly').objectStore('index').openCursor();
+        cur.onsuccess = () => { const c = cur.result; if (!c) return res(); index[c.value.id] = c.value; c.continue(); };
+        cur.onerror = () => rej(cur.error);
+      });
+      await new Promise((res, rej) => {
+        const cur = db.transaction('state', 'readonly').objectStore('state').openCursor();
+        cur.onsuccess = () => { const c = cur.result; if (!c) return res(); state[c.value.id] = c.value; c.continue(); };
+        cur.onerror = () => rej(cur.error);
+      });
+      return { index, state };
+    } finally { db.close(); }
+  }
+
+  // Merge a patch into one job's mutable state (per-record write; used for apply results + rescoring).
+  async function updateState(id, patch) {
+    const db = await openDb();
+    try {
+      const t = db.transaction('state', 'readwrite');
+      const st = t.objectStore('state');
+      const cur = await reqP(st.get(id));
+      const next = Object.assign({ id, status: 'sourced', fitScore: null }, cur || {}, patch || {}, { id });
+      st.put(next);
+      await txDone(t);
+      return next;
+    } finally { db.close(); }
   }
 
   async function getJob(id) {
@@ -186,27 +239,34 @@
         cur.onerror = () => rej(cur.error);
       });
       const ids = Object.keys(postings);
-      const modalities = {}, companies = {};
-      let unscored = 0;
+      const modalities = {}, companies = {}, statusCounts = {};
+      const matchThreshold = opts.matchThreshold != null ? opts.matchThreshold : 70;
+      let unscored = 0, matching = 0;
       for (const id of ids) {
         modalities[postings[id].modality] = (modalities[postings[id].modality] || 0) + 1;
         const co = (postings[id].company || '?').toLowerCase().trim();
         companies[co] = (companies[co] || 0) + 1;
-        if (!states[id] || states[id].fitScore == null) unscored++;
+        const stt = states[id] || {};
+        if (stt.fitScore == null) unscored++;
+        const status = stt.status || 'sourced';
+        statusCounts[status] = (statusCounts[status] || 0) + 1;
+        if (stt.fitScore != null && Number(stt.fitScore) >= matchThreshold) matching++;
       }
       let max = 0, maxCo = '';
       for (const c in companies) if (companies[c] > max) { max = companies[c]; maxCo = c; }
-      const top = ids
+      let ranked = ids
         .map(id => ({ id, company: postings[id].company, title: postings[id].title, location: postings[id].location,
           applyUrl: postings[id].applyUrl, ats: postings[id].ats, modality: postings[id].modality,
-          fitScore: states[id] ? states[id].fitScore : null, status: states[id] ? states[id].status : 'sourced' }))
-        .sort((a, b) => (b.fitScore || 0) - (a.fitScore || 0))
-        .slice(0, topN);
+          fitScore: states[id] ? states[id].fitScore : null, status: (states[id] && states[id].status) || 'sourced',
+          reason: states[id] ? states[id].reason : undefined }))
+        .sort((a, b) => (b.fitScore || 0) - (a.fitScore || 0));
+      if (opts.statusFilter) ranked = ranked.filter(j => j.status === opts.statusFilter);
+      const top = ranked.slice(0, topN);
       return {
         count: ids.length, distinctCompanies: Object.keys(companies).length,
         modalities: Object.keys(modalities), modalityCounts: modalities,
         allScored: unscored === 0, maxCompanyShare: ids.length ? +(max / ids.length).toFixed(3) : 0,
-        biggestCompany: maxCo + ' (' + max + ')', top,
+        biggestCompany: maxCo + ' (' + max + ')', statusCounts, matching, top,
       };
     } finally { db.close(); }
   }
@@ -231,7 +291,7 @@
   }
 
   const API = { DB_NAME, SCHEMA_VERSION, canonicalId, roleKey, openDb, upsertJobs, importNormalized,
-    migrateFromLegacy, count, getJob, setMeta, getMeta, excludeApplied, corpusSummary, gateReport, clearAll };
+    migrateFromLegacy, count, getAll, updateState, getJob, setMeta, getMeta, excludeApplied, corpusSummary, gateReport, clearAll };
 
   if (root) root.PJAIdb = API;                                   // service worker: self.PJAIdb
   if (typeof module !== 'undefined' && module.exports) module.exports = API; // node: require
