@@ -905,6 +905,28 @@ function pjaFillViaReactFiber(input, value, key) {
 // lists (open+select works). School fetches options from typed input — react-
 // select won't fetch from a programmatic set, so school is best-effort here and
 // only fills if its options are already present.
+// Module-scope trusted-click helper: clicks an element via CDP (isTrusted) with a synthetic
+// fallback. Shared so pjaFillCombobox can commit react-select options too — previously cdpClickEl
+// was local to pjaFillGreenhouseEducation, so pjaFillCombobox's usage threw "cdpClickEl is not
+// defined", aborting the candidate-location commit.
+function pjaCdpClickEl(el) {
+  return new Promise(resolve => {
+    el.scrollIntoView({ block: 'center', behavior: 'instant' });
+    const r = el.getBoundingClientRect();
+    const x = r.left + r.width / 2, y = r.top + r.height / 2;
+    let done = false;
+    const fallback = () => { ['mousedown', 'mouseup', 'click'].forEach(t => el.dispatchEvent(new MouseEvent(t, { bubbles: true, cancelable: true, button: 0 }))); };
+    const t = setTimeout(() => { if (!done) { done = true; fallback(); resolve('synthetic-timeout'); } }, 3000);
+    try {
+      chrome.runtime.sendMessage({ type: 'LINKEDIN_TRUSTED_CLICK', x, y }, (resp) => {
+        if (done) return; done = true; clearTimeout(t);
+        if (chrome.runtime.lastError || resp?.error) { fallback(); resolve('synthetic-fail'); }
+        else resolve('cdp');
+      });
+    } catch (_) { if (!done) { done = true; clearTimeout(t); fallback(); resolve('synthetic-catch'); } }
+  });
+}
+
 async function pjaFillGreenhouseEducation(profile) {
   if (!/greenhouse\.io/i.test(location.hostname)) return;
   const sleep = ms => new Promise(r => setTimeout(r, ms));
@@ -1153,7 +1175,7 @@ function pjaFillCombobox(input, value, key) {
           // (that was clicking "Afghanistan" from a stale country listbox).
           match = opts.find(o => (o.textContent || '').toLowerCase().includes(cityOnly.toLowerCase())) || null;
         }
-        if (match) { await cdpClickEl(match); await _sleep(350); }
+        if (match) { await pjaCdpClickEl(match); await _sleep(350); }
       }
       try { chrome.storage.local.get('pja_dbg', d => { const a=(d.pja_dbg||[]).slice(-160); a.push('[loc] candidate-location committed='+committed()+' val="'+String(input.value||'').slice(0,24)+'"'); chrome.storage.local.set({pja_dbg:a}); }); } catch(_){}
     });

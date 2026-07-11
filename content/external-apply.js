@@ -561,10 +561,12 @@
     // AI round-trip never calling back). On timeout we log and proceed — findMissingRequired then
     // catches anything still empty → missing_required (fast), instead of burning the 7-min watchdog.
     const phaseLog = m => { try { chrome.storage.local.get('pja_dbg', d => { const a = (d.pja_dbg || []).slice(-39); a.push('[phase] ' + m); chrome.storage.local.set({ pja_dbg: a }); }); } catch (_) {} };
-    const withTimeout = (p, ms, label) => Promise.race([
-      Promise.resolve(p).then(() => phaseLog(label + ' done')).catch(e => phaseLog(label + ' err ' + ((e && e.message) || e))),
-      new Promise(res => setTimeout(() => { phaseLog(label + ' TIMEOUT ' + ms + 'ms'); res(); }, ms)),
-    ]);
+    const withTimeout = (p, ms, label) => {
+      let to;
+      const timeout = new Promise(res => { to = setTimeout(() => { phaseLog(label + ' TIMEOUT ' + ms + 'ms'); res(); }, ms); });
+      const wrapped = Promise.resolve(p).then(() => phaseLog(label + ' done')).catch(e => phaseLog(label + ' err ' + ((e && e.message) || e))).finally(() => clearTimeout(to));
+      return Promise.race([wrapped, timeout]);
+    };
 
     // --- Fill all form fields ---
     await new Promise(r => chrome.storage.local.get('pja_dbg', d => {
