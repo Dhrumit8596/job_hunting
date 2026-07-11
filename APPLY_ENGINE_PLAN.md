@@ -184,23 +184,30 @@ progress (applied / skipped / needs-manual), and a **needs-manual queue** the us
 
 ---
 
-## 4. Autonomy model — no interactive pauses; blockers auto-skip (decided)
+## 4. Autonomy model — automate everything, incl. account creation (decided)
 
-The run is **fully autonomous / no human-in-the-loop**: it does not pause and wait for the user.
-Instead, anything that would require a human becomes an **auto-skip → `needs_manual`** (deferred for
-later), and the driver moves on. This keeps a batch running unattended while never doing anything
-unsafe:
-- **CAPTCHA / bot-check** → **skip → `needs_manual`** (never auto-solved).
-- **Account creation / password** beyond the Workday plus-address auto-signin → **skip → `needs_login`**
-  (never auto-creates accounts or types passwords).
-- **SSO/OAuth consent** → **skip → `needs_manual`**.
+The run is **fully autonomous / no human-in-the-loop** and automates as much as possible, including
+**account creation and sign-in**, generalizing the pattern that already works for Workday.
+
+**Automated (built into the strategy registry):**
+- **Account creation** on any ATS that requires it: generate a **plus-addressed email**
+  (`<base>+<tenant>@gmail.com`), fill it + the user's **stored `pja_job_password`**
+  (`settings.js`), submit, then run the **Gmail email-verification loop** (`workday-auth.js`
+  `runGmailVerify` → open Gmail tab → scrape the confirm link → resume). This is exactly the Workday
+  flow (`workday-auth.js` `runCreateAccount`/`detectScreen`) promoted into the shared registry so
+  iCIMS/Taleo/SuccessFactors/Jobvite/etc. create accounts the same way.
+- **Sign-in / password fill / email verification** — autonomous, from stored config.
+- **Fill + submit** on standard ATS forms — autonomous auto-submit.
+
+**Auto-skip → deferred (not paused, not forced):**
+- **CAPTCHA / bot-detection** → **skip → `needs_manual`.** Never auto-solved — see §8.
 - **Repeated fill/submit failure on a job** → after N attempts, **skip → `needs_manual`** and continue
   (the user's rule: "if it keeps failing we can skip and keep it for later"). A per-job attempt
-  counter in `pja_job_state` drives this; deferred jobs are retryable in a later run.
-- Everything else (fill + submit on standard ATS forms) proceeds and auto-submits.
+  counter in `pja_job_state` drives this; deferred jobs are retried in a later run.
+- **Genuinely stuck auth** (a portal whose account flow the strategy can't complete) → `needs_login`.
 
-A `needs_manual` / `needs_login` bucket collects everything skipped, so nothing is lost — it's a
-review queue the user can finish by hand whenever, and re-runs retry them.
+A `needs_manual` / `needs_login` bucket collects everything deferred, so nothing is lost — a small
+review queue the user finishes by hand, and re-runs retry it automatically.
 
 ---
 
@@ -242,9 +249,19 @@ review queue the user can finish by hand whenever, and re-runs retry them.
    Resume parsing (NEW-3) is **deferred**.
 5. **Daily volume cap:** not specified — default to a soft numeric counter (~30/day, tunable) to look
    human and respect LinkedIn; easy to change.
+6. **Account creation:** ✅ **Automated** (decided 2026-07-11) — plus-addressed Gmail + stored
+   `pja_job_password` + Gmail verification loop, generalized from the working Workday flow to all ATS
+   strategies. Sign-in, password fill, and email verification are all autonomous.
 
-## 8. Safety note (hard constraints, independent of autonomy)
+## 8. Safety boundary (only one, and why)
 
-Even fully autonomous, the driver must **never**: solve CAPTCHAs, create accounts, or type passwords
-(beyond the existing Workday plus-address auto-signin that requires no password entry). These are
-auto-skipped to `needs_manual`, not automated — this is a fixed safety boundary, not a tunable.
+The single thing the driver never does — even fully autonomous — is **auto-solve CAPTCHAs / bypass
+bot-detection**. That is deliberate bot-detection evasion: it violates ATS terms of service and, in
+practice, is the fastest way to get an **account flagged and banned** — which would destroy the
+accounts the driver just created and void the applications. So a CAPTCHA defers the job to
+`needs_manual` (the user clears it by hand in seconds) and the run continues.
+
+Notes on credentials: passwords come **only** from the user's own stored `pja_job_password`
+(chrome.storage, gitignored) — the driver fills that value, it never generates or exfiltrates
+credentials. During live verification the **extension** performs account creation/sign-in autonomously
+(the code under test); the assistant drives only the dev-server and observes.
