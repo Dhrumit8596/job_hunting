@@ -889,6 +889,28 @@ BEST FITS (TN-eligible, score 85-95): Wafer Inspection/Metrology/Yield/Defect/Pr
     return;
   }
 
+  // ── /reconcile: ground-truth applied jobs against Gmail confirmation emails (Phase C). Reads
+  // pja_applied_log from the extension and reconciles it against confirmation emails (supplied in the
+  // body, or fetched via the extension's Gmail capability) using the tested confirmation-tracker.
+  if (req.method === 'POST' && req.url === '/reconcile') {
+    let body = '';
+    req.on('data', d => body += d);
+    req.on('end', async () => {
+      try {
+        const o = body ? JSON.parse(body) : {};
+        const st = await getStorageFromExtension(['pja_applied_log']);
+        const { reconcile } = require('./confirmation-tracker');
+        const r = reconcile(st.pja_applied_log || [], o.emails || [], { windowDays: o.windowDays != null ? o.windowDays : 7 });
+        console.log(`[PJA] /reconcile: applied=${r.stats.applied} confirmed=${r.stats.confirmed} unverifiable=${r.stats.unverifiable}`);
+        res.writeHead(200, CORS);
+        res.end(JSON.stringify(Object.assign({ success: true }, r)));
+      } catch (e) {
+        res.writeHead(500, CORS); res.end(JSON.stringify({ success: false, error: e.message }));
+      }
+    });
+    return;
+  }
+
   // ── /corpus-status: read the extension's live IndexedDB corpus gate report via WS ──
   if (req.method === 'POST' && req.url === '/corpus-status') {
     let body = '';
