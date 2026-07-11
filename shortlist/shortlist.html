@@ -31,6 +31,12 @@
     <div class="stat"><span id="stat-skipped">0</span><label>Skipped</label></div>
   </div>
 
+  <!-- Job corpus banner (IndexedDB source of truth; populated by /source-v2) -->
+  <div id="corpus-banner" style="display:none; margin:8px 0; padding:10px 14px; border-radius:8px; background:#eef2ff; border:1px solid #c7d2fe; display:none; align-items:center; justify-content:space-between; gap:12px;">
+    <span id="corpus-summary" style="font-size:13px; color:#3730a3;"></span>
+    <button class="btn btn-outline" id="btn-load-corpus">Load top 200 into review</button>
+  </div>
+
   <!-- Filter tabs -->
   <div class="filter-tabs">
     <button class="filter-tab active" data-filter="pending">Pending Review</button>

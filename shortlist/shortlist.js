@@ -317,5 +317,31 @@ chrome.storage.onChanged.addListener((changes) => {
   }
 });
 
+// ── Job corpus (IndexedDB) read-path ──────────────────────────────────────────
+// The corpus is the source of truth for sourced jobs. Show a banner with its size and let the
+// user pull the top-N into the review list (merged, preserving any existing statuses).
+function loadCorpusBanner() {
+  chrome.runtime.sendMessage({ type: 'GET_JOB_CORPUS', topN: 200 }, (resp) => {
+    if (chrome.runtime.lastError || !resp || resp.error || !resp.count) return;
+    const banner = document.getElementById('corpus-banner');
+    const summary = document.getElementById('corpus-summary');
+    if (!banner || !summary) return;
+    summary.textContent = `🗂️ Corpus: ${resp.count} jobs across ${resp.distinctCompanies} companies (${(resp.modalities || []).join(' + ')})`;
+    banner.style.display = 'flex';
+    document.getElementById('btn-load-corpus')?.addEventListener('click', () => {
+      const existing = new Map(allJobs.map(j => [j.id, j]));
+      for (const j of resp.jobs || []) {
+        if (existing.has(j.id)) continue; // preserve in-progress status
+        existing.set(j.id, { id: j.id, title: j.title, company: j.company, location: j.location,
+          applyUrl: j.applyUrl, ats: j.ats, fitScore: j.fitScore, status: 'pending', source: 'corpus' });
+      }
+      allJobs = dedupeById(Array.from(existing.values()));
+      _savingLocally = true;
+      chrome.storage.local.set({ pja_shortlist: allJobs }, () => { _savingLocally = false; render(); });
+    }, { once: true });
+  });
+}
+
 // ── Init ──────────────────────────────────────────────────────────────────────
 load();
+loadCorpusBanner();

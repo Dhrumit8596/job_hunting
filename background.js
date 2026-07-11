@@ -1,5 +1,9 @@
 'use strict';
 
+// Load the IndexedDB job corpus module into the SW global scope (self.PJAIdb). Wrapped so a
+// load failure can never brick the whole service worker.
+try { importScripts('idb-store.js'); } catch (e) { console.error('PJA: idb-store load failed', e); }
+
 // ── Dev mode ──────────────────────────────────────────────────────────────────
 // Set DEV_MODE = true to route all analysis through the local dev server.
 // Run: node dev-server.js   (uses your ANTHROPIC_API_KEY env var)
@@ -24,6 +28,27 @@ chrome.storage.local.get('pja_answers', r => {
     if (!answers[k]) { answers[k] = v; changed = true; }
   }
   if (changed) chrome.storage.local.set({ pja_answers: answers });
+});
+
+// ── Job corpus (IndexedDB) helpers ────────────────────────────────────────────
+// Ingest a normalized {index,state} payload (from dev-server /source-v2) into the IndexedDB
+// corpus (source of truth) and publish a small count for the review UI. Does NOT overwrite
+// pja_shortlist — the shortlist page pulls from the corpus explicitly (GET_JOB_CORPUS).
+async function pjaIngestCorpus(index, state) {
+  if (!self.PJAIdb) return 0;
+  await self.PJAIdb.importNormalized({ index: index || {}, state: state || {} });
+  const s = await self.PJAIdb.corpusSummary({ topN: 0 });
+  await new Promise(r => chrome.storage.local.set({ pja_job_corpus_count: s.count, pja_schema_version: 1 }, r));
+  return s.count;
+}
+
+// One-time migration: fold legacy whole-blob arrays (pja_shortlist / pja_jobs) into the corpus so
+// nothing is lost when the corpus becomes the source of truth. Idempotent; gated by pja_schema_version.
+chrome.storage.local.get(['pja_schema_version', 'pja_shortlist', 'pja_jobs'], r => {
+  if ((r.pja_schema_version || 0) >= 1 || !self.PJAIdb) return;
+  self.PJAIdb.migrateFromLegacy({ pja_shortlist: r.pja_shortlist, pja_jobs: r.pja_jobs })
+    .then(n => { console.log('PJA: migrated', n, 'legacy jobs into IDB corpus'); chrome.storage.local.set({ pja_schema_version: 1 }); })
+    .catch(e => console.error('PJA: corpus migration failed', e));
 });
 
 // ── Dev hot-reload: WebSocket connection to dev-server ────────────────────
@@ -60,10 +85,24 @@ if (DEV_MODE) {
             const msg = JSON.parse(event.data);
             if (msg.cmd === 'setStorage') {
               chrome.storage.local.set(msg.data, () => console.log('PJA: storage set via WS:', Object.keys(msg.data)));
+              // A /source-v2 payload carries the normalized corpus — ingest it into IndexedDB.
+              if (msg.data && msg.data.pja_job_index) {
+                pjaIngestCorpus(msg.data.pja_job_index, msg.data.pja_job_state || {})
+                  .then(n => console.log('PJA: corpus ingested', n, 'jobs'))
+                  .catch(e => console.error('PJA: corpus ingest failed', e));
+              }
             } else if (msg.cmd === 'getStorage') {
               chrome.storage.local.get(msg.keys, data => {
                 _wsReloadSocket.send(JSON.stringify({ cmd: 'storageReply', reqId: msg.reqId, data }));
               });
+            } else if (msg.cmd === 'getCorpus') {
+              // Read the IndexedDB corpus gate report back to the dev-server (/corpus-status).
+              (async () => {
+                let data = { count: 0 };
+                try { if (self.PJAIdb) data = await self.PJAIdb.gateReport({ target: msg.target || 200 }); }
+                catch (e) { data = { error: e.message }; }
+                _wsReloadSocket.send(JSON.stringify({ cmd: 'corpusReply', reqId: msg.reqId, data }));
+              })();
             } else if (msg.cmd === 'openTab') {
               chrome.tabs.create({ url: msg.url });
             } else if (msg.cmd === 'startEasyApply') {
@@ -1898,6 +1937,18 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
 
   if (msg.type === 'GET_SHORTLIST') {
     chrome.storage.local.get('pja_shortlist', r => sendResponse({ jobs: r.pja_shortlist || [] }));
+    return true;
+  }
+
+  // Read the IndexedDB job corpus (source of truth) for the shortlist review page.
+  if (msg.type === 'GET_JOB_CORPUS') {
+    (async () => {
+      try {
+        if (!self.PJAIdb) return sendResponse({ count: 0, jobs: [] });
+        const s = await self.PJAIdb.corpusSummary({ topN: msg.topN || 25 });
+        sendResponse({ count: s.count, distinctCompanies: s.distinctCompanies, modalities: s.modalities, jobs: s.top });
+      } catch (e) { sendResponse({ error: e.message }); }
+    })();
     return true;
   }
 

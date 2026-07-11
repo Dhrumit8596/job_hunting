@@ -5,10 +5,23 @@
 require('fake-indexeddb/auto');
 const path = require('path');
 const idb = require(path.resolve(__dirname, '../../idb-store'));
-const { roleKey } = require(path.resolve(__dirname, '../../sourcing/jobid'));
+const jobid = require(path.resolve(__dirname, '../../sourcing/jobid'));
+const { roleKey } = jobid;
 const { makeJob } = require(path.resolve(__dirname, '../../sourcing/normalize'));
 
 module.exports = async (t) => {
+  // parity: idb-store inlines canonicalId/roleKey — they MUST match sourcing/jobid exactly,
+  // else the corpus and the source-run would dedup on different keys.
+  const samples = [
+    { ats: 'greenhouse', id: 42, company: 'Acme Co', title: 'Process Engineer' },
+    { ats: 'Remotive', id: 'r-9', company: 'Beta, Inc.', title: 'Quality  Engineer' },
+    { company: 'NoId Corp', title: 'Metrology Engineer' },
+  ];
+  for (const s of samples) {
+    t.eq(idb.canonicalId(s), jobid.canonicalId(s), 'parity: canonicalId matches jobid (' + (s.ats || 'noats') + ')');
+    t.eq(idb.roleKey(s), jobid.roleKey(s), 'parity: roleKey matches jobid');
+  }
+
   await idb.clearAll();
 
   // 2,500 distinct roles across 50 companies (=> 2% max concentration) via PER-RECORD writes.

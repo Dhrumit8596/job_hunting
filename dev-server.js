@@ -806,6 +806,34 @@ BEST FITS (TN-eligible, score 85-95): Wafer Inspection/Metrology/Yield/Defect/Pr
     return;
   }
 
+  // ── /corpus-status: read the extension's live IndexedDB corpus gate report via WS ──
+  if (req.method === 'POST' && req.url === '/corpus-status') {
+    let body = '';
+    req.on('data', d => body += d);
+    req.on('end', () => {
+      try {
+        const o = body ? JSON.parse(body) : {};
+        const reqId = Date.now() + '_' + Math.random().toString(36).slice(2, 6);
+        let responded = false;
+        const client = [...wsClients].find(c => c.readyState === 1);
+        if (!client) { res.writeHead(503, CORS); res.end(JSON.stringify({ error: 'no extension connected' })); return; }
+        const onMsg = raw => {
+          try {
+            const msg = JSON.parse(raw);
+            if (msg.cmd === 'corpusReply' && msg.reqId === reqId && !responded) {
+              responded = true; client.removeListener('message', onMsg);
+              res.writeHead(200, CORS); res.end(JSON.stringify({ ok: true, corpus: msg.data }));
+            }
+          } catch (_) {}
+        };
+        client.on('message', onMsg);
+        client.send(JSON.stringify({ cmd: 'getCorpus', target: o.target || 200, reqId }));
+        setTimeout(() => { if (!responded) { responded = true; client.removeListener('message', onMsg); res.writeHead(504, CORS); res.end(JSON.stringify({ error: 'timeout' })); } }, 5000);
+      } catch (e) { res.writeHead(400, CORS); res.end(JSON.stringify({ error: e.message })); }
+    });
+    return;
+  }
+
   // ── /outreach: generate DM + email for an approved job ────────────────────
   if (req.method === 'POST' && req.url === '/outreach') {
     let body = '';

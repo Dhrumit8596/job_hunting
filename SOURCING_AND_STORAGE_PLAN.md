@@ -163,10 +163,26 @@ node dev-server.js  &   node test/live-verify.js
 -> all 6 checks pass · IndexedDB corpus = 1260 · applied-role exclusion confirmed (2-pass) · exit 0
 ```
 
-**One honest caveat (production hardening, NOT part of the gate):** `idb-store.js` is CommonJS for
-Node testing. To run inside the actual Chrome MV3 service worker it needs a browser build (inline
-`canonicalId`/`roleKey`, drop `require`/`module.exports`). When the **real** extension connects,
-`/source-v2` already writes `pja_job_index`/`pja_job_state` to `chrome.storage` (background.js has a
-`setStorage` handler) and the same `curl` verify passes against real extension storage; wiring the
-in-browser IndexedDB import + the legacy `pja_shortlist`→corpus migration (behind `pja_schema_version`)
-is the remaining packaging step.
+### Real-extension live verification — PASSED (2026-07-10)
+
+`idb-store.js` is now a **UMD module**: `require`-able in Node (tests) AND loaded into the MV3 service
+worker via `importScripts('idb-store.js')` → `self.PJAIdb`. Verified against the **actual Chrome
+extension** (woke the SW via a Greenhouse page, reloaded to load the new code, ran the flow):
+
+```
+/source-v2      -> SW ingested 1105 jobs into REAL IndexedDB (self.PJAIdb.importNormalized), gate pass
+/corpus-status  -> read back from REAL IndexedDB via the new getCorpus handler:
+                   {1105 unique, [api-registry,discovery], allScored, 5.1% concentration, pass:true}
+/get-storage    -> pja_job_corpus_count=1105, pja_schema_version=1 (pjaIngestCorpus + migration ran)
+```
+
+**Extension-side wiring shipped (all live-verified):**
+- `background.js`: `importScripts('idb-store.js')`; `setStorage` of `pja_job_index` → `pjaIngestCorpus`
+  (IndexedDB import); startup **migration** of legacy `pja_shortlist`/`pja_jobs` → corpus behind
+  `pja_schema_version`; WS `getCorpus` command; `GET_JOB_CORPUS` runtime handler.
+- `dev-server.js`: `/corpus-status` (reads the live extension IDB gate report).
+- `shortlist/`: corpus banner + "Load top 200 into review" (reads corpus via `GET_JOB_CORPUS`, merges
+  into `pja_shortlist` preserving in-progress statuses). *(Data path verified via `/corpus-status`;
+  visual banner confirmation needs the user — `chrome-extension://` pages can't be automated.)*
+
+**Result: all 6 gate criteria satisfied in the real extension. Branch is mergeable-and-useful.**

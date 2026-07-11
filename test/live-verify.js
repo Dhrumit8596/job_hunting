@@ -41,6 +41,11 @@ function connectClient() {
           try { await idb.clearAll(); await idb.importNormalized({ index: msg.data.pja_job_index, state: msg.data.pja_job_state || {} }); }
           catch (e) { console.error('idb import failed:', e.message); }
         }
+      } else if (msg.cmd === 'getCorpus') {
+        // Mirrors the extension's background.js getCorpus handler: reply with the IDB gate report.
+        let data = { count: 0 };
+        try { data = await idb.gateReport({ target: msg.target || 200 }); } catch (e) { data = { error: e.message }; }
+        ws.send(JSON.stringify({ cmd: 'corpusReply', reqId: msg.reqId, data }));
       }
     });
   });
@@ -90,6 +95,10 @@ function checkGate(label, index, state, applied) {
   const c1 = checkGate('LIVE VERIFY (pass 1)', idx1, st1, []);
   const idbCount = await idb.count();
   console.log('\n  IndexedDB corpus count:', idbCount, idbCount >= 200 ? '✅ (corpus persisted to IDB)' : '❌');
+
+  // /corpus-status reads the corpus back through the WS getCorpus path (same path background.js uses)
+  const cs = await post('/corpus-status', { target: 200 });
+  console.log('  /corpus-status gate ->', JSON.stringify(cs.corpus), cs.corpus && cs.corpus.pass ? '✅' : '❌');
 
   const topId = Object.keys(idx1).sort((a, b) => (st1[b].fitScore || 0) - (st1[a].fitScore || 0))[0];
   const topRole = { company: idx1[topId].company, title: idx1[topId].title };
