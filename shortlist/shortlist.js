@@ -326,7 +326,15 @@ function loadCorpusBanner() {
     const banner = document.getElementById('corpus-banner');
     const summary = document.getElementById('corpus-summary');
     if (!banner || !summary) return;
-    summary.textContent = `🗂️ Corpus: ${resp.count} jobs across ${resp.distinctCompanies} companies (${(resp.modalities || []).join(' + ')})`;
+    const sc = resp.statusCounts || {};
+    const statusBits = [];
+    if (resp.matching != null) statusBits.push(`${resp.matching} matching (≥70)`);
+    if (sc.applied) statusBits.push(`✅ ${sc.applied} applied`);
+    if (sc.needs_manual) statusBits.push(`✋ ${sc.needs_manual} needs-manual`);
+    if (sc.needs_login) statusBits.push(`🔒 ${sc.needs_login} needs-login`);
+    if (sc.dead) statusBits.push(`⚰️ ${sc.dead} dead`);
+    summary.textContent = `🗂️ Corpus: ${resp.count} jobs · ${resp.distinctCompanies} companies (${(resp.modalities || []).join(' + ')})`
+      + (statusBits.length ? ' — ' + statusBits.join(' · ') : '');
     banner.style.display = 'flex';
     document.getElementById('btn-load-corpus')?.addEventListener('click', () => {
       const existing = new Map(allJobs.map(j => [j.id, j]));

@@ -69,6 +69,11 @@ module.exports = async (t) => {
   t.eq(g.concentrationOk, true, 'idb-gate: concentration <=25%');
   t.eq(g.pass, true, 'idb-gate: PASS at 2,000+ on real IndexedDB');
 
+  // Phase E: corpusSummary status breakdown + matching count
+  const sum = await idb.corpusSummary({ topN: 3, matchThreshold: 60 });
+  t.ok(sum.statusCounts && sum.statusCounts.sourced > 0, 'corpusSummary: statusCounts.sourced present');
+  t.ok(sum.matching >= 2000, 'corpusSummary: matching count at threshold 60 (all fit>=60)');
+
   // schemaVersion recorded via importNormalized path
   await idb.setMeta('schemaVersion', idb.SCHEMA_VERSION);
   t.eq(await idb.getMeta('schemaVersion'), idb.SCHEMA_VERSION, 'idb: schemaVersion persisted');

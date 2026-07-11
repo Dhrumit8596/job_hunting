@@ -219,27 +219,34 @@
         cur.onerror = () => rej(cur.error);
       });
       const ids = Object.keys(postings);
-      const modalities = {}, companies = {};
-      let unscored = 0;
+      const modalities = {}, companies = {}, statusCounts = {};
+      const matchThreshold = opts.matchThreshold != null ? opts.matchThreshold : 70;
+      let unscored = 0, matching = 0;
       for (const id of ids) {
         modalities[postings[id].modality] = (modalities[postings[id].modality] || 0) + 1;
         const co = (postings[id].company || '?').toLowerCase().trim();
         companies[co] = (companies[co] || 0) + 1;
-        if (!states[id] || states[id].fitScore == null) unscored++;
+        const stt = states[id] || {};
+        if (stt.fitScore == null) unscored++;
+        const status = stt.status || 'sourced';
+        statusCounts[status] = (statusCounts[status] || 0) + 1;
+        if (stt.fitScore != null && Number(stt.fitScore) >= matchThreshold) matching++;
       }
       let max = 0, maxCo = '';
       for (const c in companies) if (companies[c] > max) { max = companies[c]; maxCo = c; }
-      const top = ids
+      let ranked = ids
         .map(id => ({ id, company: postings[id].company, title: postings[id].title, location: postings[id].location,
           applyUrl: postings[id].applyUrl, ats: postings[id].ats, modality: postings[id].modality,
-          fitScore: states[id] ? states[id].fitScore : null, status: states[id] ? states[id].status : 'sourced' }))
-        .sort((a, b) => (b.fitScore || 0) - (a.fitScore || 0))
-        .slice(0, topN);
+          fitScore: states[id] ? states[id].fitScore : null, status: (states[id] && states[id].status) || 'sourced',
+          reason: states[id] ? states[id].reason : undefined }))
+        .sort((a, b) => (b.fitScore || 0) - (a.fitScore || 0));
+      if (opts.statusFilter) ranked = ranked.filter(j => j.status === opts.statusFilter);
+      const top = ranked.slice(0, topN);
       return {
         count: ids.length, distinctCompanies: Object.keys(companies).length,
         modalities: Object.keys(modalities), modalityCounts: modalities,
         allScored: unscored === 0, maxCompanyShare: ids.length ? +(max / ids.length).toFixed(3) : 0,
-        biggestCompany: maxCo + ' (' + max + ')', top,
+        biggestCompany: maxCo + ' (' + max + ')', statusCounts, matching, top,
       };
     } finally { db.close(); }
   }

@@ -2004,8 +2004,9 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     (async () => {
       try {
         if (!self.PJAIdb) return sendResponse({ count: 0, jobs: [] });
-        const s = await self.PJAIdb.corpusSummary({ topN: msg.topN || 25 });
-        sendResponse({ count: s.count, distinctCompanies: s.distinctCompanies, modalities: s.modalities, jobs: s.top });
+        const s = await self.PJAIdb.corpusSummary({ topN: msg.topN || 25, statusFilter: msg.statusFilter, matchThreshold: msg.matchThreshold });
+        sendResponse({ count: s.count, distinctCompanies: s.distinctCompanies, modalities: s.modalities,
+          statusCounts: s.statusCounts, matching: s.matching, jobs: s.top });
       } catch (e) { sendResponse({ error: e.message }); }
     })();
     return true;
