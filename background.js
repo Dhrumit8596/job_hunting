@@ -55,10 +55,63 @@ async function pjaBuildApplySet(opts) {
   const set = self.PJAApplySelect.buildApplySet(corpus, {
     threshold: opts && opts.threshold != null ? opts.threshold : 70,
     dailyCap: opts && opts.dailyCap != null ? opts.dailyCap : 30,
+    atsAllow: opts && opts.atsAllow,
     appliedRoleKeys,
   });
   return { jobs: set, total: Object.keys(corpus.index).length };
 }
+
+// Service-worker apply watchdog: the content-script setTimeout watchdog is throttled on backgrounded
+// tabs (MV3), so a job stuck in a single-page hang (e.g. a react-select that never commits) can block
+// the whole queue. This runs on a chrome.alarm (wakes the SW) and force-advances a job that's been
+// the active one past the hard cap — marks it needs_manual, closes its hung tab, opens the next job.
+async function pjaApplyWatchdogTick() {
+  if (!self.PJAApplySelect) return;
+  const d = await new Promise(r => chrome.storage.local.get(['pja_ext_queue', 'pja_apply_wd'], r));
+  const q = d.pja_ext_queue;
+  const now = Date.now();
+  const dec = self.PJAApplySelect.watchdogDecision(q, d.pja_apply_wd, now, {});
+  if (dec.action === 'idle' || dec.action === 'wait') return;
+  if (dec.action === 'reset') { await new Promise(r => chrome.storage.local.set({ pja_apply_wd: dec.wd }, r)); return; }
+  // action === 'advance' → the active job has been stuck past the cap; force the queue forward.
+  const idx = dec.idx;
+  const job = (q.jobs || [])[idx];
+  if (!job) return;
+  if (!q.results || Array.isArray(q.results)) q.results = { applied: [], skipped: [] };
+  q.results.skipped.push({ ...job, skipReason: 'stuck_watchdog' });
+  try {
+    if (self.PJAIdb && job.id) {
+      const st = self.PJAApplySelect.resultToState('stuck_budget', 0);
+      await self.PJAIdb.updateState(job.id, { status: st.status, reason: 'stuck_watchdog', attempts: st.attempts });
+    }
+  } catch (_) {}
+  q.currentIndex = idx + 1;
+  const nextJob = (q.jobs || [])[q.currentIndex];
+  if (q.currentIndex >= (q.jobs || []).length) q.status = 'done';
+  const writeObj = { pja_ext_queue: q, pja_apply_wd: { runId: q.runId, idx: q.currentIndex, startedAt: now } };
+  if (nextJob && nextJob.applyUrl) {
+    writeObj.pja_ext_current = Object.assign({}, nextJob, { returnUrl: 'https://www.linkedin.com/jobs/', runId: q.runId });
+    writeObj.pja_navigate_to = nextJob.applyUrl;
+  }
+  await new Promise(r => chrome.storage.local.set(writeObj, r));
+  console.log('PJA apply-watchdog: force-advanced stuck job', job.company, '→ idx', q.currentIndex, q.status);
+  // Close the hung tab(s) for the stuck job (match its applyUrl prefix so we don't close siblings).
+  try {
+    const tabs = await new Promise(r => chrome.tabs.query({}, r));
+    for (const t of tabs) { if (t.url && job.applyUrl && (t.url === job.applyUrl || t.url.indexOf(job.applyUrl) === 0)) chrome.tabs.remove(t.id).catch(() => {}); }
+  } catch (_) {}
+  if (nextJob && nextJob.applyUrl) { try { chrome.tabs.create({ url: nextJob.applyUrl }); } catch (_) {} }
+  try {
+    fetch('http://localhost:6174/queue-status', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ status: q.status, currentIndex: q.currentIndex, total: (q.jobs || []).length, watchdog: 'force-advanced ' + job.company, ts: new Date().toISOString() }) }).catch(() => {});
+  } catch (_) {}
+}
+
+// Poll the apply watchdog on an alarm (wakes the SW even when idle; not throttled like a bg tab).
+try {
+  chrome.alarms.create('pja_apply_watchdog', { periodInMinutes: 1 });
+  chrome.alarms.onAlarm.addListener(a => { if (a.name === 'pja_apply_watchdog') pjaApplyWatchdogTick().catch(() => {}); });
+} catch (e) { console.error('PJA: apply-watchdog alarm setup failed', e); }
 
 // One-time migration: fold legacy whole-blob arrays (pja_shortlist / pja_jobs) into the corpus so
 // nothing is lost when the corpus becomes the source of truth. Idempotent; gated by pja_schema_version.

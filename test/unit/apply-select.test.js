@@ -2,7 +2,7 @@
 // Phase B core: apply-set selection gating + result→state mapping + pool-cleared summary.
 const path = require('path');
 require(path.resolve(__dirname, '../../sourcing/detect-ats'));
-const { buildApplySet, resultToState, poolStatus, roleKey, exceededBudget } = require(path.resolve(__dirname, '../../sourcing/apply-select'));
+const { buildApplySet, resultToState, poolStatus, roleKey, exceededBudget, watchdogDecision } = require(path.resolve(__dirname, '../../sourcing/apply-select'));
 
 function corpus(entries) {
   const index = {}, state = {};
@@ -89,6 +89,16 @@ module.exports = (t) => {
   t.eq(exceededBudget({ firstSeen: 1000, loads: 5 }, 1000 + 1000), true, 'over load budget (5 loads > 4)');
   t.eq(exceededBudget({ firstSeen: 1000, loads: 2 }, 1000 + 10000, { budgetMs: 5000 }), true, 'custom budgetMs honored');
   t.eq(exceededBudget({ firstSeen: 1000, loads: 10 }, 1000 + 1000, { maxLoads: 20 }), false, 'custom maxLoads honored');
+
+  // --- watchdogDecision (SW-side force-advance) ---
+  const Q = { status: 'applying', currentIndex: 2, runId: 'r1', jobs: [1, 2, 3, 4] };
+  t.eq(watchdogDecision({ status: 'done' }, {}, 1000).action, 'idle', 'wd: not applying → idle');
+  t.eq(watchdogDecision(Q, {}, 1000).action, 'reset', 'wd: no tracker → reset');
+  t.eq(watchdogDecision(Q, { runId: 'r1', idx: 1, startedAt: 1000 }, 2000).action, 'reset', 'wd: idx changed → reset');
+  t.eq(watchdogDecision(Q, { runId: 'r0', idx: 2, startedAt: 1000 }, 2000).action, 'reset', 'wd: runId changed → reset');
+  t.eq(watchdogDecision(Q, { runId: 'r1', idx: 2, startedAt: 1000 }, 1000 + 60000).action, 'wait', 'wd: within cap → wait');
+  t.eq(watchdogDecision(Q, { runId: 'r1', idx: 2, startedAt: 1000 }, 1000 + 400000).action, 'advance', 'wd: past 5-min cap → advance');
+  t.eq(watchdogDecision(Q, { runId: 'r1', idx: 2, startedAt: 1000 }, 1000 + 20000, { capMs: 10000 }).action, 'advance', 'wd: custom cap honored');
 
   // --- poolStatus ---
   const ps = poolStatus(c, { threshold: 70 });

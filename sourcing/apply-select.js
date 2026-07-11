@@ -78,6 +78,20 @@
     return (now - (entry.firstSeen || now)) > budgetMs || (entry.loads || 0) > maxLoads;
   }
 
+  // Service-worker watchdog decision (pure). The content-script setTimeout watchdog is unreliable on
+  // backgrounded tabs (MV3 throttling), so the SW polls this on a chrome.alarm. Given the queue, the
+  // last-seen tracker `wd` ({runId, idx, startedAt}), and now, it decides whether to reset the timer
+  // (new job/run), keep waiting, or force-advance a job that's been stuck past the cap.
+  function watchdogDecision(queue, wd, now, opts = {}) {
+    const capMs = opts.capMs != null ? opts.capMs : 300000; // 5 min hard cap per job
+    if (!queue || queue.status !== 'applying') return { action: 'idle' };
+    const idx = queue.currentIndex || 0;
+    wd = wd || {};
+    if (wd.runId !== queue.runId || wd.idx !== idx) return { action: 'reset', wd: { runId: queue.runId, idx, startedAt: now } };
+    if (now - (wd.startedAt || now) < capMs) return { action: 'wait' };
+    return { action: 'advance', idx };
+  }
+
   // Result reason (from external-apply.js recordResult) → next corpus state.
   const APPLIED = new Set(['applied']);
   const DEAD = new Set(['posting_not_found']);
@@ -120,7 +134,7 @@
     return counts;
   }
 
-  const API = { buildApplySet, resultToState, poolStatus, roleKey, exceededBudget };
+  const API = { buildApplySet, resultToState, poolStatus, roleKey, exceededBudget, watchdogDecision };
   if (root) root.PJAApplySelect = API;
   if (typeof module !== 'undefined' && module.exports) module.exports = API;
 })(typeof self !== 'undefined' ? self : (typeof globalThis !== 'undefined' ? globalThis : this));
