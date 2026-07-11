@@ -2,7 +2,7 @@
 // Phase B core: apply-set selection gating + result→state mapping + pool-cleared summary.
 const path = require('path');
 require(path.resolve(__dirname, '../../sourcing/detect-ats'));
-const { buildApplySet, resultToState, poolStatus, roleKey } = require(path.resolve(__dirname, '../../sourcing/apply-select'));
+const { buildApplySet, resultToState, poolStatus, roleKey, exceededBudget } = require(path.resolve(__dirname, '../../sourcing/apply-select'));
 
 function corpus(entries) {
   const index = {}, state = {};
@@ -50,15 +50,30 @@ module.exports = (t) => {
   // daily cap
   t.eq(buildApplySet(c, { threshold: 70, dailyCap: 1 }).length, 1, 'daily cap limits set size');
 
+  // atsAllow: hard restrict to no-account ATSes (supervised-trial safety guarantee)
+  const allow = buildApplySet(c, { threshold: 70, atsAllow: ['greenhouse'] });
+  t.eq(allow.every(j => j.strategy === 'greenhouse'), true, 'atsAllow=[greenhouse] keeps only greenhouse');
+  t.ok(allow.length >= 1, 'atsAllow still returns greenhouse jobs');
+  t.eq(buildApplySet(c, { threshold: 70, atsAllow: ['workday'] }).some(j => j.strategy !== 'workday'), false, 'atsAllow=[workday] excludes all non-workday');
+
   // --- resultToState ---
   t.eq(resultToState('applied', 0).status, 'applied', 'applied → applied');
   t.eq(resultToState('posting_not_found', 0).status, 'dead', 'posting_not_found → dead');
   t.eq(resultToState('needs_login', 0).status, 'needs_login', 'needs_login → needs_login');
   t.eq(resultToState('workday_captcha', 0).status, 'needs_manual', 'captcha → needs_manual (never solved)');
+  t.eq(resultToState('stuck_budget', 0).status, 'needs_manual', 'stuck_budget → needs_manual (unbounded stall deferred)');
   t.eq(resultToState('missing_required', 0).status, 'sourced', 'transient first fail → stays sourced (retry)');
   t.eq(resultToState('missing_required', 0).retry, true, 'transient marks retry');
   t.eq(resultToState('missing_required', 2, 3).status, 'needs_manual', 'transient at maxAttempts → needs_manual');
   t.eq(resultToState('submit_unclear', 1, 3).attempts, 2, 'attempts increments');
+
+  // --- exceededBudget (cross-reload stall guard) ---
+  t.eq(exceededBudget(null, 1000), false, 'no entry → not exceeded');
+  t.eq(exceededBudget({ firstSeen: 1000, loads: 1 }, 1000 + 60000), false, 'within budget (1 min, 1 load)');
+  t.eq(exceededBudget({ firstSeen: 1000, loads: 1 }, 1000 + 300000), true, 'over wall-clock budget (5 min > 4)');
+  t.eq(exceededBudget({ firstSeen: 1000, loads: 5 }, 1000 + 1000), true, 'over load budget (5 loads > 4)');
+  t.eq(exceededBudget({ firstSeen: 1000, loads: 2 }, 1000 + 10000, { budgetMs: 5000 }), true, 'custom budgetMs honored');
+  t.eq(exceededBudget({ firstSeen: 1000, loads: 10 }, 1000 + 1000, { maxLoads: 20 }), false, 'custom maxLoads honored');
 
   // --- poolStatus ---
   const ps = poolStatus(c, { threshold: 70 });

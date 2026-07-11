@@ -23,6 +23,10 @@
     const dailyCap = opts.dailyCap != null ? opts.dailyCap : 30;
     const maxAttempts = opts.maxAttempts != null ? opts.maxAttempts : 3;
     const retryDeferred = opts.retryDeferred !== false;
+    // Optional allow-list of ATS strategies (e.g. no-account ATSes for a supervised trial). When set,
+    // only jobs whose detected strategy is in the list are eligible — a hard guarantee the run can't
+    // touch an account-creation ATS.
+    const atsAllow = opts.atsAllow && opts.atsAllow.length ? new Set(opts.atsAllow.map(x => String(x).toLowerCase())) : null;
     const applied = opts.appliedRoleKeys instanceof Set ? opts.appliedRoleKeys : new Set(opts.appliedRoleKeys || []);
     const index = (corpus && corpus.index) || {};
     const state = (corpus && corpus.state) || {};
@@ -40,14 +44,27 @@
       if (deferred && (!retryDeferred || (st.attempts || 0) >= maxAttempts)) continue;
       if (!deferred && status !== 'sourced') continue;               // in-flight/unknown → skip
       if (!p.applyUrl) continue;                                     // nothing to open
+      const strategy = detectAts(p.applyUrl) || p.detectedAts || p.ats || '';
+      if (atsAllow && !atsAllow.has(String(strategy).toLowerCase())) continue; // outside the allow-list
       out.push({
         id, applyUrl: p.applyUrl, company: p.company, title: p.title, location: p.location,
-        ats: p.ats || '', fitScore: Number(fit), attempts: st.attempts || 0,
-        strategy: detectAts(p.applyUrl) || p.detectedAts || p.ats || '',
+        ats: p.ats || '', fitScore: Number(fit), attempts: st.attempts || 0, strategy,
       });
     }
     out.sort((a, b) => (b.fitScore || 0) - (a.fitScore || 0));
     return dailyCap > 0 ? out.slice(0, dailyCap) : out;
+  }
+
+  // Persistent per-job budget: the setTimeout watchdog is reset by page reloads, so a job that
+  // reload-loops (e.g. a required react-select that never commits) never hits it and blocks the whole
+  // batch. external-apply tracks {firstSeen, loads} per job in storage (survives reloads) and calls
+  // this each time the apply page loads; when the wall-clock budget or reload count is exceeded, the
+  // job is deferred to needs_manual and the queue advances. Pure so it's unit-tested.
+  function exceededBudget(entry, now, opts = {}) {
+    if (!entry) return false;
+    const budgetMs = opts.budgetMs != null ? opts.budgetMs : 240000; // 4 min wall-clock across reloads
+    const maxLoads = opts.maxLoads != null ? opts.maxLoads : 4;
+    return (now - (entry.firstSeen || now)) > budgetMs || (entry.loads || 0) > maxLoads;
   }
 
   // Result reason (from external-apply.js recordResult) → next corpus state.
@@ -55,7 +72,8 @@
   const DEAD = new Set(['posting_not_found']);
   const NEEDS_LOGIN = new Set(['needs_login', 'google_sso_only', 'workday_account_locked']);
   // Blocked by something a human must clear (never auto-solved) — defer immediately, don't retry-spin.
-  const NEEDS_MANUAL = new Set(['workday_captcha', 'captcha', 'chatbot_apply_manual', 'ready_to_submit_review']);
+  // stuck_budget = exceeded the cross-reload wall-clock/load budget (unbounded stall) → defer.
+  const NEEDS_MANUAL = new Set(['workday_captcha', 'captcha', 'chatbot_apply_manual', 'ready_to_submit_review', 'stuck_budget']);
 
   // Everything else (missing_required, submit_unclear, no_submit_btn, apply_btn_no_form,
   // watchdog_timeout, no_apply_btn_on_description, no_submit_after_spa, workday_auth_*) is TRANSIENT:
@@ -91,7 +109,7 @@
     return counts;
   }
 
-  const API = { buildApplySet, resultToState, poolStatus, roleKey };
+  const API = { buildApplySet, resultToState, poolStatus, roleKey, exceededBudget };
   if (root) root.PJAApplySelect = API;
   if (typeof module !== 'undefined' && module.exports) module.exports = API;
 })(typeof self !== 'undefined' ? self : (typeof globalThis !== 'undefined' ? globalThis : this));

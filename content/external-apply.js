@@ -169,6 +169,35 @@
       try { recordResult(job, { success: false, reason: 'watchdog_timeout' }).then(() => navigateBack(job), () => navigateBack(job)); }
       catch (_) { try { navigateBack(job); } catch (__) {} }
     }, 420000);
+
+    // Persistent cross-reload budget: the setTimeout watchdog above is reset every time the page
+    // reloads, so a job that reload-loops (e.g. a required react-select that never commits, like the
+    // Greenhouse country/degree remix selects) never hits it and blocks the whole batch. Track
+    // {firstSeen, loads} per job in storage (survives reloads); when the wall-clock budget or reload
+    // count is exceeded, defer this job to needs_manual and advance so the batch keeps moving.
+    try {
+      const clockKey = (job.runId || 'norun') + '::' + (job.id || job.applyUrl || job.company || 'job');
+      const now = Date.now();
+      const clock = await new Promise(r => chrome.storage.local.get('pja_ext_jobclock', d => r(d.pja_ext_jobclock || {})));
+      // prune stale entries (>6h) so the map can't grow unbounded across runs
+      for (const k of Object.keys(clock)) { if (now - (clock[k].firstSeen || now) > 21600000) delete clock[k]; }
+      const entry = clock[clockKey] || { firstSeen: now, loads: 0 };
+      entry.loads += 1;
+      clock[clockKey] = entry;
+      await new Promise(r => chrome.storage.local.set({ pja_ext_jobclock: clock }, r));
+      const overBudget = (typeof window.PJAApplySelect !== 'undefined' && window.PJAApplySelect.exceededBudget)
+        ? window.PJAApplySelect.exceededBudget(entry, now, {})
+        : (now - entry.firstSeen > 240000 || entry.loads > 4);
+      if (overBudget) {
+        try { chrome.runtime.sendMessage({ type: 'PJA_APPLY_OUTCOME', outcome: { filled: true, submitted: false, reactSelectError: true }, applyUrl: job.applyUrl }); } catch (_) {}
+        const detail = entry.loads > 4 ? entry.loads + ' loads' : Math.round((now - entry.firstSeen) / 1000) + 's';
+        console.log('PJA ext-apply: stuck_budget exceeded (' + detail + ') — deferring', job.company);
+        await recordResult(job, { success: false, reason: 'stuck_budget', fields: ['budget:' + detail] });
+        navigateBack(job);
+        return;
+      }
+    } catch (_) {}
+
     await sleep(1500); // let dynamic forms settle
 
     // Fall back to stored profile/answers if the job object doesn't include them
