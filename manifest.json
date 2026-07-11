@@ -66,6 +66,8 @@
         "content/extractors/indeed.js",
         "content/extractors/glassdoor.js",
         "content/extractors/generic.js",
+        "sourcing/detect-ats.js",
+        "content/apply-router.js",
         "content/autofill.js",
         "content/workday-auth.js",
         "content/auto-apply.js",
@@ -80,7 +82,7 @@
     },
     {
       "matches": ["<all_urls>"],
-      "js": ["content/external-apply.js"],
+      "js": ["sourcing/detect-ats.js", "content/apply-router.js", "content/external-apply.js"],
       "run_at": "document_idle",
       "all_frames": false,
       "exclude_matches": [

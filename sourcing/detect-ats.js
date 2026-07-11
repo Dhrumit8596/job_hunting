@@ -1,65 +1,54 @@
 'use strict';
-// Detect which ATS an apply/careers URL belongs to, from its host. This is what lets the
-// discovery layer (keyword search across employers) route an arbitrary result into the right
-// adapter/apply-channel instead of being stuck to the hand-curated slug registry.
+// Detect which ATS an apply/careers URL belongs to, from its host. This is what lets the apply
+// dispatcher (content/apply-router.js) pick the right apply strategy, and the discovery layer route
+// a keyword-search result into the right adapter.
+//
+// UMD: require-able in Node (sourcing adapters, tests) AND usable in content scripts via
+// globalThis.PJADetectAts (manifest loads this file before apply-router.js).
+(function (root) {
+  // host substring -> ats name. First substring match wins.
+  const HOST_MAP = [
+    ['greenhouse.io', 'greenhouse'],
+    ['lever.co', 'lever'],
+    ['ashbyhq.com', 'ashby'],
+    ['myworkdayjobs.com', 'workday'],
+    ['workday.com', 'workday'],
+    ['smartrecruiters.com', 'smartrecruiters'],
+    ['icims.com', 'icims'],
+    ['taleo.net', 'taleo'],
+    ['jobvite.com', 'jobvite'],
+    ['bamboohr.com', 'bamboohr'],
+    ['paylocity.com', 'paylocity'],
+    ['rippling.com', 'rippling'],
+    ['workable.com', 'workable'],
+    ['breezy.hr', 'breezy'],
+    ['successfactors.com', 'successfactors'],
+    ['jobs.jobvite.com', 'jobvite'],
+  ];
 
-// host substring -> ats name. Order doesn't matter; first match wins on a substring test.
-const HOST_MAP = [
-  ['greenhouse.io', 'greenhouse'],
-  ['lever.co', 'lever'],
-  ['ashbyhq.com', 'ashby'],
-  ['myworkdayjobs.com', 'workday'],
-  ['workday.com', 'workday'],
-  ['smartrecruiters.com', 'smartrecruiters'],
-  ['icims.com', 'icims'],
-  ['taleo.net', 'taleo'],
-  ['jobvite.com', 'jobvite'],
-  ['bamboohr.com', 'bamboohr'],
-  ['paylocity.com', 'paylocity'],
-  ['rippling.com', 'rippling'],
-  ['workable.com', 'workable'],
-  ['breezy.hr', 'breezy'],
-  ['successfactors.com', 'successfactors'],
-  ['jobs.jobvite.com', 'jobvite'],
-];
+  // Returns the ats name, or '' if the host isn't a recognized ATS (company careers page / aggregator
+  // landing page → the caller falls back to a DOM sniff, then the generic strategy).
+  function detectAts(url) {
+    let host = '';
+    try { host = new URL(String(url || '')).hostname.toLowerCase(); }
+    catch (_) { return ''; }
+    if (!host) return '';
+    for (const [needle, ats] of HOST_MAP) if (host.includes(needle)) return ats;
+    return '';
+  }
 
-// Returns the ats name, or '' if the host isn't a recognized ATS (e.g. a company's own careers
-// page or an aggregator landing page — those fall through to the generic career-page reader).
-function detectAts(url) {
-  let host = '';
-  try { host = new URL(String(url || '')).hostname.toLowerCase(); }
-  catch (_) { return ''; }
-  if (!host) return '';
-  for (const [needle, ats] of HOST_MAP) {
-    if (host.includes(needle)) return ats;
+  // Best-effort board slug from a known ATS URL (used by discovery to auto-register a source).
+  function detectSlug(url, ats) {
+    let u;
+    try { u = new URL(String(url || '')); } catch (_) { return ''; }
+    const parts = u.pathname.split('/').filter(Boolean);
+    const host = u.hostname.toLowerCase();
+    if (ats === 'greenhouse' || ats === 'lever' || ats === 'ashby') return parts[0] || '';
+    if (ats === 'workday') return host.split('.')[0] || '';
+    return '';
   }
-  return '';
-}
 
-// Try to extract the ATS board slug from a known ATS URL (best-effort; used by discovery to
-// auto-register a source). Returns '' when it can't confidently parse one.
-function detectSlug(url, ats) {
-  let u;
-  try { u = new URL(String(url || '')); } catch (_) { return ''; }
-  const parts = u.pathname.split('/').filter(Boolean);
-  const host = u.hostname.toLowerCase();
-  if (ats === 'greenhouse') {
-    // job-boards.greenhouse.io/<slug>/jobs/123  OR  boards.greenhouse.io/<slug>/...
-    return parts[0] || '';
-  }
-  if (ats === 'lever') {
-    // jobs.lever.co/<slug>/<uuid>
-    return parts[0] || '';
-  }
-  if (ats === 'ashby') {
-    // jobs.ashbyhq.com/<slug>/<uuid>
-    return parts[0] || '';
-  }
-  if (ats === 'workday') {
-    // <tenant>.wdN.myworkdayjobs.com/<site> — tenant is the subdomain
-    return host.split('.')[0] || '';
-  }
-  return '';
-}
-
-module.exports = { detectAts, detectSlug, HOST_MAP };
+  const API = { detectAts, detectSlug, HOST_MAP };
+  if (root) root.PJADetectAts = API;
+  if (typeof module !== 'undefined' && module.exports) module.exports = API;
+})(typeof self !== 'undefined' ? self : (typeof globalThis !== 'undefined' ? globalThis : this));
