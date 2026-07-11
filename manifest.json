@@ -69,6 +69,7 @@
         "sourcing/detect-ats.js",
         "content/apply-router.js",
         "content/apply-preflight.js",
+        "content/apply-account.js",
         "content/autofill.js",
         "content/workday-auth.js",
         "content/auto-apply.js",
