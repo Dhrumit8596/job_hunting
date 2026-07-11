@@ -17,6 +17,7 @@
     "ws": "^8.21.0"
   },
   "devDependencies": {
+    "fake-indexeddb": "^6.2.5",
     "jsdom": "^22.1.0"
   }
 }
