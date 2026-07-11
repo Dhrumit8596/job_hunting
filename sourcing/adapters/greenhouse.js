@@ -6,12 +6,22 @@ const { makeJob } = require('../normalize');
 const ATS = 'greenhouse';
 
 function normalize(raw, source) {
+  // Prefer the canonical Greenhouse-hosted application form over raw.absolute_url. When a company
+  // embeds Greenhouse on its own domain, absolute_url is the CAREERS/landing page (e.g.
+  // corcept.com/careers?gh_jid=<id> or psiquantum.com/apply?gh_jid=<id>) which doesn't expose the
+  // form — the apply engine then finds no form / no apply button. The job-boards.greenhouse.io URL
+  // (built from the board slug + job id) always renders the application form. Fall back to
+  // absolute_url only if we somehow lack a slug or id.
+  const slug = source && source.slug;
+  const applyUrl = (slug && raw.id != null)
+    ? `https://job-boards.greenhouse.io/${slug}/jobs/${raw.id}`
+    : raw.absolute_url;
   return makeJob({
     id: raw.id,
     title: raw.title,
     company: source.name || source.slug,
     location: raw.location && raw.location.name,
-    applyUrl: raw.absolute_url,
+    applyUrl,
     ats: ATS,
     postedAt: raw.updated_at || raw.first_published || '',
   });
