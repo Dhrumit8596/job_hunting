@@ -52,7 +52,18 @@
       });
     }
     out.sort((a, b) => (b.fitScore || 0) - (a.fitScore || 0));
-    return dailyCap > 0 ? out.slice(0, dailyCap) : out;
+    // Per-company cap so a batch spans multiple employers instead of stacking one company (e.g.
+    // PsiQuantum ×4). Default 2 → a 10-job run covers 5+ companies. perCompanyCap<=0 disables it.
+    const perCompanyCap = opts.perCompanyCap != null ? opts.perCompanyCap : 2;
+    const picked = [], perCo = {};
+    for (const j of out) {
+      if (dailyCap > 0 && picked.length >= dailyCap) break;
+      const co = norm(j.company);
+      if (perCompanyCap > 0 && (perCo[co] || 0) >= perCompanyCap) continue;
+      perCo[co] = (perCo[co] || 0) + 1;
+      picked.push(j);
+    }
+    return picked;
   }
 
   // Persistent per-job budget: the setTimeout watchdog is reset by page reloads, so a job that

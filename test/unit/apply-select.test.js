@@ -50,6 +50,21 @@ module.exports = (t) => {
   // daily cap
   t.eq(buildApplySet(c, { threshold: 70, dailyCap: 1 }).length, 1, 'daily cap limits set size');
 
+  // per-company cap → batch spans multiple employers (no stacking one company)
+  const conc = corpus([
+    { id: 'g:1', company: 'PsiQ', title: 'Process Engineer A', applyUrl: 'https://boards.greenhouse.io/psiq/jobs/1', fit: 80 },
+    { id: 'g:2', company: 'PsiQ', title: 'Process Engineer B', applyUrl: 'https://boards.greenhouse.io/psiq/jobs/2', fit: 79 },
+    { id: 'g:3', company: 'PsiQ', title: 'Process Engineer C', applyUrl: 'https://boards.greenhouse.io/psiq/jobs/3', fit: 78 },
+    { id: 'g:4', company: 'PsiQ', title: 'Process Engineer D', applyUrl: 'https://boards.greenhouse.io/psiq/jobs/4', fit: 77 },
+    { id: 'g:5', company: 'Beta', title: 'Quality Engineer', applyUrl: 'https://boards.greenhouse.io/beta/jobs/5', fit: 76 },
+    { id: 'g:6', company: 'Gamma', title: 'Metrology Engineer', applyUrl: 'https://boards.greenhouse.io/gamma/jobs/6', fit: 75 },
+  ]);
+  const capped = buildApplySet(conc, { threshold: 70, dailyCap: 4, perCompanyCap: 2 });
+  const psiqCount = capped.filter(j => j.company === 'PsiQ').length;
+  t.eq(psiqCount, 2, 'per-company cap: at most 2 from PsiQ');
+  t.ok(new Set(capped.map(j => j.company)).size >= 3, 'per-company cap: batch spans multiple companies');
+  t.eq(buildApplySet(conc, { threshold: 70, dailyCap: 10, perCompanyCap: 0 }).filter(j => j.company === 'PsiQ').length, 4, 'perCompanyCap=0 disables the cap');
+
   // atsAllow: hard restrict to no-account ATSes (supervised-trial safety guarantee)
   const allow = buildApplySet(c, { threshold: 70, atsAllow: ['greenhouse'] });
   t.eq(allow.every(j => j.strategy === 'greenhouse'), true, 'atsAllow=[greenhouse] keeps only greenhouse');
