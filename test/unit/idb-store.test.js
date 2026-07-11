@@ -69,6 +69,17 @@ module.exports = async (t) => {
   t.eq(g.concentrationOk, true, 'idb-gate: concentration <=25%');
   t.eq(g.pass, true, 'idb-gate: PASS at 2,000+ on real IndexedDB');
 
+  // importNormalized preserves apply-progress across a re-source (idempotency)
+  await idb.updateState('greenhouse:7', { status: 'applied', appliedAt: 111 });
+  const imp = await idb.importNormalized({
+    index: { 'greenhouse:7': { id: 'greenhouse:7', company: 'Co7', title: 'Process Engineer 7', roleKey: 'co7::process engineer 7', modality: 'api-registry' } },
+    state: { 'greenhouse:7': { fitScore: 80, status: 'sourced' } },
+  });
+  t.ok(imp.preserved >= 1, 'importNormalized reports preserved count');
+  const j7b = await idb.getJob('greenhouse:7');
+  t.eq(j7b.state.status, 'applied', 'importNormalized preserves applied status across re-source (not reset to sourced)');
+  t.eq(j7b.state.fitScore, 80, 'importNormalized still refreshes fitScore while preserving status');
+
   // Phase E: corpusSummary status breakdown + matching count
   const sum = await idb.corpusSummary({ topN: 3, matchThreshold: 60 });
   t.ok(sum.statusCounts && sum.statusCounts.sourced > 0, 'corpusSummary: statusCounts.sourced present');

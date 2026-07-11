@@ -556,6 +556,16 @@
       }
     }
 
+    // Phase logger + per-step timeout so NO single fill sub-step can hang the whole apply. The
+    // Antora watchdog_timeout was an unbounded await in a fill sub-step (e.g. pjaFillUnknownTextFields'
+    // AI round-trip never calling back). On timeout we log and proceed — findMissingRequired then
+    // catches anything still empty → missing_required (fast), instead of burning the 7-min watchdog.
+    const phaseLog = m => { try { chrome.storage.local.get('pja_dbg', d => { const a = (d.pja_dbg || []).slice(-39); a.push('[phase] ' + m); chrome.storage.local.set({ pja_dbg: a }); }); } catch (_) {} };
+    const withTimeout = (p, ms, label) => Promise.race([
+      Promise.resolve(p).then(() => phaseLog(label + ' done')).catch(e => phaseLog(label + ' err ' + ((e && e.message) || e))),
+      new Promise(res => setTimeout(() => { phaseLog(label + ' TIMEOUT ' + ms + 'ms'); res(); }, ms)),
+    ]);
+
     // --- Fill all form fields ---
     await new Promise(r => chrome.storage.local.get('pja_dbg', d => {
       const arr = (d.pja_dbg || []).slice(-19);
@@ -566,7 +576,7 @@
       window._pjaComboChain = Promise.resolve(); // reset sequential combobox queue
       pjaFillForm(profile, answers);
       // Await sequential combobox fills (each takes up to ~550ms; 8 comboboxes ≈ 4.4s max)
-      if (window._pjaComboChain) await window._pjaComboChain;
+      if (window._pjaComboChain) await withTimeout(window._pjaComboChain, 30000, 'comboChain1');
       await sleep(300);
       // Phone retry: fill any still-empty phone fields (uses label-classification, not just type/id)
       retryPhoneFill(profile);
@@ -577,31 +587,32 @@
       await sleep(800);
       window._pjaComboChain = Promise.resolve();
       pjaFillForm(profile, answers);
-      if (window._pjaComboChain) await window._pjaComboChain;
+      if (window._pjaComboChain) await withTimeout(window._pjaComboChain, 30000, 'comboChain2');
       await sleep(300);
       // Greenhouse Education react-selects render late + ignore programmatic sets —
       // dedicated late pass (degree/discipline reliable; school best-effort).
       try { chrome.storage.local.get('pja_dbg', d => { const a=(d.pja_dbg||[]).slice(-40); a.push('[gh-edu] call reached, typeof='+(typeof pjaFillGreenhouseEducation)+' host='+location.hostname); chrome.storage.local.set({pja_dbg:a}); }); } catch(_){}
       if (typeof pjaFillGreenhouseEducation === 'function') {
-        try { await pjaFillGreenhouseEducation(profile); } catch(e) { try { chrome.storage.local.get('pja_dbg', d => { const a=(d.pja_dbg||[]).slice(-40); a.push('[gh-edu] ERROR '+(e.message||e)); chrome.storage.local.set({pja_dbg:a}); }); } catch(_){} }
+        await withTimeout(pjaFillGreenhouseEducation(profile), 45000, 'gh-edu');
       }
     }
 
     // --- AI-fill open-ended required questions not in profile/answer bank ---
     if (typeof pjaFillUnknownTextFields === 'function') {
       const jobCtx = { title: job.title || '', company: job.company || '' };
-      await new Promise(resolve => pjaFillUnknownTextFields(profile, answers, jobCtx, () => resolve()));
+      // Bounded: the AI answerer makes dev-server round-trips; if one hangs, don't stall the apply.
+      await withTimeout(new Promise(resolve => pjaFillUnknownTextFields(profile, answers, jobCtx, () => resolve())), 120000, 'ai-answerer');
       await sleep(300);
     }
 
     // --- Best-effort resume upload ---
-    await tryInjectResume(profile, answers);
+    await withTimeout(tryInjectResume(profile, answers), 90000, 'resume');
 
     // --- Workday Application Questions (formField-* dropdowns) ---
-    await pjaFillWorkdayAppQuestions(profile);
+    await withTimeout(pjaFillWorkdayAppQuestions(profile), 45000, 'wd-appq');
 
     // --- Workday Work Experience subsection (My Experience step) ---
-    await pjaFillWorkdayWorkExperience(profile);
+    await withTimeout(pjaFillWorkdayWorkExperience(profile), 45000, 'wd-workexp');
 
     // --- Fallback fills ---
     if (typeof pjaFillRequiredRadioFallback === 'function') pjaFillRequiredRadioFallback();

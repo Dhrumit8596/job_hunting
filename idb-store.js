@@ -91,21 +91,41 @@
     } finally { db.close(); }
   }
 
-  // Import an in-memory {index, state} map (from a source-run) into IDB, per-record.
+  // Import an in-memory {index, state} map (from a source-run) into IDB, per-record. Re-sourcing
+  // refreshes the posting + fitScore but PRESERVES apply-progress: a job already applied /
+  // needs_manual / needs_login / dead keeps that status (and attempts/reason/appliedAt) so re-runs
+  // are idempotent and a re-source can't silently reset a completed job back to 'sourced'.
   async function importNormalized(store) {
     const db = await openDb();
     try {
+      // read existing state first (separate txn) so we can merge progress
+      const existing = {};
+      await new Promise((res, rej) => {
+        const cur = db.transaction('state', 'readonly').objectStore('state').openCursor();
+        cur.onsuccess = () => { const c = cur.result; if (!c) return res(); existing[c.value.id] = c.value; c.continue(); };
+        cur.onerror = () => rej(cur.error);
+      });
       const t = db.transaction(['index', 'state'], 'readwrite');
       const idxS = t.objectStore('index'), stS = t.objectStore('state');
-      let n = 0;
+      let n = 0, preserved = 0;
       for (const id of Object.keys(store.index || {})) {
         idxS.put(store.index[id]);
-        stS.put(Object.assign({ id }, store.state && store.state[id] ? store.state[id] : { status: 'sourced', fitScore: null }));
+        const incoming = (store.state && store.state[id]) || { status: 'sourced', fitScore: null };
+        const prev = existing[id];
+        let merged;
+        if (prev && prev.status && prev.status !== 'sourced') {
+          // keep apply progress; refresh fitScore from the new source run
+          merged = Object.assign({}, prev, { id, fitScore: incoming.fitScore != null ? incoming.fitScore : prev.fitScore });
+          preserved++;
+        } else {
+          merged = Object.assign({ id }, incoming);
+        }
+        stS.put(merged);
         n++;
       }
       await txDone(t);
       await setMeta('schemaVersion', SCHEMA_VERSION);
-      return n;
+      return { imported: n, preserved };
     } finally { db.close(); }
   }
 
