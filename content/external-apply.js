@@ -728,7 +728,7 @@
         hardMissing = findMissingRequired().filter(m => m.type !== 'wd_selectinput');
         // Still-missing required fields → answer them with AI (profile + resume + prefs), then re-check.
         if (hardMissing.length) {
-          await pjaAnswerRequiredViaAI(job);
+          await withTimeout(pjaAnswerRequiredViaAI(job), 120000, 'answerer-step');
           await sleep(600);
           hardMissing = findMissingRequired().filter(m => m.type !== 'wd_selectinput');
         }
@@ -1023,7 +1023,9 @@
     // scan catches those, and the answerer early-returns when nothing is empty — so this is
     // safe for ATSes that had nothing missing. Without it, those questions block submit silently.
     {
-      await pjaAnswerRequiredViaAI(job);
+      // Bounded: the post-fill answerer makes dev-server round-trips; unwrapped it could hang the
+      // whole job (observed on the embedded-iframe path) until the SW watchdog force-advanced it.
+      await withTimeout(pjaAnswerRequiredViaAI(job), 120000, 'answerer-postfill');
       await sleep(600);
       if (typeof pjaForceCountryField === "function") await pjaForceCountryField((job.profile && job.profile.country) || 'United States');
       if (typeof pjaForceAllPolicyReactSelects === 'function') { try { const pn = await pjaForceAllPolicyReactSelects(job.profile); if (pn) await addDbg('[policy-rs] post-AI committed n=' + pn); } catch (_) {} }
