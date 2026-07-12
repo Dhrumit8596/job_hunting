@@ -109,6 +109,46 @@
         "*://localhost/*",
         "*://127.0.0.1/*"
       ]
+    },
+    {
+      "_comment": "Embedded-ATS iframe support: companies embed the ATS form in a cross-origin iframe (e.g. job-boards.greenhouse.io/embed/job_app inside psiquantum.com/apply). all_frames:true + ATS-host matches injects the fill suite INTO that iframe so external-apply can fill/submit it. Narrow to ATS hosts so it doesn't run in every iframe on the web.",
+      "matches": [
+        "*://*.greenhouse.io/*",
+        "*://*.lever.co/*",
+        "*://*.ashbyhq.com/*",
+        "*://*.icims.com/*",
+        "*://*.myworkdayjobs.com/*",
+        "*://*.workday.com/*",
+        "*://*.jobvite.com/*",
+        "*://*.smartrecruiters.com/*",
+        "*://*.bamboohr.com/*"
+      ],
+      "js": [
+        "sourcing/detect-ats.js",
+        "sourcing/apply-select.js",
+        "content/apply-router.js",
+        "content/apply-preflight.js",
+        "content/apply-account.js",
+        "content/autofill.js",
+        "content/workday-auth.js",
+        "content/external-apply.js"
+      ],
+      "run_at": "document_idle",
+      "all_frames": true
+    },
+    {
+      "_comment": "fiber-main (MAIN world) into embedded ATS iframes too, so the react-select fiber bridge works inside the iframe form.",
+      "matches": [
+        "*://*.greenhouse.io/*",
+        "*://*.lever.co/*",
+        "*://*.ashbyhq.com/*",
+        "*://*.icims.com/*",
+        "*://*.myworkdayjobs.com/*"
+      ],
+      "js": ["content/fiber-main.js"],
+      "world": "MAIN",
+      "run_at": "document_start",
+      "all_frames": true
     }
   ],
   "action": {

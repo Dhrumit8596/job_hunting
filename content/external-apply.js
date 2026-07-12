@@ -32,8 +32,10 @@
   const ATS_PATTERNS = /greenhouse\.io|lever\.co|workday\.com|myworkdayjobs\.com|jobvite\.com|icims\.com|smartrecruiters\.com|ashbyhq\.com|bamboohr\.com|taleo\.net|applytojob\.com|jazz\.co|recruitee\.com|rippling\.com|successfactors\.com|smashfly\.com|phenom|randstadusa\.com|adecco\.com|manpowergroup\.com|manpower\.com|kellyjobs\.com|adeccousa\.com|heidrick\.com|experis\.com|roberthalf\.com|careers\.|careers\b|myworkday|apply\./i;
 
   // Recovery: if navigateBack stored a destination that survived a page redirect, navigate there now.
-  // This handles cases where an ATS page redirected before our setTimeout could fire.
+  // This handles cases where an ATS page redirected before our setTimeout could fire. Top frame only
+  // — an embedded ATS iframe must not self-navigate away from the form.
   try {
+    if (window.self !== window.top) throw new Error('skip-recovery-in-iframe');
     chrome.storage.local.get('pja_navigate_to', d => {
       const dest = d.pja_navigate_to;
       if (!dest) return;
@@ -53,6 +55,17 @@
     chrome.storage.local.get(['pja_ext_current', 'pja_answers', 'pja_ext_queue'], data => {
       // Never run on LinkedIn/Indeed/Glassdoor (those are handled by content.js)
       if (/linkedin\.com|indeed\.com|glassdoor\.com/i.test(location.hostname)) return;
+
+      // Frame coordination for embedded-ATS forms: many companies embed the ATS application form in
+      // a cross-origin iframe (e.g. job-boards.greenhouse.io/embed inside company.com/apply). With
+      // all_frames:true the fill suite runs in BOTH the top frame and the iframe. The IFRAME (an ATS
+      // host) has the actual form and handles it; the TOP frame should defer when it merely embeds an
+      // ATS iframe, so the two frames don't both process the same job.
+      const _inIframe = window.self !== window.top;
+      if (!_inIframe && !ATS_PATTERNS.test(location.hostname)) {
+        const atsFrame = document.querySelector('iframe[src*="greenhouse.io"],iframe[src*="lever.co"],iframe[src*="ashbyhq.com"],iframe[src*="icims.com"],iframe[src*="myworkdayjobs.com"],iframe[src*="workday.com"],iframe[src*="jobvite.com"],iframe[src*="smartrecruiters.com"]');
+        if (atsFrame) { console.log('PJA ext-apply: top frame embeds an ATS iframe — deferring to the iframe'); return; }
+      }
 
       const job = data.pja_ext_current;
       if (!job) { console.log('PJA ext-apply: no pja_ext_current, skipping'); return; }
@@ -2782,7 +2795,9 @@
             returnUrl: job.returnUrl || 'https://www.linkedin.com/jobs/search/?f_AL=true'
           };
           chrome.storage.local.set({ pja_ext_current: nextCurrent, pja_navigate_to: nextJob.applyUrl }, () => {
-            window.location.href = nextJob.applyUrl;
+            // window.top so that when we're inside an embedded ATS iframe, we navigate the whole tab
+            // to the next job (not just the iframe). Identical to window when not framed.
+            window.top.location.href = nextJob.applyUrl;
           });
           return;
         }
@@ -2796,7 +2811,7 @@
       } catch(e) {}
       // Don't store LinkedIn returnUrl in pja_navigate_to — that key is for ATS→ATS recovery only.
       // Storing it causes the next queue run's ATS page to immediately redirect back to LinkedIn.
-      chrome.storage.local.remove('pja_navigate_to', () => { window.location.href = url; });
+      chrome.storage.local.remove('pja_navigate_to', () => { window.top.location.href = url; });
     });
   }
 })();
