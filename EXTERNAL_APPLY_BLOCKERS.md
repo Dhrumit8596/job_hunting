@@ -79,6 +79,51 @@ adjacent country picker after the initial pass.
 
 ---
 
+## TIER 4 — known remaining form-fill gaps (backlog, fix later)
+
+Surfaced 2026-07-11 by re-classifying the 156 accumulated `pja_missing_questions` against
+everything now auto-answered (profile map + deterministic yes/no rules + EEO + AI essays +
+honest gap-skill answers). Most logged questions now auto-answer; these four buckets don't yet.
+Ordered by whether they're safe to close.
+
+### GAP 1 — Multi-select / "select all that apply" checklists — ⬜ TODO (fixable)
+The filler handles single-select and yes/no, but not multi-value pickers.
+- Examples: "Which of the following have you used professionally? (Select all that apply)",
+  project-count buckets ("1–3 / 4–10 / 10+ projects").
+- Fix: a `pjaFillMultiSelect()` that ticks each checkbox / multi-option that truthfully matches
+  the profile/skill list, leaves the rest unchecked. Must obey never-fabricate (only check what's
+  genuinely true). Route unmatched ones to `needs_manual`, don't guess.
+
+### GAP 2 — Date-picker fields (education / work history) — ⬜ TODO (fixable, needs data)
+`end date month*`, `end date year*`, start dates, and the education `discipline*` field are logged
+as unfilled.
+- Fix: pull structured dates from the résumé/`pja_resume` into the profile, and add a date-component
+  filler (month/year selects + typed date inputs). `DATE_COMPONENT_RE` currently *skips* these.
+- Note: `discipline*` also overlaps GAP 4 (it's a Greenhouse remix react-select that won't commit),
+  so filling the *value* isn't enough for those tenants until the commit blocker is solved.
+
+### GAP 3 — Experiential / knowledge gates for skills she genuinely lacks — ✅ WORKING AS INTENDED (do NOT "fix")
+Questions like "hands-on experience authoring GxP validation docs?", "automated tests with
+Playwright?", "previous SaMD/digital-health experience?", "bachelor's in biomedical/systems
+engineering?", "taken a Class-2 device from dev to large-scale manufacturing?".
+- These are answered **honestly (No / limited)** by the AI answerer. That is correct behavior —
+  answering Yes would fabricate qualifications and violate the never-fabricate-fit rule.
+- Listed here only so they're not mistaken for a bug. Leave as honest deferrals / honest No.
+
+### GAP 4 — Greenhouse "remix" react-select COMMIT (country / degree / discipline) — ⬜ OPEN (deep blocker)
+The one genuinely-unsolved technical blocker (see `project_apply_engine` memory +
+`project_combobox_blocker_round`). Value selection does not persist even in-iframe with CDP trusted
+clicks + fiber bridge on the "remix-css" react-selects. Embedded-remix-Greenhouse tenants
+(Corcept, PsiQuantum) currently defer cleanly to `needs_manual` (no hang). Not regressed — unsolved.
+
+### Noise to ignore
+The `pja_missing_questions` log also accumulates scraped UI fragments that aren't real questions
+("10x careers page", "HomeWorkMobile", "administrative area", ", I am an Active Employee",
+"Do you have more to add?"). A cleanup pass could filter these from the log, but they don't block
+anything.
+
+---
+
 ## What actually limits throughput now
 
 Not form-filling — the remaining constraints are external and per-service:
