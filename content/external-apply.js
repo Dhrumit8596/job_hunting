@@ -2307,6 +2307,28 @@
     if (/willing to (relocate|travel|commute)|able to[\s\S]{0,25}(relocate|commute|travel)|open to relocat|reliably commute|commute to /i.test(t)) return 'Yes';
     // Onsite / in-office ability — honest Yes: the candidate is Bay-Area-based and these roles are Bay Area.
     if (/able to (come|be|work|report) ?(on-?site|in.?office|in person)|come on-?site|on-?site as (required|needed)|work (on-?site|in.?office|in person)|report to (the )?office|commute to (the )?(office|site)/i.test(t)) return 'Yes';
+    // Shift schedules (swing/night/rotating/weekends) — candidate is open to any shift.
+    if (/shift schedule|swing shift|night shift|graveyard|rotating shift|able to work[\s\S]{0,15}shift|work[\s\S]{0,10}(nights|weekends)/i.test(t)) return 'Yes';
+    // Located-in / commutable — Bay-Area-based, can commute within NorCal/CA. Defer clearly-distant
+    // SoCal cities (no daily commute from the Bay Area) to the AI/needs_manual rather than fabricate.
+    if (/located in|currently (live|reside)|do you (live|reside)|commutable (distance|to)|within \d+ ?miles|reside (in|within)|based in|bay area/i.test(t)) {
+      if (/oxnard|rosemead|valencia|los angeles|\bl\.?a\.?\b|san diego|irvine|carlsbad|orange county|so ?cal|southern california/i.test(t)) return null;
+      return 'Yes';
+    }
+    // Years-of-experience gates: 3+ years in her CORE domain → Yes when N<=3; skills she LACKS → No;
+    // unknown domain → defer (null) so the honest AI answerer decides. Never claims a gap skill.
+    { const ym = t.match(/(\d+)\s*\+?\s*(?:or more\s*)?years?/i);
+      if (ym && /experience|exp\b/i.test(t)) {
+        if (/fmea|8d\b|iso ?13485|optical metrolog|\bpython\b|\bcad\b|solidworks|supplier audit|\bc\+\+\b|verilog/i.test(t)) return 'No';
+        if (/quality|manufactur|process|metrolog|wafer|inspection|semiconductor|\btest\b|reliability|equipment|clean ?room|thin film|yield|\bspc\b|\bgmp\b/i.test(t)) return parseInt(ym[1], 10) <= 3 ? 'Yes' : 'No';
+      }
+    }
+    // Conflict-of-interest / relatives at the company → No.
+    if (/friends or relatives|related to (an?|any)[\s\S]{0,30}(employee|customer)|immediate family[\s\S]{0,40}(employee|health care|use or prescribe)|conflict of interest|affiliated with a company that does business/i.test(t)) return 'No';
+    // US-person / citizenship (export-control framings) — honest No: TN status is not a US person.
+    if (/\bu\.?s\.? person\b|are you a (u\.?s\.? )?(citizen|national)\b|protected individual/i.test(t)) return 'No';
+    // Degree specifically in EE/ME — honest No (candidate's degree is Environmental Engineering).
+    if (/degree in (electrical|mechanical)|electrical or mechanical engineering|(b\.?s\.?|m\.?s\.?) in (electrical|mechanical)/i.test(t)) return 'No';
     if (/background check|drug (test|screen)/i.test(t)) return 'Yes';
     // Non-compete: honest No for a California-based candidate — CA Bus. & Prof. Code §16600 voids
     // non-compete agreements, so a CA applicant is not bound by an enforceable one.
