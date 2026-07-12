@@ -1618,8 +1618,13 @@
             let uploadConfirmed = false;
             // Also check in ancestor section for Lever (which shows filename outside ghSection)
             const confirmScope = ghSection.closest('section, .field, [class*="field"], [class*="question"], [class*="document"]') || ghSection;
-            for (let i = 0; i < 60; i++) {
-              await sleep(200);
+            for (let i = 0; i < 80; i++) {
+              await sleep(250);
+              // Direct signal: a file input now holds our file. Works even inside embedded iframes
+              // where the ATS's remove/filename UI affordances differ or render late.
+              const fi = (typeof pjaQueryAllExt === 'function' ? pjaQueryAllExt('input[type=file]') : Array.from(document.querySelectorAll('input[type=file]')))
+                .find(inp => inp.files && inp.files.length > 0);
+              if (fi) { console.log('PJA: resume attached (file present on input)'); uploadConfirmed = true; break; }
               // Remove/delete link (Greenhouse, Lever after upload)
               const removeBtn = confirmScope.querySelector(
                 'a[data-method="delete"], button[class*="remove"], a[class*="remove"], ' +
@@ -2282,6 +2287,11 @@
     if (/(personal )?website|portfolio\b|\bblog\b/.test(L)) return profile.website || null;
     if (/location.*\(?city|city.*location|current location|where are you (located|based)|your location|location \(city/.test(L))
       return profile.currentLocation || (profile.city ? (profile.city + (profile.state ? ', ' + profile.state : '')) : null);
+    // Recurring profile-mappable questions that kept deferring to needs_manual (pja_missing_questions):
+    if (/what state|which state|state (do you|you)[\s\S]{0,20}(live|reside|based)|state of residence|current state/.test(L)) return profile.state || null;
+    if (/\bzip\b|zip ?code|postal code/.test(L)) return profile.zip || null;
+    if (/\bcity\b (you|do you)[\s\S]{0,15}(live|reside)|what city|which city/.test(L)) return profile.city || null;
+    if (/highest (level of )?education|level of education|education (level|completed)|education you have (completed|attained)/.test(L)) return profile.degree || profile.education || null;
     return null;
   }
   if (typeof window !== 'undefined') window.pjaProfileFieldForLabel = pjaProfileFieldForLabel;
@@ -2294,7 +2304,7 @@
     if (/(now or have you ever|currently)[\s\S]{0,40}(employee|employed|worked? (for|at))/i.test(t)) return 'No';
     if (/worked (for|at)[\s\S]{0,30}(pricewaterhouse|pwc)/i.test(t)) return 'No';
     if (/\bat least 18\b|\bover 18\b|\b18 (years|or older)\b|are you 18/i.test(t)) return 'Yes';
-    if (/willing to (relocate|travel|commute)|able to (relocate|commute|travel)|open to relocat/i.test(t)) return 'Yes';
+    if (/willing to (relocate|travel|commute)|able to[\s\S]{0,25}(relocate|commute|travel)|open to relocat|reliably commute|commute to /i.test(t)) return 'Yes';
     // Onsite / in-office ability — honest Yes: the candidate is Bay-Area-based and these roles are Bay Area.
     if (/able to (come|be|work|report) ?(on-?site|in.?office|in person)|come on-?site|on-?site as (required|needed)|work (on-?site|in.?office|in person)|report to (the )?office|commute to (the )?(office|site)/i.test(t)) return 'Yes';
     if (/background check|drug (test|screen)/i.test(t)) return 'Yes';
