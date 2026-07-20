@@ -23,6 +23,7 @@
     lever:          { ats: 'lever',          engine: 'generic',   tier: 'partial',     needsAccount: false, multiStep: false, iframe: false },
     ashby:          { ats: 'ashby',          engine: 'generic',   tier: 'partial',     needsAccount: false, multiStep: false, iframe: false },
     smartrecruiters:{ ats: 'smartrecruiters',engine: 'generic',   tier: 'partial',     needsAccount: false, multiStep: false, iframe: false },
+    eightfold:      { ats: 'eightfold',      engine: 'generic',   tier: 'hard',        needsAccount: true,  multiStep: true,  iframe: false },
     icims:          { ats: 'icims',          engine: 'generic',   tier: 'hard',        needsAccount: true,  multiStep: true,  iframe: true  },
     taleo:          { ats: 'taleo',          engine: 'generic',   tier: 'hard',        needsAccount: true,  multiStep: true,  iframe: true  },
     successfactors: { ats: 'successfactors', engine: 'generic',   tier: 'hard',        needsAccount: true,  multiStep: true,  iframe: false },

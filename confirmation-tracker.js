@@ -39,29 +39,66 @@ function isConfirmationEmail(email) {
   return CONFIRM_RE.test(String(email.subject || '') + ' ' + String(email.snippet || ''));
 }
 
-// appliedLog: [{ company, title, ts?, status }]; emails: [{ from, subject, date?, company? }]
+function titleTokens(value) {
+  const noise = new Set(['senior','sr','junior','jr','lead','staff','principal','associate','engineer','engineering','manager','the','and','for']);
+  return normCo(value).split(' ').filter(x => x.length > 2 && !noise.has(x));
+}
+
+function roleSignal(application, confirmation) {
+  const hay = normCo((confirmation.subject || '') + ' ' + (confirmation.snippet || ''));
+  const jobId = String(application.jobId || application.sourceJobId || '').toLowerCase().trim();
+  if (jobId && hay.includes(jobId.replace(/[^a-z0-9]+/g, ' '))) return 100;
+  const tokens = titleTokens(application.title);
+  if (!tokens.length) return 0;
+  const hits = tokens.filter(x => hay.includes(x)).length;
+  return hits >= Math.min(2, tokens.length) ? 20 + hits : 0;
+}
+
+// appliedLog: [{ company, title, appliedAt|ts, status }]; emails: [{ from, subject, date?, company? }]
 // opts.windowDays: confirmation must arrive within this many days AFTER the apply (default 7).
 function reconcile(appliedLog, emails, opts = {}) {
   const winMs = (opts.windowDays != null ? opts.windowDays : 7) * 86400000;
-  const confs = (emails || []).filter(isConfirmationEmail).map(e => ({
+  const confs = (emails || []).filter(isConfirmationEmail).map((e, index) => ({
+    index, raw: e,
     from: e.from, subject: e.subject,
     co: normCo(e.company || e.from),
     subjCo: normCo(e.subject),
     t: toMs(e.date),
   }));
   const applied = (appliedLog || []).filter(e => e && e.status === 'applied');
-  const confirmed = [], unverifiable = [];
-  for (const a of applied) {
-    const aco = normCo(a.company);
-    const at = toMs(a.ts);
-    const match = aco && confs.find(c => {
+  const confirmed = [], usedApplications = new Set();
+  // Assign each concrete confirmation message to at most one concrete application. Specific
+  // title/requisition evidence wins; otherwise a generic company confirmation goes to the nearest
+  // unmatched application in its time window. One email can never prove several same-company jobs.
+  for (const c of confs) {
+    let best = null;
+    for (let i = 0; i < applied.length; i++) {
+      if (usedApplications.has(i)) continue;
+      const a = applied[i];
+      const aco = normCo(a.company);
+      if (!aco) continue;
       const coHit = (c.co && (c.co.includes(aco) || aco.includes(c.co))) || (c.subjCo && c.subjCo.includes(aco));
-      if (!coHit) return false;
-      if (at == null || c.t == null) return true;            // no timestamp on one side → company match suffices
-      return c.t >= at - 3600000 && c.t <= at + winMs;       // within [apply-1h, apply+window]
-    });
-    if (match) confirmed.push({ company: a.company, title: a.title, confirmedBy: { from: match.from, subject: match.subject } });
-    else unverifiable.push({ company: a.company, title: a.title });
+      if (!coHit) continue;
+      const at = toMs(a.appliedAt != null ? a.appliedAt : a.ts);
+      if (at != null && c.t != null && !(c.t >= at - 3600000 && c.t <= at + winMs)) continue;
+      const signal = roleSignal(a, c.raw);
+      const distance = at != null && c.t != null ? Math.abs(c.t - at) : Number.MAX_SAFE_INTEGER;
+      if (!best || signal > best.signal || (signal === best.signal && distance < best.distance)) {
+        best = { index: i, application: a, signal, distance };
+      }
+    }
+    if (best) {
+      usedApplications.add(best.index);
+      confirmed.push({ company: best.application.company, title: best.application.title,
+        jobId: best.application.jobId || null,
+        confirmedBy: { from: c.from, subject: c.subject } });
+    }
+  }
+  const unverifiable = [];
+  for (let i = 0; i < applied.length; i++) {
+    if (usedApplications.has(i)) continue;
+    const a = applied[i];
+    unverifiable.push({ company: a.company, title: a.title, jobId: a.jobId || null });
   }
   return {
     confirmed, unverifiable,
@@ -74,4 +111,4 @@ function reconcile(appliedLog, emails, opts = {}) {
   };
 }
 
-module.exports = { reconcile, isConfirmationEmail, normCo };
+module.exports = { reconcile, isConfirmationEmail, normCo, titleTokens, roleSignal };

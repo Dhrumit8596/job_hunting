@@ -84,10 +84,10 @@
     workable:  /(application (received|submitted)|thanks for applying)/i,
     breezy:    /(application (received|submitted)|thank you for your interest)/i,
     bamboohr:  /(application (received|submitted)|thank you for applying)/i,
-    lever:     /(thank you|application submitted)/i,
+    lever:     /(thank(?:s| you) for applying|application submitted)/i,
     ashby:     /(application submitted|thanks for applying)/i,
     icims:     /(thank you for (your interest|applying)|application (submitted|received)|congratulations)/i,
-    taleo:     /(submission (complete|successful)|thank you for)/i,
+    taleo:     /(submission (complete|successful)|thank you for (applying|your application|your interest))/i,
   };
   function matchesSuccess(text, ats) {
     const s = String(text || '');

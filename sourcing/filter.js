@@ -5,13 +5,16 @@
 // Exclude non-eligible seniorities/roles (technician/operator/associate/supervisor/
 // manager/director/lead/principal-as-mgmt/intern) and clearly off-domain software/sales.
 const ELIGIBLE_TITLE = /\b(engineer|engineering|scientist)\b/i;
-const TITLE_EXCLUDE = /\b(technician|operator|associate|assistant|supervisor|manager|director|\blead\b|intern|internship|co-?op|sales|account|recruiter|marketing|counsel|attorney|nurse|clinical research associate)\b/i;
+const TITLE_EXCLUDE = /\b(technician|operator|assistant|supervisor|manager|director|intern|internship|co-?op|sales|account|recruiter|marketing|counsel|attorney|nurse|clinical research associate)\b/i;
 // Off-domain engineer/scientist roles that don't fit a quality/manufacturing/equipment/metrology
 // background — drop before scoring so we don't waste fit-score calls on them.
 const DOMAIN_EXCLUDE = /\b(software|firmware|machine learning|\bml\b|\bai\b|artificial intelligence|data scientist|data engineer|bioinformatics|computational|cloud|devops|\bsre\b|web|frontend|front-end|backend|back-end|full.?stack|security engineer|network engineer|support engineer|service desk|research engineer|cost engineer|developer|field applications?\b|research scientist|principal scientist|staff scientist|scientist iii|computer vision|\bnlp\b|platform engineer|sales engineer|solutions engineer|applications? scientist|compiler|verification engineer|physical design|design verification|asic|\brtl\b|fpga)\b/i;
 
 // California or US-remote.
 const CA_LOC = /\b(california|\bca\b|san jose|santa clara|sunnyvale|fremont|alameda|oakland|san francisco|south san francisco|\bssf\b|menlo park|palo alto|mountain view|pleasanton|milpitas|hayward|newark|san diego|irvine|carlsbad|roseville|sacramento|livermore|union city|redwood city|foster city|san carlos|emeryville|berkeley)\b/i;
+const NON_US_LOC = /\b(canada|ontario|quebec|british columbia|vancouver|toronto|montreal|mexico|europe|united kingdom|\buk\b|ireland|germany|france|italy|spain|netherlands|sweden|poland|romania|israel|india|china|taiwan|japan|korea|singapore|australia|brazil|argentina|emea|apac|latam)\b/i;
+const US_LOC = /\b(united states|u\.s\.|usa|alabama|alaska|arizona|arkansas|california|colorado|connecticut|delaware|florida|georgia|hawaii|idaho|illinois|indiana|iowa|kansas|kentucky|louisiana|maine|maryland|massachusetts|michigan|minnesota|mississippi|missouri|montana|nebraska|nevada|new hampshire|new jersey|new mexico|new york|north carolina|north dakota|ohio|oklahoma|oregon|pennsylvania|rhode island|south carolina|south dakota|tennessee|texas|utah|vermont|virginia|washington|west virginia|wisconsin|wyoming|district of columbia|washington,? dc|phoenix|chandler|hillsboro|portland|austin|dallas|boise|albany|malta,? ny|manassas)\b/i;
+const US_STATE_CODE = /(?:^|[,\s])(AL|AK|AZ|AR|CA|CO|CT|DE|FL|GA|HI|ID|IL|IN|IA|KS|KY|LA|ME|MD|MA|MI|MN|MS|MO|MT|NE|NV|NH|NJ|NM|NY|NC|ND|OH|OK|OR|PA|RI|SC|SD|TN|TX|UT|VT|VA|WA|WV|WI|WY|DC)(?:\s|,|$)/;
 
 // Export-control / defense roles that block a TN (non-US-person) candidate.
 const ITAR_EXCLUDE = /\b(itar|ear|export control|export-control|us person|u\.s\. person|us citizen(ship)? required|security clearance|secret clearance|defense|aerospace & defense|dod\b|missile|munition|weapon)\b/i;
@@ -52,6 +55,15 @@ function isEligibleLocation(location, remote) {
   return CA_LOC.test(loc);
 }
 
+// US-wide variant used when the saved profile explicitly permits relocation.
+// Ambiguous or international locations fail closed instead of being assumed US.
+function isEligibleUSLocation(location, remote) {
+  const loc = String(location || '').trim();
+  if (NON_US_LOC.test(loc)) return false;
+  if (/\b(remote|work from home|wfh)\b/i.test(loc) || remote) return !NON_US_LOC.test(loc);
+  return US_LOC.test(loc) || US_STATE_CODE.test(loc);
+}
+
 function isItarExcluded(text) {
   return ITAR_EXCLUDE.test(String(text || ''));
 }
@@ -64,12 +76,14 @@ function isExportControlledCompany(company) {
 // Apply all filters. opts: { caOrRemoteOnly=true }
 function filterJobs(jobs, opts = {}) {
   const caOrRemoteOnly = opts.caOrRemoteOnly !== false;
+  const nationwideUS = opts.nationwideUS === true;
   return jobs.filter(j => {
     if (!isEligibleTitle(j.title)) return false;
     // export-control: drop on company-level blocklist OR any ITAR/EAR text in title+company+desc
     if (isExportControlledCompany(j.company)) return false;
     if (isItarExcluded([j.title, j.company, j.description].filter(Boolean).join(' '))) return false;
-    if (caOrRemoteOnly && !isEligibleLocation(j.location, j.remote)) return false;
+    if (nationwideUS && !isEligibleUSLocation(j.location, j.remote)) return false;
+    if (!nationwideUS && caOrRemoteOnly && !isEligibleLocation(j.location, j.remote)) return false;
     return true;
   });
 }
@@ -106,4 +120,4 @@ function medicalWaferBoost(title, company, description, score) {
   return Math.min(100, s + boost);
 }
 
-module.exports = { isEligibleTitle, isEligibleLocation, isItarExcluded, isExportControlledCompany, filterJobs, tnAdjustScore, medicalWaferBoost, MEDICAL_RE, CORE_DOMAIN_RE, ELIGIBLE_TITLE, TITLE_EXCLUDE, COMPANY_EXPORT_BLOCK };
+module.exports = { isEligibleTitle, isEligibleLocation, isEligibleUSLocation, isItarExcluded, isExportControlledCompany, filterJobs, tnAdjustScore, medicalWaferBoost, MEDICAL_RE, CORE_DOMAIN_RE, ELIGIBLE_TITLE, TITLE_EXCLUDE, COMPANY_EXPORT_BLOCK };

@@ -2,9 +2,9 @@
 // Tests for the job-sourcing pipeline. SYNTHETIC data only — no network, no PII.
 const path = require('path');
 const R = d => require(path.resolve(__dirname, '../../sourcing', d));
-const { makeJob, isRemote } = R('normalize');
-const { isEligibleTitle, isEligibleLocation, isItarExcluded, filterJobs, tnAdjustScore } = R('filter');
-const { jobKey, appliedKeySet, dedupe, pjaMergeAppliedLog, pjaCollectAppliedRecords } = R('dedupe');
+const { makeJob, isRemote, cleanDescription } = R('normalize');
+const { isEligibleTitle, isEligibleLocation, isEligibleUSLocation, isItarExcluded, filterJobs, tnAdjustScore } = R('filter');
+const { jobKey, appliedKeySet, appliedIdentity, dedupe, pjaMergeAppliedLog, pjaCollectAppliedRecords } = R('dedupe');
 const { routeJobs } = R('pipeline');
 const gh = R('adapters/greenhouse');
 const lever = R('adapters/lever');
@@ -17,6 +17,8 @@ module.exports = (t) => {
   t.eq(j.title, 'Equipment Engineer', 'makeJob: cleans whitespace');
   t.eq(j.id, '7', 'makeJob: id stringified');
   t.eq(j.remote, false, 'makeJob: remote inferred false');
+  t.eq(cleanDescription('<style>x</style><p>Wafer &amp; thin film&nbsp; metrology</p>'),
+    'Wafer & thin film metrology', 'cleanDescription: strips markup and decodes common entities');
 
   // --- filter: titles (TN eligibility + domain) ---
   t.eq(isEligibleTitle('Manufacturing Engineer II'), true, 'title: engineer ok');
@@ -25,6 +27,8 @@ module.exports = (t) => {
   t.eq(isEligibleTitle('Manufacturing Technician'), false, 'title: technician excluded');
   t.eq(isEligibleTitle('Quality Operator'), false, 'title: operator excluded');
   t.eq(isEligibleTitle('Engineering Manager'), false, 'title: manager excluded');
+  t.eq(isEligibleTitle('Associate Process Engineer'), true, 'title: associate engineer remains an engineering profession');
+  t.eq(isEligibleTitle('Lead Quality Engineer'), true, 'title: lead engineer evaluated on duties');
   t.eq(isEligibleTitle('Software Engineer'), false, 'title: software excluded (off-domain)');
   t.eq(isEligibleTitle('Machine Learning Engineer'), false, 'title: ML excluded');
   t.eq(isEligibleTitle('Field Applications Scientist'), false, 'title: field-apps excluded (plural)');
@@ -36,6 +40,10 @@ module.exports = (t) => {
   t.eq(isEligibleLocation('Remote - US', true), true, 'loc: US remote');
   t.eq(isEligibleLocation('Remote - EMEA'), false, 'loc: non-US remote excluded');
   t.eq(isEligibleLocation('Austin, TX'), false, 'loc: non-CA onsite excluded');
+  t.eq(isEligibleUSLocation('Austin, TX'), true, 'relocation: US onsite accepted');
+  t.eq(isEligibleUSLocation('Hillsboro, Oregon'), true, 'relocation: semiconductor hub accepted');
+  t.eq(isEligibleUSLocation('Toronto, Ontario, Canada'), false, 'relocation: international onsite excluded');
+  t.eq(isEligibleUSLocation('Singapore'), false, 'relocation: ambiguous international excluded');
 
   // --- filter: ITAR ---
   t.eq(isItarExcluded('Process Engineer (US Person required, ITAR)'), true, 'itar: blocked');
@@ -79,16 +87,28 @@ module.exports = (t) => {
   t.eq(log.length, 1, 'mergeAppliedLog: dedups same role');
   log = pjaMergeAppliedLog(log, [{ company: 'Beta Bio', title: 'Process Engineer' }]);
   t.eq(log.length, 2, 'mergeAppliedLog: adds new role');
+  log = pjaMergeAppliedLog(log, [{ company: 'Beta Bio', title: 'Process Engineer', jobId: 'req-2' }]);
+  t.eq(log.length, 3, 'mergeAppliedLog: distinct requisition id with same title survives');
   const storage = {
-    pja_jobs: [],
+    pja_jobs: [{ company: 'Not Applied', title: 'Quality Engineer', status: 'Needs Info' }],
     pja_applied_log: log,
-    pja_ext_queue: { results: { applied: [{ company: 'Gamma', title: 'Equipment Engineer' }], skipped: [] } },
+    pja_ext_queue: { results: { applied: [{ company: 'Gamma', title: 'Equipment Engineer' }],
+      skipped: [{ company: 'Skipped Co', title: 'Process Engineer' }] } },
   };
   const recs = pjaCollectAppliedRecords(storage);
   const keys = appliedKeySet(recs);
   t.ok(keys.has(jobKey({ company: 'Acme', title: 'Quality Engineer' })), 'collectApplied: durable-log role deduped across overwritten queue');
   t.ok(keys.has(jobKey({ company: 'Beta Bio', title: 'Process Engineer' })), 'collectApplied: 2nd durable-log role deduped');
   t.ok(keys.has(jobKey({ company: 'Gamma', title: 'Equipment Engineer' })), 'collectApplied: current-queue role deduped');
+  t.eq(keys.has(jobKey({ company: 'Skipped Co', title: 'Process Engineer' })), false, 'collectApplied: skipped job is not falsely treated as applied');
+  t.eq(keys.has(jobKey({ company: 'Not Applied', title: 'Quality Engineer' })), false, 'collectApplied: non-applied pipeline job is not excluded');
+  const exactApplied = appliedIdentity([{ company: 'Acme', title: 'Process Engineer', jobId: 'r1' },
+    { company: 'Legacy', title: 'Quality Engineer' }]);
+  t.ok(exactApplied.exactIds.has('r1'), 'appliedIdentity: exact job id retained');
+  t.eq(exactApplied.legacyRoles.has(jobKey({ company: 'Acme', title: 'Process Engineer' })), false,
+    'appliedIdentity: modern exact record does not poison every same-title requisition');
+  t.ok(exactApplied.legacyRoles.has(jobKey({ company: 'Legacy', title: 'Quality Engineer' })),
+    'appliedIdentity: id-less legacy record falls back to role key');
 
   // --- adapter normalize (synthetic raw) ---
   const ghJob = gh.normalize({ id: 99, title: 'Quality Engineer', location: { name: 'San Diego, CA' }, absolute_url: 'https://www.acme.com/careers?gh_jid=99', updated_at: '2026-06-01' }, { name: 'Acme', slug: 'acme' });
@@ -116,14 +136,29 @@ module.exports = (t) => {
   t.eq(ashJob2.company, 'acme', 'ashby.normalize: company falls back to slug');
   t.eq(ashJob2.remote, true, 'ashby.normalize: isRemote flag honored');
   const sr = R('adapters/smartrecruiters');
-  const srJob = sr.normalize({ id: '744000134849699', uuid: 'abc-123-uuid', name: 'Staff Process Engineer - Electroplating and CMP', company: { identifier: 'WesternDigital', name: 'Western Digital' }, location: { city: 'Fremont', region: 'CA', country: 'us', remote: false, fullLocation: 'Fremont, CA, United States' }, releasedDate: '2026-07-01' }, { slug: 'WesternDigital', name: 'Western Digital' });
-  t.eq(srJob.applyUrl, 'https://jobs.smartrecruiters.com/oneclick-ui/company/WesternDigital/publication/abc-123-uuid?dcr_ci=WesternDigital', 'sr.normalize: applyUrl → guest one-click form');
+  const srCanonicalApply = 'https://jobs.smartrecruiters.com/WesternDigital/744000134849699-staff-process-engineer-electroplating-and-cmp?oga=true';
+  const srJob = sr.normalize({ id: '744000134849699', uuid: 'abc-123-uuid', applyUrl: srCanonicalApply, name: 'Staff Process Engineer - Electroplating and CMP', company: { identifier: 'WesternDigital', name: 'Western Digital' }, location: { city: 'Fremont', region: 'CA', country: 'us', remote: false, fullLocation: 'Fremont, CA, United States' }, releasedDate: '2026-07-01' }, { slug: 'WesternDigital', name: 'Western Digital' });
+  t.eq(srJob.applyUrl, srCanonicalApply, 'sr.normalize: canonical detail applyUrl takes precedence over synthesized one-click route');
   t.eq(srJob.company, 'Western Digital', 'sr.normalize: company from source');
   t.eq(srJob.location, 'Fremont, CA, United States', 'sr.normalize: fullLocation');
   t.eq(srJob.ats, 'smartrecruiters', 'sr.normalize: ats');
   const srJob2 = sr.normalize({ id: 'x1', name: 'Metrology Engineer', company: { identifier: 'Acme', name: 'Acme' }, location: { city: 'San Jose', region: 'CA', country: 'us', remote: true } }, { slug: 'Acme' });
+  t.eq(srJob2.applyUrl, 'https://jobs.smartrecruiters.com/Acme/x1', 'sr.normalize: listing-only row uses stable public posting fallback');
   t.eq(srJob2.remote, true, 'sr.normalize: remote flag honored');
   t.eq(srJob2.location, 'San Jose, CA, us', 'sr.normalize: location falls back to city/region/country');
+  const srList = new URL(sr.listingUrl({ slug: 'WesternDigital', country: 'us', query: 'process engineer' }, 100));
+  t.eq(srList.searchParams.get('country'), 'us', 'sr.listingUrl: country scope prevents global first-page truncation');
+  t.eq(srList.searchParams.get('q'), 'process engineer', 'sr.listingUrl: query supported');
+  t.eq(srList.searchParams.get('offset'), '100', 'sr.listingUrl: pagination offset supported');
+  t.ok(sr.descriptionFromDetail({ jobAd: { sections: { jobDescription: { text: 'Own metrology.' }, qualifications: { text: 'SPC required.' } } } }).includes('SPC required.'),
+    'sr.detail: qualifications included in evidence text');
+  const workday = R('adapters/workday');
+  const wdSource = { name: 'Acme', apiUrl: 'https://acme.wd5.myworkdayjobs.com/wday/cxs/acme/Careers/jobs', siteBase: 'https://acme.wd5.myworkdayjobs.com/en-US/Careers' };
+  t.eq(workday.detailUrl(wdSource, { externalPath: '/job/Fremont/Process-Engineer_R123' }),
+    'https://acme.wd5.myworkdayjobs.com/wday/cxs/acme/Careers/job/Fremont/Process-Engineer_R123',
+    'workday.detailUrl: search endpoint maps to posting detail endpoint');
+  t.eq(workday.descriptionFromDetail({ jobPostingInfo: { jobDescription: '<p>Wafer inspection</p>' } }),
+    '<p>Wafer inspection</p>', 'workday.detail: job description extracted');
 
   // --- tnAdjustScore: down-weight gray-TN senior titles ---
   t.eq(tnAdjustScore('Senior Quality Engineer', 88), 88, 'tnAdjust: normal title unchanged');

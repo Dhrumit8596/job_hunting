@@ -16,7 +16,12 @@ const PJA_EA_DRY_RUN = false;            // TEST MODE: stop right after modal op
 // AUTO mode + auto-submit: required for backend/autonomous triggering (no human to click Easy
 // Apply or Submit). Works now that the extension's own CDP is free (no claude-in-chrome driving
 // the tab). For manual SEMI use, set PJA_EA_AUTO_OPEN=false.
-const PJA_EA_AUTO_OPEN = true;           // true = extension clicks Easy Apply itself (AUTO)
+const PJA_EA_AUTO_OPEN = false;          // SEMI (only working path): user clicks "Easy Apply", extension
+                                         // fills+submits+advances. AUTO-open is impossible on current
+                                         // LinkedIn — proven 2026-07-12 that trusted CDP mouse-click AND
+                                         // trusted keyboard-Enter on the focused button both no-op the
+                                         // modal (anti-automation). pjaTrustedClickEl keeps both attempts
+                                         // for any future LinkedIn change, but they don't open it today.
 const PJA_EA_STOP_BEFORE_SUBMIT = false; // false = fill, step, AND submit (auto-submit authorized)
 
 // Search URL: Bay Area · Easy Apply · past month · quality roles
@@ -104,11 +109,25 @@ function pjaEasyApplyState(modal) {
   const heading = (root.querySelector('h3, h2')?.textContent || '').trim();
   const text = (root.textContent || '');
   const btns = Array.from(root.querySelectorAll('button')).map(b => (b.textContent || '').trim());
-  const success = /application sent|your application was sent|application submitted|done!|premium career/i.test(text)
-    || /sent|submitted|success|thank/i.test(heading);
+  const success = /application sent|your application was sent|application submitted|application has been submitted|you(?:'|’)ve applied|thank you for applying/i.test(text)
+    || /application (?:sent|submitted)|thank you for applying/i.test(heading);
   const submitReady = btns.some(b => /^submit application$/i.test(b));
   return { open: true, success, submitReady, heading, buttons: btns };
 }
+
+async function pjaWaitForEasyApplyConfirmation(timeoutMs = 8000) {
+  const deadline = Date.now() + timeoutMs;
+  do {
+    const modal = pjaGetCurrentModal();
+    if (modal && pjaEasyApplyState(modal).success) return true;
+    const text = String(document.body?.innerText || '').slice(-6000);
+    if (/application sent|your application was sent|application (?:has been )?submitted|you(?:'|’)ve applied|thank you for applying/i.test(text)) return true;
+    if (/\/post-?apply(?:\/|\?|$)/i.test(String(location.href || ''))) return true;
+    await pjaAutoWait(400);
+  } while (Date.now() < deadline);
+  return false;
+}
+if (typeof window !== 'undefined') window.pjaWaitForEasyApplyConfirmation = pjaWaitForEasyApplyConfirmation;
 
 function pjaClickInModal(label) {
   const m = pjaGetCurrentModal();
@@ -513,10 +532,17 @@ function pjaAutoCheckConsent() {
       || cb.getAttribute('aria-label')
       || cb.closest('label')?.textContent?.toLowerCase()
       || '';
-    if (/\bi (understand|acknowledge|agree|accept|confirm|consent|certify|attest|authorize)\b|i have read|certify that|to the best of my knowledge|terms and conditions|privacy policy|eeo|equal opportunity|background check consent|data.*(processing|privacy)|gdpr|ai tool|automated/i.test(lbl)) {
-      cb.checked = true;
-      cb.dispatchEvent(new Event('change', { bubbles: true }));
-      cb.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
+    if (/^\s*(acknowledge(?:\/confirm)?|confirm|agree|consent|certify)\b|\bi (understand|acknowledge|agree|accept|confirm|consent|certify|attest|authorize)\b|i have read|certify that|to the best of my knowledge|terms and conditions|privacy policy|eeo|equal opportunity|background check consent|data.*(processing|privacy)|gdpr|ai tool|automated/i.test(lbl)) {
+      // Setting checked=true and then dispatching/calling click toggles the box BACK off. Let the
+      // real click activation perform the state transition first; only use the native setter if a
+      // controlled widget rejected it.
+      cb.click();
+      if (!cb.checked) {
+        const desc = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'checked');
+        if (desc?.set) desc.set.call(cb, true); else cb.checked = true;
+        cb.dispatchEvent(new Event('input', { bubbles: true }));
+        cb.dispatchEvent(new Event('change', { bubbles: true }));
+      }
     }
   }
 }
@@ -656,28 +682,23 @@ async function pjaAutoApplyOne(job, profile, answers, onStatus) {
 
     if (btns.includes('Submit application')) {
       pjaClickInModal('Submit application');
-      await pjaAutoWait(2500);
-      // Dismiss LinkedIn's post-apply "Update profile" / "Not now" dialog
+      const confirmed = await pjaWaitForEasyApplyConfirmation();
+      // Dismiss LinkedIn's post-apply dialog only after explicit confirmation.
       const notNow = Array.from(document.querySelectorAll('button'))
         .find(b => b.textContent.trim() === 'Not now');
-      if (notNow) {
+      if (confirmed && notNow) {
         notNow.click();
         await pjaAutoWait(500);
-      } else {
+      } else if (!confirmed) {
         const stillOpen = pjaGetCurrentModal();
         if (stillOpen) {
-          const h = pjaModalHeading() || '';
-          if (!/sent|submitted|success|thank|confirmed/i.test(h)) {
-            const emptyFields = pjaEmptyRequiredFields();
-            if (emptyFields.length) {
-              pjaDismissModal();
-              return { success: false, reason: 'submit_blocked', fields: emptyFields };
-            }
-          }
-          pjaDismissModal();
+          const emptyFields = pjaEmptyRequiredFields();
+          if (emptyFields.length) { pjaDismissModal(); return { success: false, reason: 'submit_blocked', fields: emptyFields }; }
         }
+        return { success: false, reason: 'submit_unconfirmed' };
       }
-      return { success: true };
+      pjaDismissModal();
+      return { success: true, reason: 'linkedin_confirmation' };
     }
 
     // Check for unfillable required fields before advancing
@@ -806,6 +827,39 @@ function pjaClickEasyApply(el) {
   }
 }
 
+// TRUSTED open click. Current LinkedIn's anti-automation gate ignores a synthetic .click() on the
+// Easy Apply <button>, so the AUTO-open path must use the SAME trusted CDP click that Next/Review/
+// Submit already use (LINKEDIN_TRUSTED_CLICK → background cdpLinkedInClick at viewport coords).
+// Anchors keep the nav-blocking synthetic path (a trusted click would follow the href). Falls back
+// to synthetic on CDP timeout/error so a free-CDP tab still degrades gracefully.
+function pjaTrustedClickEl(el) {
+  if (!el) return Promise.resolve(false);
+  if (el.tagName === 'A') { try { pjaClickEasyApply(el); } catch (_) {} return Promise.resolve(true); }
+  try { el.scrollIntoView({ block: 'center', behavior: 'instant' }); } catch (_) {}
+  try { el.focus({ preventScroll: true }); } catch (_) {}
+  const r = el.getBoundingClientRect();
+  if (!r.width && !r.height) { try { pjaClickEasyApply(el); } catch (_) {} return Promise.resolve(true); }
+  const x = r.left + r.width / 2, y = r.top + r.height / 2;
+  return new Promise(resolve => {
+    let done = false;
+    // Keyboard activation: current LinkedIn no-ops a synthetic/trusted MOUSE click on the Easy Apply
+    // button, but a trusted Enter dispatched to the FOCUSED button often still fires its handler
+    // (buttons activate on Enter). Fire it alongside the click for the best chance to open the modal.
+    const kbd = () => { try { el.focus({ preventScroll: true }); } catch (_) {} try { chrome.runtime.sendMessage({ type: 'WORKDAY_TRUSTED_ENTER' }, () => { void chrome.runtime.lastError; }); } catch (_) {} };
+    const finish = () => { if (done) return; done = true; kbd(); resolve(true); };
+    const t = setTimeout(() => { if (!done) { pjaTrace('EA-open CDP timeout→synthetic'); try { pjaClickEasyApply(el); } catch (_) {} finish(); } }, 4000);
+    try {
+      chrome.runtime.sendMessage({ type: 'LINKEDIN_TRUSTED_CLICK', x, y }, (resp) => {
+        if (done) return;
+        clearTimeout(t);
+        if (chrome.runtime.lastError || resp?.error) { pjaTrace('EA-open CDP fail→synthetic err=' + (resp?.error || chrome.runtime.lastError?.message || '')); try { pjaClickEasyApply(el); } catch (_) {} }
+        else { pjaTrace('EA-open CDP click ok'); }
+        finish();
+      });
+    } catch (_) { clearTimeout(t); finish(); }
+  });
+}
+
 // ── Apply on current job-view page ───────────────────────────────────────────
 // Used by the navigate-per-job batch flow. Assumes we are already on
 // linkedin.com/jobs/view/{id}/ — no card click needed.
@@ -921,7 +975,7 @@ async function pjaApplyOnCurrentPage(job, profile, answers, onStatus) {
       applyBtn = findEasyApplyBtn();
       if (!applyBtn) await pjaAutoWait(600);
     }
-    if (applyBtn) pjaClickEasyApply(applyBtn);
+    if (applyBtn) await pjaTrustedClickEl(applyBtn);
     for (let w = 0; w < 12 && !initModal; w++) { await pjaAutoWait(800); initModal = pjaGetCurrentModal(); }
   }
   const autoOpened = !!initModal;
@@ -943,7 +997,7 @@ async function pjaApplyOnCurrentPage(job, profile, answers, onStatus) {
       if (PJA_EA_AUTO_OPEN) {
         const btn = findEasyApplyBtn();
         btnSeen = !!btn;
-        if (btn) { try { pjaClickEasyApply(btn); } catch (_) {} }
+        if (btn) { try { await pjaTrustedClickEl(btn); } catch (_) {} }
       }
       if (Date.now() - lastTrace > 30000) {
         lastTrace = Date.now();
@@ -1055,28 +1109,23 @@ async function pjaApplyOnCurrentPage(job, profile, answers, onStatus) {
       }
       pjaTrace('clicking Submit application');
       await pjaTrustedClickInModal('Submit application');
-      await pjaAutoWait(2500);
-      // Dismiss post-apply "Update profile" / "Not now" dialog
+      const confirmed = await pjaWaitForEasyApplyConfirmation();
+      // Dismiss post-apply dialog only after explicit confirmation.
       const notNow = Array.from(document.querySelectorAll('button'))
         .find(b => b.textContent.trim() === 'Not now');
-      if (notNow) {
+      if (confirmed && notNow) {
         notNow.click();
         await pjaAutoWait(500);
-      } else {
+      } else if (!confirmed) {
         const stillOpen = pjaGetCurrentModal();
         if (stillOpen) {
-          const h = pjaModalHeading() || '';
-          if (!/sent|submitted|success|thank|confirmed/i.test(h)) {
-            const emptyFields = pjaEmptyRequiredFields();
-            if (emptyFields.length) {
-              pjaDismissModal();
-              return { success: false, reason: 'submit_blocked', fields: emptyFields };
-            }
-          }
-          pjaDismissModal();
+          const emptyFields = pjaEmptyRequiredFields();
+          if (emptyFields.length) { pjaDismissModal(); return { success: false, reason: 'submit_blocked', fields: emptyFields }; }
         }
+        return { success: false, reason: 'submit_unconfirmed' };
       }
-      return { success: true };
+      pjaDismissModal();
+      return { success: true, reason: 'linkedin_confirmation' };
     }
 
     if (!isResumeStep) {

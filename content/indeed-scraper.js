@@ -63,14 +63,61 @@
     const indeedApply = /easily apply/i.test(card.textContent || '');
     return {
       jobId: jk,
+      sourceJobId: jk,
       title: (titleEl?.getAttribute('title') || titleEl?.textContent || '').trim(),
       company: (compEl?.textContent || '').trim(),
       location: (locEl?.textContent || '').replace(/^\d+\s*min[··]?/i, '').trim(),
       platform: 'indeed',
+      sourcePlatform: 'indeed',
       indeedApply,
+      channel: indeedApply ? 'indeed_apply' : 'external',
       isEasyApply: false,                                  // not LinkedIn EA; router keys off platform
+      listingUrl: 'https://www.indeed.com/viewjob?jk=' + jk,
       applyUrl: 'https://www.indeed.com/viewjob?jk=' + jk, // Indeed job view (external ATS resolved later)
     };
+  }
+
+  const DESC_SELECTORS = ['#jobDescriptionText', '[data-testid="jobsearch-JobComponent-description"]',
+    '.jobsearch-JobComponent-description', '.jobsearch-jobDescriptionText'];
+  function getIndeedDetailDescription() {
+    for (const sel of DESC_SELECTORS) {
+      const el = document.querySelector(sel);
+      if ((el?.textContent || '').trim().length > 100) return el.textContent.trim();
+    }
+    return '';
+  }
+  function getIndeedDetailTitle() {
+    const el = document.querySelector('[data-testid="jobsearch-JobInfoHeader-title"], .jobsearch-JobInfoHeader-title, h2[class*="JobInfoHeader-title"]');
+    return (el?.getAttribute('title') || el?.textContent || '').trim();
+  }
+  function indeedDetailMatches(jobId, title, url, shownTitle) {
+    const n = s => String(s || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+    const wanted = n(title), shown = n(shownTitle);
+    let visibleId = '';
+    try { const u = new URL(String(url || '')); visibleId = u.searchParams.get('jk') || u.searchParams.get('vjk') || ''; } catch (_) {}
+    const idMatch = !!(jobId && visibleId && String(jobId) === String(visibleId));
+    const titleMatch = !!(wanted && shown && (wanted === shown || wanted.includes(shown) || shown.includes(wanted)));
+    return visibleId ? (idMatch && (!wanted || !shown || titleMatch)) : titleMatch;
+  }
+  function indeedPanelAdvanced(jobId, previousUrl, previousText, currentText) {
+    let previousId = '';
+    try { const u = new URL(String(previousUrl || '')); previousId = u.searchParams.get('jk') || u.searchParams.get('vjk') || ''; } catch (_) {}
+    if (previousId && String(previousId) === String(jobId || '')) return true;
+    const clean = s => String(s || '').replace(/\s+/g, ' ').trim();
+    return !clean(previousText) || clean(previousText) !== clean(currentText);
+  }
+  function waitForIndeedDescription(meta, timeoutMs = 4500) {
+    return new Promise(resolve => {
+      const deadline = Date.now() + timeoutMs;
+      function poll() {
+        const text = getIndeedDetailDescription();
+        if (text && indeedDetailMatches(meta.jobId, meta.title, location.href, getIndeedDetailTitle()) &&
+            indeedPanelAdvanced(meta.jobId, meta.previousUrl, meta.previousDescription, text)) return resolve(text);
+        if (Date.now() >= deadline) return resolve(''); // fail closed: never reuse the previous card's JD
+        setTimeout(poll, 200);
+      }
+      poll();
+    });
   }
 
   function nextPageEl() {
@@ -95,6 +142,7 @@
     const params = new URLSearchParams(location.search);
     const scan = { q: params.get('q') || '', l: params.get('l') || '', page: 0,
       maxPages: (opts && opts.maxPages) || 15, ids: [], total: 0, indeedApply: 0,
+      hydrateDescriptions: !opts || opts.hydrateDescriptions !== false,
       status: 'running', ts: Date.now() };
     await setScan(scan);
     return resumeIndeedScanOnLoad();
@@ -122,7 +170,18 @@
       if (!meta || !meta.jobId || seen.has(meta.jobId)) continue;
       seen.add(meta.jobId); scan.ids.push(meta.jobId); scan.total++; newCount++;
       if (meta.indeedApply) scan.indeedApply++;
-      if (kwHit(meta.title + ' ' + meta.company)) pending.push({ id: meta.jobId, ...meta, description: '', status: 'scoring' });
+      if (kwHit(meta.title + ' ' + meta.company)) {
+        let description = '';
+        if (scan.hydrateDescriptions !== false) {
+          meta.previousUrl = location.href;
+          meta.previousDescription = getIndeedDetailDescription();
+          const link = card.querySelector('a[data-jk], a.jcs-JobTitle, h2.jobTitle a');
+          if (link) { link.click(); description = await waitForIndeedDescription(meta); }
+        }
+        pending.push({ id: meta.jobId, ...meta, description: description.slice(0, 20000),
+          descriptionStatus: description ? (description.length > 20000 ? 'partial' : 'full') : 'missing',
+          query: scan.q, discoveredAt: Date.now(), scrapedAt: Date.now(), status: 'scoring' });
+      }
     }
     while (pending.length) {
       const b = pending.splice(0, 10);
@@ -149,6 +208,10 @@
   // Exports (unit tests + backend trigger via /start-scan {source:'indeed'}).
   window.pjaExtractIndeedCardMeta = extractIndeedCardMeta;
   window.pjaIndeedChallenged = indeedChallenged;
+  window.pjaIndeedDetailMatches = indeedDetailMatches;
+  window.pjaIndeedPanelAdvanced = indeedPanelAdvanced;
+  window.pjaGetIndeedDetailDescription = getIndeedDetailDescription;
+  window.pjaWaitForIndeedDescription = waitForIndeedDescription;
   window.__pjaStartIndeedScan = startIndeedScan;
 
   // Auto-resume across Indeed pagination navigations.

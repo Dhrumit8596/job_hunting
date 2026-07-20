@@ -10,10 +10,16 @@ function norm(s) {
   return String(s || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
 }
 
-// Normalized company::title key — the SECONDARY dedup key used to collapse the SAME role
-// surfaced by two different modalities (e.g. registry + discovery) that carry different ids.
+// Normalized company::title key — used for reporting and legacy id-less records only. It is not a
+// safe modern dedup key because several distinct requisitions can share the same title.
 function roleKey(job) {
   return norm(job && job.company) + '::' + norm(job && job.title);
+}
+
+// Cross-source similarity key for diagnostics. Even company+title+location is not proof of posting
+// identity, so stores no longer collapse on this value without an exact direct URL.
+function mirrorKey(job) {
+  return roleKey(job) + '::' + norm(job && job.location);
 }
 
 // Canonical primary id. Stable across re-runs; namespaced by ATS/source.
@@ -24,4 +30,4 @@ function canonicalId(job) {
   return 'norm:' + roleKey(job);
 }
 
-module.exports = { norm, roleKey, canonicalId };
+module.exports = { norm, roleKey, mirrorKey, canonicalId };

@@ -77,6 +77,9 @@ module.exports = (t) => {
   const wOk = load('<!DOCTYPE html><html><body><div class="jobs-easy-apply-modal" role="dialog"><h3>Application sent</h3><p>Your application was sent to Acme</p><button>Done</button></div></body></html>');
   const stOk = wOk.__pjaEasyApplyState(wOk.__pjaGetCurrentModal());
   t.eq(stOk.success, true, 'EA-state: post-submit confirmation → success (double-submit guard)');
+  const wUpsell = load('<!DOCTYPE html><html><body><div class="jobs-easy-apply-modal" role="dialog"><h3>Premium career insights</h3><p>Explore Premium career tools</p></div></body></html>');
+  t.eq(wUpsell.__pjaEasyApplyState(wUpsell.__pjaGetCurrentModal()).success, false,
+    'EA-state: generic Premium upsell is not submission confirmation');
   t.eq(w2.__pjaEasyApplyState(null).open, false, 'EA-state: no modal → not open');
 
   // --- button collector excludes PAGE-level buttons (dialog scoping) ---

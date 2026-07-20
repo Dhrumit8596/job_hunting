@@ -16,6 +16,7 @@ const PJA_FIELD_RULES = [
   { key: 'fullName',           patterns: ['full name','your name','legal name','full legal name','applicant name','candidate name','name'] },
   { key: 'email',              patterns: ['email','e-mail','email address','work email'] },
   { key: 'phoneType',          patterns: ['phone type','contact phone type','type of phone','phone number type'] },
+  { key: 'phoneCountryCode',   patterns: ['phone country code','country phone code','dialing code','dialling code'] },
   { key: 'phone',              patterns: ['phone','mobile','cell','telephone','contact number','phone number'] },
   { key: 'linkedin',           patterns: ['linkedin','linkedin url','linkedin profile'] },
   { key: 'website',            patterns: ['website','portfolio','personal url','github url','personal site'] },
@@ -74,6 +75,7 @@ const PJA_DEFAULT_PROFILE = {
   email: '',
   phone: '',
   phoneType: 'Mobile',
+  phoneCountryCode: 'United States of America (+1)',
   linkedin: '',
   website: '',
   address: '',
@@ -313,7 +315,9 @@ function pjaFillTextViaFiber(el, value, skipBlur = false) {
   // Try fiber bridge (pja:fiberfill CustomEvent → fiber-main.js in MAIN world)
   // This calls Formik's onChange directly, keeping controlled-input state in sync.
   const fiberOk = pjaFillViaFiberOnChange(el, value);
-  if (fiberOk && skipBlur) return true;
+  // Greenhouse's intl-tel-input can report a successful fiber callback while only updating the
+  // visible text. Its validated form value is committed by the input/change events below.
+  if (fiberOk && skipBlur && el.type !== 'tel' && pjaClassify(pjaGetLabel(el)) !== 'phone') return true;
 
   // Synthetic events — ITI phone fields and non-Formik inputs respond to these
   try { el.dispatchEvent(new InputEvent('input', { bubbles: true, data: String(value), inputType: 'insertText' })); } catch(_) {}
@@ -1140,13 +1144,17 @@ function pjaFillCombobox(input, value, key) {
     // on newer forms. Committed = a single-value in ITS OWN control (or a comma'd input.value for the
     // legacy Places variant). Checking only `,` missed react-select selections → never committed.
     const _lctrl = input.closest('[class*="select__control"]');
+    const _isRemixLocation = /remix-css/.test((_lctrl && _lctrl.className) || '');
     const committed = () => {
       const sv = _lctrl && _lctrl.querySelector('[class*="single-value"],[class*="singleValue"]');
       if (sv && sv.textContent && sv.textContent.trim() && !/^\s*select/i.test(sv.textContent)) return true;
       return /,/.test(input.value || '');
     };
     window._pjaComboChain = (window._pjaComboChain || Promise.resolve()).then(async () => {
-      for (let attempt = 0; attempt < 3 && !committed(); attempt++) {
+      // A Remix single-value can be stale while Formik still considers the field empty. Require a
+      // fresh trusted suggestion click on that build; legacy Places may continue using display/value.
+      let trustedSelected = false;
+      for (let attempt = 0; attempt < 3 && !trustedSelected && (_isRemixLocation || !committed()); attempt++) {
         input.focus();
         if (_setter) _setter.call(input, ''); else input.value = '';
         input.dispatchEvent(new InputEvent('input', { bubbles: true }));
@@ -1175,9 +1183,13 @@ function pjaFillCombobox(input, value, key) {
           // (that was clicking "Afghanistan" from a stale country listbox).
           match = opts.find(o => (o.textContent || '').toLowerCase().includes(cityOnly.toLowerCase())) || null;
         }
-        if (match) { await pjaCdpClickEl(match); await _sleep(350); }
+        if (match) {
+          const how = await pjaCdpClickEl(match);
+          trustedSelected = how === 'cdp';
+          await _sleep(350);
+        }
       }
-      try { chrome.storage.local.get('pja_dbg', d => { const a=(d.pja_dbg||[]).slice(-160); a.push('[loc] candidate-location committed='+committed()+' val="'+String(input.value||'').slice(0,24)+'"'); chrome.storage.local.set({pja_dbg:a}); }); } catch(_){}
+      try { chrome.storage.local.get('pja_dbg', d => { const a=(d.pja_dbg||[]).slice(-160); a.push('[loc] candidate-location committed='+(trustedSelected || (!_isRemixLocation && committed()))+' trusted='+trustedSelected+' val="'+String(input.value||'').slice(0,24)+'"'); chrome.storage.local.set({pja_dbg:a}); }); } catch(_){}
     });
     return true;
   }
@@ -1187,6 +1199,8 @@ function pjaFillCombobox(input, value, key) {
   // Options must be selected via the inner promptLeafNode child, not the outer role="option" div.
   if (input.getAttribute('data-uxi-widget-type') === 'selectinput') {
     const _nativeSetter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set;
+    let _wdLastOptionTexts = [];
+    let _wdExpandedMajor = false;
 
     const doSelectWorkday = () => {
       const listbox = document.querySelector('[data-automation-id="activeListContainer"]') ||
@@ -1202,6 +1216,7 @@ function pjaFillCombobox(input, value, key) {
         clone.querySelectorAll('[role="option"]').forEach(c => c.remove());
         return clone.textContent.trim().toLowerCase().replace(/\s+/g, ' ');
       };
+      _wdLastOptionTexts = opts.map(getOptText).filter(Boolean).slice(0, 30);
 
       const isYes = ['yes','true','1'].includes(lv);
       const isNo  = ['no','false','0'].includes(lv);
@@ -1217,6 +1232,30 @@ function pjaFillCombobox(input, value, key) {
         const RF = ['linkedin','job board or social media','social media','job board','online job board','internet','online','job posting','indeed','glassdoor','external job board'];
         for (const fb of RF) { match = opts.find(o => getOptText(o).includes(fb)); if (match) break; }
       }
+      if (!match && key === 'major' && !_wdExpandedMajor) {
+        // Workday tenants often use a controlled field-of-study taxonomy that omits the exact
+        // résumé wording "Environmental Engineering". Choose only a truthful broader engineering
+        // category; never substitute a different named engineering discipline.
+        const MAJOR_FALLBACKS = [/^environmental engineering$/, /^engineering,? general$/, /^general engineering$/, /^other engineering$/, /^engineering$/];
+        for (const pat of MAJOR_FALLBACKS) { match = opts.find(o => pat.test(getOptText(o))); if (match) break; }
+      }
+      if (!match && key === 'major') {
+        // Very large Workday taxonomies first render a non-value group node. Expand the explicit
+        // "Partial list" group, then the caller's scheduled second pass can select the truthful
+        // field-of-study value. Never select the ambiguous "All" node as an answer.
+        const expand = opts.find(o => /^partial list\b/i.test(getOptText(o)));
+        if (expand) {
+          _wdExpandedMajor = true;
+          pjaCdpClickEl(expand).then(how => {
+            try { chrome.storage.local.get('pja_dbg', d => {
+              const arr = (d.pja_dbg || []).slice(-160); arr.push('[WD] expanded partial-list group key=major via=' + how);
+              chrome.storage.local.set({ pja_dbg: arr });
+            }); } catch (_) {}
+            setTimeout(() => { try { doSelectWorkday(); } catch (_) {} }, 1200);
+          });
+          return true;
+        }
+      }
       if (!match) return false;
 
       // Only use promptLeafNode as click target for leaf options (no nested child options).
@@ -1225,6 +1264,16 @@ function pjaFillCombobox(input, value, key) {
       const isLeafOption = !match.querySelector('[role="option"]');
       const leafNode = isLeafOption ? match.querySelector('[data-automation-id="promptLeafNode"]') : null;
       const target = leafNode || match;
+      if (key === 'major') {
+        pjaCdpClickEl(target).then(how => {
+          try { chrome.storage.local.get('pja_dbg', d => {
+            const arr = (d.pja_dbg || []).slice(-160);
+            arr.push('[WD] multiselect selected: "' + (target.textContent || '').trim().slice(0,40) + '" key=major via=' + how);
+            chrome.storage.local.set({ pja_dbg: arr });
+          }); } catch (_) {}
+        });
+        return true;
+      }
       target.dispatchEvent(new MouseEvent('mouseover', { bubbles: true }));
       target.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true, button: 0, buttons: 1 }));
       target.dispatchEvent(new MouseEvent('mouseup',   { bubbles: true, cancelable: true, button: 0 }));
@@ -1248,17 +1297,51 @@ function pjaFillCombobox(input, value, key) {
       const tempId = '__pja_wd_ms_' + Date.now();
       clickTarget.setAttribute('id', tempId);
       return new Promise(resolve => {
-        chrome.runtime.sendMessage({ type: 'WORKDAY_TRUSTED_CLICK', selector: '#' + CSS.escape(tempId) }, resp => {
-          clickTarget.removeAttribute('id');
-          const ok = resp?.ok || false;
-          console.log('PJA WD CDP click result:', ok, 'selector:', tempId);
-          chrome.storage.local.get('pja_dbg', d => {
-            const arr = (d.pja_dbg || []).slice(-19);
-            arr.push('[WD] CDP click ok=' + ok + ' key=' + key + ' val=' + String(value).slice(0,30));
-            chrome.storage.local.set({ pja_dbg: arr });
+        // Close any prior prompt (for example the Degree picker) so activeListContainer belongs
+        // to this multiselect when we inspect options.
+        try {
+          (document.activeElement || document).dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', code: 'Escape', bubbles: true }));
+          document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', code: 'Escape', bubbles: true }));
+        } catch (_) {}
+        setTimeout(() => {
+          // A Workday multiselect is a toggle. Use one trusted mouse click; the default trusted
+          // click's Space+mouse pair opens and immediately closes this menu on some tenants.
+          chrome.runtime.sendMessage({ type: 'WORKDAY_TRUSTED_CLICK', selector: '#' + CSS.escape(tempId), single: true }, resp => {
+            clickTarget.removeAttribute('id');
+            const ok = resp?.ok || false;
+            // Large Workday taxonomies initially expose only group nodes such as
+            // "Partial list (first 500 entries)". Filter the open prompt by the requested value so
+            // the actual field-of-study/skill option is rendered before doSelectWorkday runs.
+            console.log('PJA WD CDP click result:', ok, 'selector:', tempId);
+            chrome.storage.local.get('pja_dbg', d => {
+              const arr = (d.pja_dbg || []).slice(-19);
+              arr.push('[WD] CDP click ok=' + ok + ' key=' + key + ' val=' + String(value).slice(0,30));
+              chrome.storage.local.set({ pja_dbg: arr });
+            });
+            const filterValue = value == null ? '' : String(value).trim();
+            if (!ok || !filterValue) { resolve(ok); return; }
+            try {
+              if (_nativeSetter) _nativeSetter.call(input, ''); else input.value = '';
+              input.dispatchEvent(new InputEvent('input', { bubbles: true, data: '', inputType: 'deleteContentBackward' }));
+              const rect = input.getBoundingClientRect();
+              let finished = false;
+              const finish = typedOk => {
+                if (finished) return; finished = true;
+                try { chrome.storage.local.get('pja_dbg', d => {
+                  const arr = (d.pja_dbg || []).slice(-160);
+                  arr.push('[WD] CDP filter typed=' + !!typedOk + ' key=' + key + ' val=' + filterValue.slice(0,30));
+                  chrome.storage.local.set({ pja_dbg: arr });
+                }); } catch (_) {}
+                resolve(ok);
+              };
+              const timer = setTimeout(() => finish(false), 7000);
+              chrome.runtime.sendMessage({ type: 'CDP_TYPE_AT', x: rect.left + rect.width / 2,
+                y: rect.top + rect.height / 2, text: filterValue }, typedResp => {
+                clearTimeout(timer); finish(!!(typedResp && typedResp.ok));
+              });
+            } catch (_) { resolve(ok); }
           });
-          resolve(ok);
-        });
+        }, 180);
       });
     };
 
@@ -1269,7 +1352,14 @@ function pjaFillCombobox(input, value, key) {
           if (!doSelectWorkday()) {
             // Retry after extra delay (options may load via network)
             setTimeout(() => {
-              if (!doSelectWorkday()) console.log('PJA WD multiselect: no match for', value, 'key:', key);
+              if (!doSelectWorkday()) {
+                console.log('PJA WD multiselect: no match for', value, 'key:', key);
+                try { chrome.storage.local.get('pja_dbg', d => {
+                  const arr = (d.pja_dbg || []).slice(-160);
+                  arr.push('[WD] multiselect no match key=' + key + ' val=' + String(value).slice(0,30) + ' opts=' + _wdLastOptionTexts.join('|').slice(0,300));
+                  chrome.storage.local.set({ pja_dbg: arr });
+                }); } catch (_) {}
+              }
               resolve();
             }, 800);
             return;
@@ -1609,6 +1699,149 @@ function pjaFillCombobox(input, value, key) {
   return true;
 }
 
+// Workday renders several required pickers as visible buttons rather than the selectinput used by
+// its other prompts. They are invisible to pjaFillForm's input scan, so State and Phone Country
+// Code can remain at "Select One" even though the rest of the page is filled. Commit those prompt
+// buttons with trusted clicks and select the exact profile-backed option.
+async function pjaFillWorkdayPromptButtons(profile) {
+  if (!/workday\.com|myworkdayjobs\.com/i.test(location.hostname)) return 0;
+  const sleep = ms => new Promise(r => setTimeout(r, ms));
+  const trustedClick = el => new Promise(resolve => {
+    if (!el) return resolve(false);
+    const priorId = el.id;
+    const tempId = priorId || ('__pja_wd_prompt_' + Date.now() + '_' + Math.random().toString(36).slice(2, 6));
+    if (!priorId) el.id = tempId;
+    let done = false;
+    const finish = ok => {
+      if (done) return;
+      done = true;
+      if (!priorId && el.id === tempId) el.removeAttribute('id');
+      resolve(!!ok);
+    };
+    const timer = setTimeout(() => finish(false), 4000);
+    try {
+      chrome.runtime.sendMessage({ type: 'WORKDAY_TRUSTED_CLICK', selector: '#' + CSS.escape(tempId), single: true }, resp => {
+        clearTimeout(timer);
+        finish(!!(resp && resp.ok));
+      });
+    } catch (_) { clearTimeout(timer); finish(false); }
+  });
+  const ownText = opt => {
+    const clone = opt.cloneNode(true);
+    clone.querySelectorAll('[role="option"]').forEach(child => child.remove());
+    return (clone.textContent || '').trim().replace(/\s+/g, ' ');
+  };
+  const state = String(profile && profile.state || '').trim();
+  const stateAbbr = state.length === 2 ? state.toUpperCase() : PJA_STATE_ABBR[state.toLowerCase()] || '';
+  const stateFull = state.length === 2
+    ? Object.entries(PJA_STATE_ABBR).find(([, abbr]) => abbr === state.toUpperCase())?.[0] || ''
+    : state.toLowerCase();
+  const country = String(profile && profile.country || 'United States').trim();
+  const phoneCountry = /canada/i.test(country) ? 'Canada' : 'United States';
+  const phoneType = String(profile && profile.phoneType || 'Mobile').trim();
+  const degree = String(profile && (profile.degree || profile.educationDegree) || 'Bachelor').trim();
+  const specs = [];
+  for (const button of Array.from(document.querySelectorAll('button'))) {
+    const text = (button.textContent || '').trim().replace(/\s+/g, ' ');
+    if ((!text && !button.getAttribute('aria-label')) || button.disabled) continue;
+    // Workday commonly separates the field label from a button whose own text is only
+    // "Select One". Resolve the label from aria-labelledby and the enclosing formField so the
+    // picker is identifiable after validation has re-rendered it.
+    const ariaLabel = (button.getAttribute('aria-label') || '').trim().replace(/\s+/g, ' ');
+    const labelledBy = (button.getAttribute('aria-labelledby') || '').split(/\s+/).filter(Boolean)
+      .map(id => document.getElementById(id)?.textContent || '').join(' ').trim().replace(/\s+/g, ' ');
+    const field = button.closest('[data-automation-id^="formField-"]');
+    const fieldLabel = field && (
+      field.querySelector('[data-automation-id="richText"]')?.textContent ||
+      field.querySelector('label')?.textContent ||
+      field.querySelector('legend')?.textContent || ''
+    );
+    const label = (labelledBy || fieldLabel || ariaLabel.replace(/:\s*select one.*$/i, '') || '')
+      .trim().replace(/\s+/g, ' ');
+    const selected = (text || ariaLabel).trim();
+    const unresolved = /select one|required/i.test(selected + ' ' + ariaLabel);
+    if (/^degree\b/i.test(label) && unresolved) {
+      const wantsBachelor = /bachelor|b\.\s*e\.?|undergraduate/i.test(degree);
+      specs.push({ button, key: 'degree', match: txt => {
+        const t = txt.toLowerCase().replace(/[’']/g, '');
+        if (wantsBachelor) return /\bbachelor(?:s)?\b|\bbaccalaureate\b/.test(t);
+        const want = degree.toLowerCase().replace(/[’']/g, '');
+        return t === want || t.includes(want);
+      } });
+    } else if (/^(state|state\/region|administrative area)\b/i.test(label) && unresolved && state) {
+      specs.push({ button, key: 'state', match: txt => {
+        const t = txt.toLowerCase();
+        return (!!stateFull && (t === stateFull || t.startsWith(stateFull + ' ') || t.includes(' ' + stateFull + ' '))) ||
+          (!!stateAbbr && new RegExp('(^|\\s|[-(])' + stateAbbr.toLowerCase() + '(?:\\s|[-)]|$)').test(t));
+      } });
+    } else if (/^(country phone code|phone country code)\b/i.test(label) && !new RegExp(phoneCountry, 'i').test(selected)) {
+      specs.push({ button, key: 'phoneCountryCode', match: txt =>
+        new RegExp('^' + phoneCountry.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '\\b', 'i').test(txt) && /\+?1\b/.test(txt)
+      });
+    } else if (/^phone device type\b/i.test(label) && !new RegExp('\\b' + phoneType + '\\b', 'i').test(selected)) {
+      specs.push({ button, key: 'phoneType', match: txt => new RegExp('^' + phoneType + '\\b', 'i').test(txt) });
+    } else if (/^country\b/i.test(label) && !/phone code/i.test(label) && unresolved && country) {
+      specs.push({ button, key: 'country', match: txt => {
+        const t = txt.toLowerCase();
+        const want = country.toLowerCase();
+        // A phone-code prompt can inherit a generic "Country" label in Workday's nested markup.
+        // Never treat dial-code options such as "United States of America (+1)" as residence.
+        return !/\+\s*\d/.test(t) && (t === want ||
+          (/^united states$/i.test(want) && t === 'united states of america'));
+      } });
+    }
+  }
+  // Address fields first. A stale referral-source menu can otherwise remain mounted and cause
+  // Workday's global activeListContainer selector to point at the wrong prompt.
+  specs.sort((a, b) => ({ degree: 0, state: 1, phoneCountryCode: 2, phoneType: 3, country: 4 }[a.key] ?? 9) -
+    ({ degree: 0, state: 1, phoneCountryCode: 2, phoneType: 3, country: 4 }[b.key] ?? 9));
+  let committed = 0;
+  try { chrome.storage.local.get('pja_dbg', d => { const a=(d.pja_dbg||[]).slice(-160); a.push('[WD] prompt specs='+specs.map(s=>s.key).join('|')); chrome.storage.local.set({pja_dbg:a}); }); } catch (_) {}
+  for (const spec of specs) {
+    // Close any previously mounted Workday prompt (notably referral source) before opening this
+    // button. Workday may keep that old listbox in the DOM even after focus moves elsewhere.
+    try {
+      const esc = new KeyboardEvent('keydown', { key: 'Escape', code: 'Escape', keyCode: 27, which: 27, bubbles: true, cancelable: true });
+      (document.activeElement || document).dispatchEvent(esc);
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', code: 'Escape', keyCode: 27, which: 27, bubbles: true, cancelable: true }));
+    } catch (_) {}
+    await sleep(180);
+    spec.button.scrollIntoView({ block: 'center', behavior: 'instant' });
+    if (!await trustedClick(spec.button)) {
+      try { chrome.storage.local.get('pja_dbg', d => { const a=(d.pja_dbg||[]).slice(-160); a.push('[WD] prompt open failed key='+spec.key); chrome.storage.local.set({pja_dbg:a}); }); } catch (_) {}
+      continue;
+    }
+    let match = null;
+    let lastOptions = [];
+    for (let attempt = 0; attempt < 12 && !match; attempt++) {
+      await sleep(120);
+      const lists = Array.from(new Set([
+        ...document.querySelectorAll('[data-automation-id="activeListContainer"]'),
+        ...document.querySelectorAll('[role="listbox"]')
+      ])).filter(el => {
+        const r = el.getBoundingClientRect();
+        return r.width > 0 && r.height > 0;
+      });
+      const options = lists.flatMap(list => Array.from(list.querySelectorAll('[role="option"]')))
+        .filter(opt => !opt.querySelector('[role="option"]'));
+      lastOptions = options;
+      match = options.find(opt => spec.match(ownText(opt))) || null;
+    }
+    if (!match) {
+      try { chrome.storage.local.get('pja_dbg', d => { const a=(d.pja_dbg||[]).slice(-160); a.push('[WD] prompt no match key='+spec.key+' opts='+lastOptions.slice(0,12).map(ownText).join('|').slice(0,180)); chrome.storage.local.set({pja_dbg:a}); }); } catch (_) {}
+      continue;
+    }
+    const target = match.querySelector('[data-automation-id="promptLeafNode"]') || match;
+    if (await trustedClick(target)) {
+      committed++;
+      try { chrome.storage.local.get('pja_dbg', d => { const a=(d.pja_dbg||[]).slice(-160); a.push('[WD] prompt selected key='+spec.key+' value="'+ownText(match).slice(0,32)+'"'); chrome.storage.local.set({pja_dbg:a}); }); } catch (_) {}
+      await sleep(180);
+    }
+  }
+  return committed;
+}
+window.pjaFillWorkdayPromptButtons = pjaFillWorkdayPromptButtons;
+
 // ── Autofill ───────────────────────────────────────────────────────────────
 function pjaFillForm(profile, answers) {
   const visible = el => { const r = el.getBoundingClientRect(); return r.width > 0 && r.height > 0; };
@@ -1648,8 +1881,17 @@ function pjaFillForm(profile, answers) {
   fields.forEach(el => {
     if (_eaRoot && _eaRoot.contains && !_eaRoot.contains(el)) return;
     if (/^(jobs-search-box|global-nav)/.test(el.id || '')) return;
+    // intl-tel-input renders a country-picker search box beside the real phone input. Its nearby
+    // "Phone" label made the generic classifier type the candidate's phone number into that
+    // search combobox, leaving the actual phone invalid and the picker open at submit time.
+    if (/^iti-\d+__search-input$/i.test(el.id || '') ||
+        (el.type === 'search' && el.closest('[class*="iti"]'))) return;
     const rawLabel = pjaGetLabel(el);
     const key = pjaClassify(rawLabel);
+
+    // Pronouns are optional identity data and have no stored profile source. Do not let fuzzy
+    // answer-bank matching insert unrelated text (observed live: "Full-time").
+    if (/\bpronouns?\b/i.test(rawLabel || '')) return;
 
     // Skip OPTIONAL social-profile / personal-URL fields (LinkedIn/Facebook/Twitter/etc).
     // They're rarely required, and a stale answer-bank value here fails the ATS's URL-format
@@ -1789,6 +2031,11 @@ function pjaFillForm(profile, answers) {
         el.dispatchEvent(new InputEvent('input', { bubbles: true, data: locVal, inputType: 'insertText' }));
         el.dispatchEvent(new Event('change', { bubbles: true }));
       });
+  }
+
+  if (/workday\.com|myworkdayjobs\.com/i.test(location.hostname)) {
+    window._pjaComboChain = (window._pjaComboChain || Promise.resolve())
+      .then(() => pjaFillWorkdayPromptButtons(profile));
   }
 
   return filled;
@@ -2046,8 +2293,18 @@ async function pjaForceCountryField(value) {
     // Skip intl-tel-input phone country pickers — those are handled by the phone filler.
     if (inp.closest('[class*="iti"], [class*="PhoneInput"]')) continue;
     const ctrl = inp.closest('[class*="select__control"]');
-    const committed = () => { const sv = ctrl && ctrl.querySelector('[class*="single-value"],[class*="singleValue"]'); return !!(sv && sv.textContent && sv.textContent.trim() && !/^\s*select/i.test(sv.textContent)); };
-    if (committed()) { try { if (typeof pjaRDbg==='function') pjaRDbg('[country] SKIP cdp (display already committed, remix='+/remix-css/.test(ctrl&&ctrl.className||'')+')'); } catch(_){} done++; continue; }
+    const displayText = () => ((ctrl && ctrl.querySelector('[class*="single-value"],[class*="singleValue"]')?.textContent) || '').trim();
+    const selectedText = () => ((ctrl && (ctrl.parentElement || ctrl).querySelector('[role="option"][aria-selected="true"]')?.textContent) || '').trim();
+    const committed = () => {
+      const want = val.toLowerCase();
+      const shown = (selectedText() || displayText()).toLowerCase();
+      return !!shown && (shown === want || shown.startsWith(want + ' ') || shown.includes(want));
+    };
+    const isRemix = /remix-css/.test(ctrl && ctrl.className || '');
+    // Remix can show a stale single-value while Formik's validated value is still empty. Only the
+    // trusted option click commits it, so a visible display is a valid early-exit on legacy forms
+    // but never on remix.
+    if (committed() && !isRemix) { try { if (typeof pjaRDbg==='function') pjaRDbg('[country] SKIP cdp (display already committed, remix=false)'); } catch(_){} done++; continue; }
     // NOTE: do NOT try the fiber onChange for country. On Greenhouse's "remix" build the fiber
     // onChange THROWS (or sets only the display single-value while the form value stays empty),
     // which fools committed() into skipping the real commit → country-error at submit. Go straight
@@ -2069,6 +2326,7 @@ async function pjaForceCountryField(value) {
           resolve(chrome.runtime.lastError || resp?.error ? 'fail' : 'cdp');
         }); } catch (_) { if (!fin) { fin = true; clearTimeout(to); resolve('catch'); } }
       });
+      let clickedMatch = false;
       for (let attempt = 0; attempt < 2 && !committed(); attempt++) {
         inp.focus();
         ['mousedown','mouseup'].forEach(t => ctrl.dispatchEvent(new MouseEvent(t, { bubbles: true, cancelable: true, button: 0, buttons: 1 })));
@@ -2080,18 +2338,87 @@ async function pjaForceCountryField(value) {
         // prefix match: value "United States" → option "United States +1"
         let m = opts.find(o => /^united states\b/i.test((o.textContent || '').trim()))
           || opts.find(o => /^united states$/i.test((o.textContent || '').trim()));
-        if (m) { const how = await cdpClick(m); await _sleep(300);
+        if (m) { const how = await cdpClick(m); clickedMatch = clickedMatch || how === 'cdp'; await _sleep(300);
           const _cmsg = '[country] cdp-click "'+(m.textContent||'').trim().slice(0,18)+'" via '+how+' committed='+committed();
           try { if (typeof pjaRDbg === 'function') pjaRDbg(_cmsg); } catch(_){}
           try { chrome.storage.local.get('pja_dbg', d => { const a=(d.pja_dbg||[]).slice(-160); a.push(_cmsg); chrome.storage.local.set({pja_dbg:a}); }); } catch(_){}
         }
       }
-      if (committed()) done++;
+      // Dial-code controls display only "+1" after selection, so a successful trusted click on
+      // the specifically matched US option is authoritative even when display text is ambiguous.
+      if (committed() || clickedMatch) done++;
     }
   }
   return done;
 }
 window.pjaForceCountryField = pjaForceCountryField;
+
+// Force-commit phone/tel controls with trusted keystrokes. Greenhouse's newer intl-tel-input
+// widget can display a synthetically/fiber-filled number while its validated React value remains
+// empty ("Phone is required"). Clearing first and typing through CDP produces genuine input events
+// and keeps the widget's internal state in sync. Returns the number of phone fields typed.
+function pjaIsPhoneFieldDescriptor(type, id, name, label) {
+  const text = [label, name, id].filter(Boolean).join(' ');
+  return type === 'tel' || pjaClassify(String(label || '').toLowerCase()) === 'phone' ||
+    /\b(phone|mobile|telephone)\b/i.test(text);
+}
+window.pjaIsPhoneFieldDescriptor = pjaIsPhoneFieldDescriptor;
+
+async function pjaForcePhoneField(value) {
+  const digits = String(value || '').replace(/\D/g, '');
+  if (!digits) return 0;
+  const roots = typeof pjaGetAllRoots === 'function' ? pjaGetAllRoots() : [document];
+  const inputs = [];
+  for (const root of roots) {
+    // Remix Greenhouse sometimes renders the actual required phone control as a plain text input
+    // with neither `phone` in its id/name nor type=tel. Use the same label classification as the
+    // normal filler so the trusted-key fallback can still find and commit that controlled input.
+    root.querySelectorAll('input:not([type="hidden"]):not([type="file"]):not([type="submit"]):not([type="button"]):not([type="checkbox"]):not([type="radio"])').forEach(inp => {
+      if (/^iti-\d+__search-input$/i.test(inp.id || '') || inp.type === 'search') return;
+      const label = typeof pjaGetLabel === 'function' ? pjaGetLabel(inp) : '';
+      if (pjaIsPhoneFieldDescriptor(inp.type, inp.id, inp.name, label)) {
+        if (!inputs.includes(inp)) inputs.push(inp);
+      }
+    });
+  }
+  let count = 0;
+  for (const inp of inputs) {
+    try {
+      const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value')?.set;
+      if (setter) setter.call(inp, ''); else inp.value = '';
+      inp.dispatchEvent(new InputEvent('input', { bubbles: true, data: '', inputType: 'deleteContentBackward' }));
+      inp.dispatchEvent(new Event('change', { bubbles: true }));
+      inp.scrollIntoView({ block: 'center', behavior: 'instant' });
+      const r = inp.getBoundingClientRect();
+      const ok = await new Promise(resolve => {
+        let finished = false;
+        const timeout = setTimeout(() => { if (!finished) { finished = true; resolve(false); } }, 8000);
+        chrome.runtime.sendMessage({ type: 'CDP_TYPE_AT', x: r.left + r.width / 2, y: r.top + r.height / 2, text: digits }, resp => {
+          if (finished) return; finished = true; clearTimeout(timeout);
+          resolve(!(chrome.runtime.lastError || (resp && resp.error)));
+        });
+      });
+      await new Promise(r => setTimeout(r, 250));
+      // A successful CDP response only proves the keystrokes were delivered. Some controlled
+      // Greenhouse phone inputs immediately discard them, leaving the required value empty. Verify
+      // the DOM value and restore React/native state before claiming a commit.
+      if (ok && !String(inp.value || '').replace(/\D/g, '')) {
+        try { if (typeof pjaFillTextViaFiber === 'function') pjaFillTextViaFiber(inp, digits); } catch (_) {}
+        await new Promise(r => setTimeout(r, 150));
+        if (!String(inp.value || '').replace(/\D/g, '')) {
+          if (setter) setter.call(inp, digits); else inp.value = digits;
+          inp.dispatchEvent(new InputEvent('input', { bubbles: true, data: digits, inputType: 'insertText' }));
+          inp.dispatchEvent(new Event('change', { bubbles: true }));
+        }
+      }
+      const committedDigits = String(inp.value || '').replace(/\D/g, '');
+      if (committedDigits) { count++; try { if (typeof pjaRDbg === 'function') pjaRDbg('[phone] trusted type committed len=' + committedDigits.length); } catch (_) {} }
+      else { try { if (typeof pjaRDbg === 'function') pjaRDbg('[phone] trusted type NOT committed'); } catch (_) {} }
+    } catch (_) {}
+  }
+  return count;
+}
+window.pjaForcePhoneField = pjaForcePhoneField;
 
 // Sweep ALL required Greenhouse policy react-selects (sponsorship, work-authorization, onsite,
 // acknowledgments, etc.) and force-commit each with its honest deterministic answer via the fiber
@@ -2132,6 +2459,12 @@ async function pjaForceAllPolicyReactSelects(profile) {
     if (!label) { diag.cand.push({ id: (inp.id||'').slice(0,20), skip: 'nolabel' }); continue; }
     let ans = det ? det(label) : null;
     let isEdu = false;
+    // EEO gender is sometimes a required Greenhouse remix multi-select rather than a checkbox
+    // group. Route the stored profile truth through the same trusted option-click path.
+    if (!ans && profile && /gender identity|how (?:do|would) you describe your gender|\bgender\b/i.test(label)) {
+      ans = /^female$/i.test(profile.gender || '') ? 'Woman'
+        : (/^male$/i.test(profile.gender || '') ? 'Man' : profile.gender);
+    }
     // Education react-selects (degree/discipline/school) — the discipline field is a recurring
     // Greenhouse blocker (renders late, gh-edu misses it). Commit from profile truth via the bridge.
     if (!ans && profile) {
@@ -2224,8 +2557,14 @@ async function pjaForceReactSelectCommit(input, value, opts) {
   // click landing (clicked=true) instead; otherwise stop as soon as the display commits.
   let clicked = false;
   for (let attempt = 0; attempt < 2 && (force ? !clicked : !committed()); attempt++) {
-    input.focus();
-    ['mousedown', 'mouseup'].forEach(t => ctrl.dispatchEvent(new MouseEvent(t, { bubbles: true, cancelable: true, button: 0 })));
+    // Remix also rejects a synthetic CONTROL click on some tenants. In that case the menu never
+    // opens, findOpt() sees zero options, and even our trusted option-click path cannot run. Open
+    // the control with CDP first; retain the synthetic events only as a fallback for legacy builds.
+    const openedVia = await cdpClickOpt(ctrl);
+    if (openedVia !== 'cdp') {
+      input.focus();
+      ['mousedown', 'mouseup'].forEach(t => ctrl.dispatchEvent(new MouseEvent(t, { bubbles: true, cancelable: true, button: 0 })));
+    }
     await _sleep(150);
     // Type the value to filter (searchable lists); harmless when isSearchable is false.
     if (setter) { setter.call(input, String(value)); input.dispatchEvent(new InputEvent('input', { bubbles: true, data: String(value), inputType: 'insertText' })); }
@@ -2237,7 +2576,31 @@ async function pjaForceReactSelectCommit(input, value, opts) {
     }
     let how = 'noopt';
     if (m) { how = await cdpClickOpt(m); if (how === 'cdp') clicked = true; }
-    else { input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', keyCode: 13, bubbles: true })); }
+    else {
+      // Some Remix portals keep options outside the isolated-world DOM. Drive the focused input
+      // with trusted typing, then trusted Enter so react-select performs its own filtered commit.
+      if (setter) { setter.call(input, ''); input.dispatchEvent(new InputEvent('input', { bubbles: true })); }
+      const ir = input.getBoundingClientRect();
+      const typed = await new Promise(resolve => {
+        let done = false;
+        const timer = setTimeout(() => { if (!done) { done = true; resolve(false); } }, 5000);
+        try { chrome.runtime.sendMessage({ type: 'CDP_TYPE_AT', x: ir.left + ir.width / 2, y: ir.top + ir.height / 2, text: String(value) }, resp => {
+          if (done) return; done = true; clearTimeout(timer); resolve(!(chrome.runtime.lastError || resp?.error));
+        }); } catch (_) { if (!done) { done = true; clearTimeout(timer); resolve(false); } }
+      });
+      await _sleep(350);
+      let afterType = findOpt();
+      if (afterType) { how = await cdpClickOpt(afterType); if (how === 'cdp') clicked = true; }
+      else if (typed) {
+        how = await new Promise(resolve => {
+          try { chrome.runtime.sendMessage({ type: 'WORKDAY_TRUSTED_ENTER' }, resp => resolve(chrome.runtime.lastError || resp?.error ? 'enter-fail' : 'cdp-enter')); }
+          catch (_) { resolve('enter-fail'); }
+        });
+        if (how === 'cdp-enter') clicked = true;
+      } else {
+        input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', keyCode: 13, bubbles: true }));
+      }
+    }
     await _sleep(300);
     const _frsMsg = '[frs] id='+String(input.id||'').slice(0,18)+' val="'+String(value).slice(0,6)+'" opt='+(m?'Y':'N')+' via='+how+' committed='+committed();
     try { chrome.storage.local.get('pja_dbg', d => { const a=(d.pja_dbg||[]).slice(-160); a.push(_frsMsg); chrome.storage.local.set({pja_dbg:a}); }); } catch(_){}

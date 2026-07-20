@@ -24,6 +24,9 @@ module.exports = (t) => {
   t.eq(c('zip code'), 'zip', 'zip');
   t.eq(c('phone type'), 'phoneType', 'phoneType before phone');
   t.eq(c('mobile phone'), 'phone', 'phone');
+  t.ok(w.pjaIsPhoneFieldDescriptor('text', '', '', 'Phone*'), 'plain text input is phone by label');
+  t.ok(w.pjaIsPhoneFieldDescriptor('tel', '', '', ''), 'tel input is phone without id/name');
+  t.ok(!w.pjaIsPhoneFieldDescriptor('search', 'iti-1__search-input', '', 'Search'), 'ITI search is not a phone value field');
 
   // --- work auth vs sponsorship (must not collide) ---
   t.eq(c('are you legally authorized to work in the united states'), 'workAuth', 'workAuth');

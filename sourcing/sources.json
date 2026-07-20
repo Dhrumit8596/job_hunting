@@ -1,5 +1,5 @@
 {
-  "_doc": "Sourcing registry. Add a company: append {ats, slug, name} for greenhouse/lever, or {ats:'workday', name, apiUrl, siteBase} for workday. Dead/unknown slugs return nothing and are skipped. Greenhouse slug = boards-api.greenhouse.io/v1/boards/<slug>/jobs ; Lever slug = api.lever.co/v0/postings/<slug>?mode=json. AUTO-EXPAND: add candidate {ats,slug,name} to CANDIDATES in sourcing/validate-slugs.js, run `node sourcing/validate-slugs.js` to probe (prints each slug's total + TN/CA-eligible counts, marks dead/duplicate/export-blocked), then `node sourcing/validate-slugs.js --append` to auto-add the live, non-duplicate, non-export-controlled ones here. Export-controlled companies (see COMPANY_EXPORT_BLOCK in filter.js) are skipped even if live. Re-run to scale to whatever volume a run needs.",
+  "_doc": "Sourcing registry. Slug-backed sources use {ats, slug, name}; Workday, Eightfold, and SuccessFactors use their validated public board configuration. Dead identifiers return nothing and are skipped. AUTO-EXPAND: add a candidate to CANDIDATES in sourcing/validate-slugs.js, run `node sourcing/validate-slugs.js` to probe it, then use `--append` to add live, unique, non-export-controlled sources. Export-controlled companies (see COMPANY_EXPORT_BLOCK in filter.js) are excluded even when their boards are live.",
   "sources": [
     {
       "ats": "greenhouse",
@@ -28,58 +28,13 @@
     },
     {
       "ats": "greenhouse",
-      "slug": "cerebrassystems",
-      "name": "Cerebras Systems"
-    },
-    {
-      "ats": "greenhouse",
-      "slug": "guardanthealth",
-      "name": "Guardant Health"
-    },
-    {
-      "ats": "greenhouse",
       "slug": "natera",
       "name": "Natera"
     },
     {
       "ats": "greenhouse",
-      "slug": "pacificbiosciences",
-      "name": "Pacific Biosciences"
-    },
-    {
-      "ats": "greenhouse",
-      "slug": "nanostring",
-      "name": "NanoString"
-    },
-    {
-      "ats": "greenhouse",
-      "slug": "standardbiotools",
-      "name": "Standard BioTools"
-    },
-    {
-      "ats": "greenhouse",
       "slug": "ginkgobioworks",
       "name": "Ginkgo Bioworks"
-    },
-    {
-      "ats": "greenhouse",
-      "slug": "benchling",
-      "name": "Benchling"
-    },
-    {
-      "ats": "greenhouse",
-      "slug": "gritstonebio",
-      "name": "Gritstone bio"
-    },
-    {
-      "ats": "greenhouse",
-      "slug": "cariboubiosciences",
-      "name": "Caribou Biosciences"
-    },
-    {
-      "ats": "greenhouse",
-      "slug": "mammothbiosciences",
-      "name": "Mammoth Biosciences"
     },
     {
       "ats": "greenhouse",
@@ -98,26 +53,6 @@
     },
     {
       "ats": "greenhouse",
-      "slug": "matterport",
-      "name": "Matterport"
-    },
-    {
-      "ats": "greenhouse",
-      "slug": "saildrone",
-      "name": "Saildrone"
-    },
-    {
-      "ats": "greenhouse",
-      "slug": "zipline",
-      "name": "Zipline"
-    },
-    {
-      "ats": "greenhouse",
-      "slug": "ouraring",
-      "name": "Oura"
-    },
-    {
-      "ats": "greenhouse",
       "slug": "eikontherapeutics",
       "name": "Eikon Therapeutics"
     },
@@ -130,11 +65,6 @@
       "ats": "lever",
       "slug": "capstan-medical",
       "name": "Capstan Medical"
-    },
-    {
-      "ats": "lever",
-      "slug": "plenty",
-      "name": "Plenty"
     },
     {
       "ats": "greenhouse",
@@ -247,21 +177,6 @@
       "name": "Culture Biosciences"
     },
     {
-      "ats": "greenhouse",
-      "slug": "nuro",
-      "name": "Nuro"
-    },
-    {
-      "ats": "greenhouse",
-      "slug": "oklo",
-      "name": "Oklo"
-    },
-    {
-      "ats": "greenhouse",
-      "slug": "kairospower",
-      "name": "Kairos Power"
-    },
-    {
       "ats": "lever",
       "slug": "aeva",
       "name": "Aeva"
@@ -318,21 +233,6 @@
     },
     {
       "ats": "greenhouse",
-      "slug": "astranis",
-      "name": "Astranis (check)"
-    },
-    {
-      "ats": "greenhouse",
-      "slug": "lightmatter",
-      "name": "Lightmatter"
-    },
-    {
-      "ats": "greenhouse",
-      "slug": "sambanovasystems",
-      "name": "SambaNova"
-    },
-    {
-      "ats": "greenhouse",
       "slug": "flex",
       "name": "Flex"
     },
@@ -378,11 +278,6 @@
     },
     {
       "ats": "greenhouse",
-      "slug": "skyryse",
-      "name": "placeholder7"
-    },
-    {
-      "ats": "greenhouse",
       "slug": "glydways",
       "name": "Glydways"
     },
@@ -400,11 +295,6 @@
       "ats": "greenhouse",
       "slug": "markforged",
       "name": "Markforged"
-    },
-    {
-      "ats": "greenhouse",
-      "slug": "sweetgreen",
-      "name": "placeholder8"
     },
     {
       "ats": "greenhouse",
@@ -553,6 +443,38 @@
     },
     {
       "ats": "workday",
+      "name": "Applied Materials",
+      "apiUrl": "https://amat.wd1.myworkdayjobs.com/wday/cxs/amat/External/jobs",
+      "siteBase": "https://amat.wd1.myworkdayjobs.com/en-US/External",
+      "queries": ["Quality Engineer", "Product Engineer"],
+      "perQueryMax": 40
+    },
+    {
+      "ats": "workday",
+      "name": "Abbott",
+      "apiUrl": "https://abbott.wd5.myworkdayjobs.com/wday/cxs/abbott/abbottcareers/jobs",
+      "siteBase": "https://abbott.wd5.myworkdayjobs.com/en-US/abbottcareers",
+      "queries": ["Manufacturing Engineer", "Quality Engineer"],
+      "perQueryMax": 40
+    },
+    {
+      "ats": "workday",
+      "name": "Edwards Lifesciences",
+      "apiUrl": "https://edwards.wd5.myworkdayjobs.com/wday/cxs/edwards/EdwardsCareers/jobs",
+      "siteBase": "https://edwards.wd5.myworkdayjobs.com/en-US/EdwardsCareers",
+      "queries": ["Quality Engineer"],
+      "perQueryMax": 40
+    },
+    {
+      "ats": "workday",
+      "name": "Dexcom",
+      "apiUrl": "https://dexcom.wd1.myworkdayjobs.com/wday/cxs/dexcom/Dexcom/jobs",
+      "siteBase": "https://dexcom.wd1.myworkdayjobs.com/en-US/Dexcom",
+      "queries": ["Process Development Engineer", "Quality Engineer"],
+      "perQueryMax": 40
+    },
+    {
+      "ats": "workday",
       "name": "KLA",
       "apiUrl": "https://kla.wd1.myworkdayjobs.com/wday/cxs/kla/Search/jobs",
       "siteBase": "https://kla.wd1.myworkdayjobs.com/en-US/Search"
@@ -567,7 +489,9 @@
       "ats": "workday",
       "name": "Bloom Energy",
       "apiUrl": "https://bloomenergy.wd1.myworkdayjobs.com/wday/cxs/bloomenergy/BloomEnergyCareers/jobs",
-      "siteBase": "https://bloomenergy.wd1.myworkdayjobs.com/en-US/BloomEnergyCareers"
+      "siteBase": "https://bloomenergy.wd1.myworkdayjobs.com/en-US/BloomEnergyCareers",
+      "queries": ["Metrology Engineer"],
+      "perQueryMax": 40
     },
     {
       "ats": "workday",
@@ -585,7 +509,9 @@
       "ats": "workday",
       "name": "FormFactor",
       "apiUrl": "https://formfactor.wd1.myworkdayjobs.com/wday/cxs/formfactor/FFI-Careers/jobs",
-      "siteBase": "https://formfactor.wd1.myworkdayjobs.com/en-US/FFI-Careers"
+      "siteBase": "https://formfactor.wd1.myworkdayjobs.com/en-US/FFI-Careers",
+      "queries": ["Metrology Development Engineer"],
+      "perQueryMax": 40
     },
     {
       "ats": "workday",
@@ -636,11 +562,6 @@
       "name": "Arcadia Science"
     },
     {
-      "ats": "lever",
-      "slug": "foundry-robotics",
-      "name": "Foundry Robotics"
-    },
-    {
       "ats": "ashby",
       "slug": "cobot",
       "name": "Collaborative Robotics"
@@ -649,11 +570,6 @@
       "ats": "ashby",
       "slug": "foundry-robotics",
       "name": "Foundry Robotics"
-    },
-    {
-      "ats": "ashby",
-      "slug": "AtomicSemi",
-      "name": "Atomic Semi"
     },
     {
       "ats": "ashby",
@@ -938,7 +854,7 @@
     {
       "ats": "ashby",
       "slug": "wayve",
-      "name": "Wayve (Ashby)"
+      "name": "Wayve"
     },
     {
       "ats": "greenhouse",
@@ -984,6 +900,81 @@
       "ats": "greenhouse",
       "slug": "slingshotbiosciences",
       "name": "Slingshot Biosciences"
+    },
+    {
+      "ats": "ashby",
+      "slug": "etched",
+      "name": "Etched"
+    },
+    {
+      "ats": "ashby",
+      "slug": "axelera",
+      "name": "Axelera AI"
+    },
+    {
+      "ats": "smartrecruiters",
+      "slug": "WesternDigital",
+      "name": "Western Digital",
+      "country": "us"
+    },
+    {
+      "ats": "smartrecruiters",
+      "slug": "Intuitive",
+      "name": "Intuitive",
+      "country": "us"
+    },
+    {
+      "ats": "smartrecruiters",
+      "slug": "INFICON2",
+      "name": "INFICON",
+      "country": "us"
+    },
+    {
+      "ats": "smartrecruiters",
+      "slug": "RenesasElectronics",
+      "name": "Renesas Electronics",
+      "country": "us"
+    },
+    {
+      "ats": "smartrecruiters",
+      "slug": "BoschGroup",
+      "name": "Bosch Group",
+      "country": "us"
+    },
+    {
+      "ats": "smartrecruiters",
+      "slug": "StaubliGroup",
+      "name": "Stäubli",
+      "country": "us"
+    },
+    {
+      "ats": "eightfold",
+      "name": "Micron",
+      "origin": "https://careers.micron.com",
+      "domain": "micron.com",
+      "location": "United States",
+      "pageSize": 10
+    },
+    {
+      "ats": "eightfold",
+      "name": "GlobalFoundries",
+      "origin": "https://careers.gf.com",
+      "domain": "globalfoundries.com",
+      "location": "United States",
+      "pageSize": 10
+    },
+    {
+      "ats": "successfactors",
+      "name": "TSMC",
+      "baseUrl": "https://ro.careers.tsmc.com",
+      "locationSearch": "United States",
+      "pageSize": 25,
+      "queries": [
+        "process engineer",
+        "equipment engineer",
+        "quality engineer",
+        "manufacturing engineer"
+      ]
     }
   ]
 }

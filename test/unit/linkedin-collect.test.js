@@ -86,4 +86,24 @@ module.exports = (t) => {
     'https://boards.greenhouse.io/acme/jobs/123', 'decode: passes through a direct offsite URL');
   t.eq(w.pjaDecodeApplyUrl('https://www.linkedin.com/jobs/view/123/'), null, 'decode: LinkedIn (Easy Apply / internal) -> null');
   t.eq(w.pjaDecodeApplyUrl(''), null, 'decode: empty -> null');
+
+  // Detail hydration must bind the description to the requested card, otherwise the previous
+  // panel's JD can be scored against the wrong role.
+  t.ok(typeof w.pjaLinkedInDetailMatches === 'function', 'detail: identity guard exported');
+  t.eq(w.pjaLinkedInDetailMatches('1002', 'Quality Engineer 2',
+    'https://www.linkedin.com/jobs/search/?currentJobId=1002', 'Different title'), false,
+  'detail: new URL id cannot reuse the previous panel title/JD');
+  t.eq(w.pjaLinkedInDetailMatches('1002', 'Quality Engineer 2',
+    'https://www.linkedin.com/jobs/search/?currentJobId=1002', 'Quality Engineer 2'), true,
+  'detail: requested job id and panel title must agree');
+  t.eq(w.pjaLinkedInDetailMatches('1002', 'Quality Engineer 2',
+    'https://www.linkedin.com/jobs/search/?currentJobId=9999', 'Old Process Engineer'), false,
+  'detail: stale prior panel rejected');
+  t.eq(w.pjaLinkedInDetailMatches('1002', 'Quality Engineer',
+    'https://www.linkedin.com/jobs/search/?currentJobId=9999', 'Quality Engineer'), false,
+  'detail: matching title cannot override an explicit different requisition id');
+  t.eq(w.pjaLinkedInPanelAdvanced('1002', 'https://www.linkedin.com/jobs/search/?currentJobId=9999',
+    'old requirements', 'old requirements'), false, 'detail: URL movement waits for JD content mutation');
+  t.eq(w.pjaLinkedInPanelAdvanced('1002', 'https://www.linkedin.com/jobs/search/?currentJobId=9999',
+    'old requirements', 'new requirements'), true, 'detail: mutated JD content is accepted');
 };

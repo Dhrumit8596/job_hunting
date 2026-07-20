@@ -3,7 +3,7 @@
 // Load the IndexedDB corpus + apply-selection modules into the SW global scope. Wrapped so a load
 // failure can never brick the whole service worker. Order matters: apply-select needs detect-ats.
 try {
-  importScripts('idb-store.js', 'sourcing/detect-ats.js', 'sourcing/apply-select.js');
+  importScripts('idb-store.js', 'sourcing/detect-ats.js', 'sourcing/apply-select.js', 'application-ledger.js');
 } catch (e) { console.error('PJA: module load failed', e); }
 
 // ── Dev mode ──────────────────────────────────────────────────────────────────
@@ -36,12 +36,13 @@ chrome.storage.local.get('pja_answers', r => {
 // Ingest a normalized {index,state} payload (from dev-server /source-v2) into the IndexedDB
 // corpus (source of truth) and publish a small count for the review UI. Does NOT overwrite
 // pja_shortlist — the shortlist page pulls from the corpus explicitly (GET_JOB_CORPUS).
-async function pjaIngestCorpus(index, state) {
+async function pjaIngestCorpus(index, state, opts = {}) {
   if (!self.PJAIdb) return 0;
-  await self.PJAIdb.importNormalized({ index: index || {}, state: state || {} });
+  const imported = await self.PJAIdb.importNormalized({ index: index || {}, state: state || {} },
+    { replaceMissing: opts.replaceMissing === true });
   const s = await self.PJAIdb.corpusSummary({ topN: 0 });
   await new Promise(r => chrome.storage.local.set({ pja_job_corpus_count: s.count, pja_schema_version: 1 }, r));
-  return s.count;
+  return Object.assign({ count: s.count }, imported);
 }
 
 // Build the apply-set from the IndexedDB corpus (shared by the GET_APPLY_SET message + the WS
@@ -50,15 +51,247 @@ async function pjaBuildApplySet(opts) {
   if (!self.PJAIdb || !self.PJAApplySelect) return { jobs: [], error: 'modules not loaded' };
   const corpus = await self.PJAIdb.getAll();
   const st = await new Promise(r => chrome.storage.local.get(['pja_applied_log', 'pja_jobs'], d => r(d)));
-  const recs = [...(st.pja_applied_log || []), ...(st.pja_jobs || [])];
-  const appliedRoleKeys = recs.map(x => self.PJAApplySelect.roleKey({ company: x.company || x.companyName, title: x.title || x.role || x.jobTitle }));
-  const set = self.PJAApplySelect.buildApplySet(corpus, {
+  const recs = [...(st.pja_applied_log || []).filter(x => !x || !x.status || /^(applied|submitted|submitting|success|confirmed)$/i.test(String(x.status))),
+    ...(st.pja_jobs || []).filter(x => x && /^(applied|submitted|success|confirmed)$/i.test(String(x.status || x.result || '')))];
+  const selectOpts = {
     threshold: opts && opts.threshold != null ? opts.threshold : 70,
     dailyCap: opts && opts.dailyCap != null ? opts.dailyCap : 30,
     atsAllow: opts && opts.atsAllow,
-    appliedRoleKeys,
-  });
+    requireEvidence: !!(opts && opts.requireEvidence),
+    maxGaps: opts && opts.maxGaps != null ? opts.maxGaps : 2,
+    perCompanyCap: opts && opts.perCompanyCap != null ? opts.perCompanyCap : 2,
+    maxBrowserAgeMs: opts && opts.maxBrowserAgeMs != null ? opts.maxBrowserAgeMs : 48 * 60 * 60 * 1000,
+    appliedRecords: recs,
+  };
+  if (opts && Object.prototype.hasOwnProperty.call(opts, 'candidateFingerprint')) {
+    selectOpts.candidateFingerprint = opts.candidateFingerprint;
+  }
+  const set = self.PJAApplySelect.buildApplySet(corpus, selectOpts);
   return { jobs: set, total: Object.keys(corpus.index).length };
+}
+
+// The service worker is the sole writer for the append-only confirmation ledger. Chaining writes
+// prevents three apply channels finishing together from overwriting one another's read-modify-write.
+const PJA_APPLICATION_LEDGER_KEY = 'pja_application_ledger';
+let pjaLedgerWriteChain = Promise.resolve();
+function pjaAppendApplicationEvent(event) {
+  const operation = pjaLedgerWriteChain.catch(() => {}).then(async () => {
+    if (!self.PJAApplicationLedger) throw new Error('application ledger unavailable');
+    const data = await new Promise(r => chrome.storage.local.get(PJA_APPLICATION_LEDGER_KEY, r));
+    const current = data[PJA_APPLICATION_LEDGER_KEY] || self.PJAApplicationLedger.emptyLedger();
+    const next = self.PJAApplicationLedger.reduceLedger(current, event);
+    await new Promise(r => chrome.storage.local.set({ [PJA_APPLICATION_LEDGER_KEY]: next }, r));
+    await pjaAdvanceRankedRun(event, next);
+    return next;
+  });
+  pjaLedgerWriteChain = operation.catch(e => { console.error('PJA: ledger append failed', e); });
+  return operation;
+}
+
+function pjaSetLocal(values) {
+  return new Promise(resolve => chrome.storage.local.set(values, resolve));
+}
+
+function pjaLaunchEasyApplySingle(job, master) {
+  return new Promise((resolve, reject) => {
+    chrome.storage.local.get(['pja_profile', 'pja_answers'], d => {
+      const queue = { status: 'applying', jobs: [job], currentIndex: 0,
+        results: { applied: [], skipped: [], errors: [] }, profile: d.pja_profile || {},
+        answers: d.pja_answers || {}, runId: master.runId, startedAt: Date.now() };
+      const firstUrl = 'https://www.linkedin.com/jobs/search/?f_AL=true&currentJobId=' + encodeURIComponent(job.jobId || job.sourceJobId || '');
+      chrome.tabs.create({ url: firstUrl, active: true }, tab => {
+        if (chrome.runtime.lastError || !tab) return reject(new Error(chrome.runtime.lastError?.message || 'easy-apply tab create failed'));
+        const onUpd = (tid, info) => {
+          if (tid !== tab.id || info.status !== 'complete') return;
+          chrome.tabs.onUpdated.removeListener(onUpd);
+          chrome.scripting.executeScript({ target: { tabId: tab.id },
+            func: q => { try { sessionStorage.setItem('pja_apply_queue', JSON.stringify(q)); location.reload(); } catch (_) {} },
+            args: [queue] }).catch(() => {});
+        };
+        chrome.tabs.onUpdated.addListener(onUpd);
+        resolve(tab.id);
+      });
+    });
+  });
+}
+
+async function pjaLaunchIndeedSingle(job, master) {
+  const d = await new Promise(r => chrome.storage.local.get(['pja_profile', 'pja_answers'], r));
+  const queue = { status: 'applying', jobs: [job], currentIndex: 0,
+    results: { applied: [], skipped: [] }, profile: d.pja_profile || {}, answers: d.pja_answers || {},
+    runId: master.runId, startedAt: Date.now() };
+  await pjaSetLocal({ pja_indeed_queue: queue, pja_indeed_paused: null });
+  return new Promise((resolve, reject) => chrome.tabs.create({
+    url: 'https://www.indeed.com/viewjob?jk=' + encodeURIComponent(job.jobId || job.sourceJobId || ''), active: true,
+  }, tab => chrome.runtime.lastError || !tab
+    ? reject(new Error(chrome.runtime.lastError?.message || 'Indeed tab create failed')) : resolve(tab.id)));
+}
+
+async function pjaLaunchExternalSingle(job, master) {
+  const launchedAt = Date.now();
+  const queue = { status: 'applying', jobs: [job], currentIndex: 0,
+    results: { applied: [], skipped: [] }, runId: master.runId, startedAt: launchedAt };
+  const current = Object.assign({}, job, { returnUrl: 'https://www.linkedin.com/jobs/', runId: master.runId });
+  await pjaSetLocal({ pja_ext_queue: queue, pja_ext_current: current,
+    pja_ext_stop_before_submit: !!master.stopBeforeSubmit, pja_navigate_to: job.applyUrl,
+    // Every ranked reserve is a one-job subqueue with the same runId/index. Include its canonical
+    // identity so the legacy SW watchdog cannot inherit the prior reserve's elapsed timer.
+    pja_apply_wd: { runId: master.runId, idx: 0,
+      jobKey: self.PJAApplySelect?.queueJobKey(job) || '', startedAt: launchedAt } });
+  return new Promise((resolve, reject) => chrome.tabs.create({ url: job.applyUrl, active: true }, tab =>
+    chrome.runtime.lastError || !tab
+      ? reject(new Error(chrome.runtime.lastError?.message || 'external tab create failed')) : resolve(tab.id)));
+}
+
+function pjaSameRankedJob(job, event) {
+  const jobUrl = self.PJAApplySelect?.applyUrlKey(job && job.applyUrl) || '';
+  const eventUrl = self.PJAApplySelect?.applyUrlKey(event && event.applyUrl) || '';
+  // When both producers know the route it is authoritative. Never let a tenant-local raw ID
+  // override two different employers/URLs.
+  if (jobUrl && eventUrl) return jobUrl === eventUrl;
+  const ids = [job && job.jobId, job && job.sourceJobId, job && job.id].filter(Boolean).map(String);
+  const eventIds = [event && event.jobId, event && event.sourceJobId, event && event.id].filter(Boolean).map(String);
+  const norm = value => String(value || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+  return ids.some(id => eventIds.includes(id)) && norm(job && job.company) === norm(event && event.company)
+    && norm(job && job.title) === norm(event && event.title);
+}
+
+async function pjaCloseRankedTab(tabId) {
+  if (tabId == null) return;
+  try { await chrome.tabs.remove(tabId); } catch (_) {}
+}
+
+async function pjaRestoreRankedFailureState(job, reason) {
+  if (!self.PJAIdb || !self.PJAApplySelect || !job || !job.id) return;
+  try {
+    const current = await self.PJAIdb.getJob(job.id);
+    const attempts = current?.state?.attempts != null ? current.state.attempts : (job.attempts || 0);
+    const next = self.PJAApplySelect.resultToState(reason, attempts);
+    await self.PJAIdb.updateState(job.id, { status: next.status, reason: next.reason,
+      attempts: next.attempts != null ? next.attempts : attempts, updatedAt: Date.now() });
+  } catch (e) { console.error('PJA: failed to restore ranked corpus state', e); }
+}
+
+async function pjaApplyUrlAlive(url, timeoutMs = 8000) {
+  if (!url) return false;
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+  try {
+    const response = await fetch(url, { method: 'HEAD', redirect: 'follow', signal: ctrl.signal,
+      cache: 'no-store', credentials: 'include' });
+    // Only explicit terminal HTTP states are proof that a posting is dead. 401/403/405 and
+    // network/anti-bot failures remain launchable because ATSes commonly reject HEAD requests.
+    return response.status !== 404 && response.status !== 410;
+  } catch (_) { return true; }
+  finally { clearTimeout(timer); }
+}
+
+async function pjaDispatchRankedCurrent(master) {
+  if (master.day && self.PJAApplicationLedger?.dayKey(Date.now(), master.timeZone || 'America/Los_Angeles') !== master.day) {
+    master.status = 'day_changed'; master.finishedAt = Date.now(); master.inFlightIndex = null;
+    master.inFlightTabId = null;
+    await pjaSetLocal({ pja_ranked_apply: master });
+    return master;
+  }
+  if (master.remaining != null && master.remaining <= 0) {
+    master.status = 'done'; master.finishedAt = Date.now(); master.inFlightIndex = null;
+    master.inFlightTabId = null;
+    await pjaSetLocal({ pja_ranked_apply: master });
+    return master;
+  }
+  const blocked = new Set(master.blockedChannels || []);
+  while (master.currentIndex < master.jobs.length && blocked.has(master.jobs[master.currentIndex].channel)) {
+    master.results.skipped.push({ ...master.jobs[master.currentIndex], reason: 'channel_paused_for_run' });
+    master.currentIndex++;
+  }
+  if (master.currentIndex >= master.jobs.length) {
+    master.status = 'exhausted'; master.finishedAt = Date.now(); master.inFlightIndex = null;
+    await pjaSetLocal({ pja_ranked_apply: master });
+    return master;
+  }
+  if (master.inFlightIndex === master.currentIndex) return master;
+  const job = Object.assign({}, master.jobs[master.currentIndex], { runId: master.runId,
+    applicationAt: Date.now(), rankedRun: true });
+  master.jobs[master.currentIndex] = job;
+  master.inFlightIndex = master.currentIndex;
+  master.inFlightAt = Date.now();
+  await pjaSetLocal({ pja_ranked_apply: master });
+  try {
+    if (!await pjaApplyUrlAlive(job.applyUrl)) {
+      master.results.failed.push({ ...job, reason: 'posting_not_found_preflight' });
+      master.currentIndex++; master.inFlightIndex = null;
+      if (self.PJAIdb && job.id) await self.PJAIdb.updateState(job.id,
+        { status: 'dead', reason: 'posting_not_found_preflight', updatedAt: Date.now() });
+      await pjaSetLocal({ pja_ranked_apply: master });
+      return pjaDispatchRankedCurrent(master);
+    }
+    if (self.PJAIdb && job.id) await self.PJAIdb.updateState(job.id,
+      { status: 'queued', reason: 'ranked_run', runId: master.runId, lastAttemptAt: Date.now() });
+    let tabId;
+    if (job.channel === 'linkedin_easy_apply') tabId = await pjaLaunchEasyApplySingle(job, master);
+    else if (job.channel === 'indeed_apply') tabId = await pjaLaunchIndeedSingle(job, master);
+    else tabId = await pjaLaunchExternalSingle(job, master);
+    // Capture the exact tab after launch so timeout/channel-pause handling can close redirected
+    // pages before the next reserve starts. Re-read ownership to avoid overwriting a very fast result.
+    const latest = await new Promise(r => chrome.storage.local.get('pja_ranked_apply', r));
+    const owned = latest.pja_ranked_apply;
+    if (owned && owned.runId === master.runId && owned.status === 'applying'
+        && owned.currentIndex === master.currentIndex && owned.inFlightIndex === master.currentIndex) {
+      owned.inFlightTabId = tabId;
+      master = owned;
+      await pjaSetLocal({ pja_ranked_apply: master });
+    } else await pjaCloseRankedTab(tabId);
+  } catch (e) {
+    master.results.failed.push({ ...job, reason: 'launch_failed: ' + e.message });
+    master.currentIndex++; master.inFlightIndex = null;
+    master.inFlightTabId = null;
+    await pjaRestoreRankedFailureState(job, 'launch_failed');
+    await pjaSetLocal({ pja_ranked_apply: master });
+    return pjaDispatchRankedCurrent(master);
+  }
+  return master;
+}
+
+async function pjaAdvanceRankedRun(rawEvent, ledger) {
+  const event = self.PJAApplicationLedger && self.PJAApplicationLedger.normalizeEvent(rawEvent);
+  if (!event || /^(submitting|pending|queued|started|in_progress)$/.test(event.status)) return;
+  const d = await new Promise(r => chrome.storage.local.get('pja_ranked_apply', r));
+  const master = d.pja_ranked_apply;
+  if (!master || master.status !== 'applying' || event.runId !== master.runId) return;
+  const job = master.jobs[master.currentIndex];
+  if (!pjaSameRankedJob(job, event)) return;
+  const confirmed = self.PJAApplicationLedger.confirmationKinds(event).length > 0;
+  if (confirmed) master.results.confirmed.push({ ...job, confirmedAt: event.confirmedAt });
+  else if (/^(failed|failure|error|blocked|aborted|skipped)$/.test(event.status) || event.success === false) {
+    master.results.failed.push({ ...job, reason: event.reason || event.status });
+  } else master.results.unverified.push({ ...job, reason: event.reason || 'unverified' });
+  if (/daily_limit|checkpoint|challenge/i.test(event.reason || '') && job.channel === 'linkedin_easy_apply') {
+    master.blockedChannels = Array.from(new Set([...(master.blockedChannels || []), 'linkedin_easy_apply']));
+  }
+  if (/captcha/i.test(event.reason || '') && job.channel === 'indeed_apply') {
+    master.blockedChannels = Array.from(new Set([...(master.blockedChannels || []), 'indeed_apply']));
+  }
+  const dailyTarget = master.dailyTarget || master.targetConfirmed || 50;
+  const auditOpts = master.day
+    ? { day: master.day, timeZone: master.timeZone || 'America/Los_Angeles', target: dailyTarget }
+    : { runId: master.runId, day: null, target: dailyTarget };
+  const audit = self.PJAApplicationLedger.auditLedger(ledger, auditOpts);
+  master.confirmedCount = audit.counts.confirmed;
+  master.remaining = audit.remaining;
+  const tabToClose = master.inFlightTabId;
+  master.currentIndex++;
+  master.inFlightIndex = null;
+  master.inFlightTabId = null;
+  master.updatedAt = Date.now();
+  if (audit.counts.confirmed >= dailyTarget) {
+    master.status = 'done'; master.finishedAt = Date.now();
+    await pjaSetLocal({ pja_ranked_apply: master });
+    await pjaCloseRankedTab(tabToClose);
+    return;
+  }
+  await pjaSetLocal({ pja_ranked_apply: master });
+  await pjaCloseRankedTab(tabToClose);
+  await pjaDispatchRankedCurrent(master);
 }
 
 // Service-worker apply watchdog: the content-script setTimeout watchdog is throttled on backgrounded
@@ -67,6 +300,21 @@ async function pjaBuildApplySet(opts) {
 // the active one past the hard cap — marks it needs_manual, closes its hung tab, opens the next job.
 async function pjaApplyWatchdogTick() {
   if (!self.PJAApplySelect) return;
+  const rankedData = await new Promise(r => chrome.storage.local.get('pja_ranked_apply', r));
+  const ranked = rankedData.pja_ranked_apply;
+  if (ranked && ranked.status === 'applying' && ranked.inFlightIndex != null &&
+      Date.now() - (ranked.inFlightAt || Date.now()) > 10 * 60 * 1000) {
+    const stuck = ranked.jobs[ranked.currentIndex];
+    if (stuck) {
+      await pjaCloseRankedTab(ranked.inFlightTabId);
+      await pjaRestoreRankedFailureState(stuck, 'ranked_watchdog_timeout');
+      await pjaAppendApplicationEvent({ runId: ranked.runId,
+        jobId: stuck.jobId || stuck.id, applyUrl: stuck.applyUrl, company: stuck.company, title: stuck.title,
+        channel: stuck.channel, status: 'failed', success: false, reason: 'ranked_watchdog_timeout',
+        applicationAt: stuck.applicationAt || ranked.inFlightAt, occurredAt: Date.now() });
+    }
+    return;
+  }
   const d = await new Promise(r => chrome.storage.local.get(['pja_ext_queue', 'pja_apply_wd'], r));
   const q = d.pja_ext_queue;
   const now = Date.now();
@@ -77,6 +325,18 @@ async function pjaApplyWatchdogTick() {
   const idx = dec.idx;
   const job = (q.jobs || [])[idx];
   if (!job) return;
+  if (job.runId) {
+    try {
+      const tabs = await new Promise(r => chrome.tabs.query({}, r));
+      for (const t of tabs) if (t.url && job.applyUrl && (t.url === job.applyUrl || t.url.indexOf(job.applyUrl) === 0)) chrome.tabs.remove(t.id).catch(() => {});
+    } catch (_) {}
+    await pjaRestoreRankedFailureState(job, 'stuck_watchdog');
+    await pjaAppendApplicationEvent({ runId: job.runId, jobId: job.jobId || job.id,
+      applyUrl: job.applyUrl, company: job.company, title: job.title, channel: job.channel || job.ats,
+      status: 'failed', success: false, reason: 'stuck_watchdog',
+      applicationAt: q.startedAt || now, occurredAt: now });
+    return;
+  }
   if (!q.results || Array.isArray(q.results)) q.results = { applied: [], skipped: [] };
   q.results.skipped.push({ ...job, skipReason: 'stuck_watchdog' });
   try {
@@ -88,7 +348,8 @@ async function pjaApplyWatchdogTick() {
   q.currentIndex = idx + 1;
   const nextJob = (q.jobs || [])[q.currentIndex];
   if (q.currentIndex >= (q.jobs || []).length) q.status = 'done';
-  const writeObj = { pja_ext_queue: q, pja_apply_wd: { runId: q.runId, idx: q.currentIndex, startedAt: now } };
+  const writeObj = { pja_ext_queue: q, pja_apply_wd: { runId: q.runId, idx: q.currentIndex,
+    jobKey: self.PJAApplySelect?.queueJobKey(nextJob) || '', startedAt: now } };
   if (nextJob && nextJob.applyUrl) {
     writeObj.pja_ext_current = Object.assign({}, nextJob, { returnUrl: 'https://www.linkedin.com/jobs/', runId: q.runId });
     writeObj.pja_navigate_to = nextJob.applyUrl;
@@ -162,6 +423,16 @@ if (DEV_MODE) {
                   .then(n => console.log('PJA: corpus ingested', n, 'jobs'))
                   .catch(e => console.error('PJA: corpus ingest failed', e));
               }
+            } else if (msg.cmd === 'importCorpus') {
+              // Description-rich corpora go directly to IndexedDB over this acknowledged WS path.
+              // Avoid mirroring multi-megabyte posting text into chrome.storage's small quota.
+              (async () => {
+                let data;
+                try { data = Object.assign({ ok: true }, await pjaIngestCorpus(msg.index || {}, msg.state || {},
+                  { replaceMissing: msg.replaceMissing === true })); }
+                catch (e) { data = { ok: false, error: e.message }; }
+                _wsReloadSocket.send(JSON.stringify({ cmd: 'importCorpusReply', reqId: msg.reqId, data }));
+              })();
             } else if (msg.cmd === 'getStorage') {
               chrome.storage.local.get(msg.keys, data => {
                 _wsReloadSocket.send(JSON.stringify({ cmd: 'storageReply', reqId: msg.reqId, data }));
@@ -174,6 +445,46 @@ if (DEV_MODE) {
                 catch (e) { data = { error: e.message }; }
                 _wsReloadSocket.send(JSON.stringify({ cmd: 'corpusReply', reqId: msg.reqId, data }));
               })();
+            } else if (msg.cmd === 'getCorpusJob') {
+              // Narrow read-only diagnostic for a caller-supplied canonical job id. Keeping this
+              // scoped to one record avoids round-tripping the full description-rich corpus.
+              (async () => {
+                let data = null;
+                try { if (self.PJAIdb && msg.id) data = await self.PJAIdb.getJob(String(msg.id)); }
+                catch (e) { data = { error: e.message }; }
+                _wsReloadSocket.send(JSON.stringify({ cmd: 'corpusJobReply', reqId: msg.reqId, data }));
+              })();
+            } else if (msg.cmd === 'searchCorpus') {
+              // Read-only, description-free search used to review application candidates without
+              // exporting the full IndexedDB corpus. Terms are matched against company/title.
+              (async () => {
+                let data = { jobs: [] };
+                try {
+                  if (self.PJAIdb) {
+                    const corpus = await self.PJAIdb.getAll();
+                    const terms = (Array.isArray(msg.terms) ? msg.terms : []).map(x => String(x).toLowerCase().trim()).filter(Boolean);
+                    const statuses = new Set((Array.isArray(msg.statuses) ? msg.statuses : ['sourced']).map(x => String(x).toLowerCase()));
+                    const minFit = msg.minFit == null ? 0 : Number(msg.minFit) || 0;
+                    const limit = Math.max(1, Math.min(1000, Number(msg.limit) || 200));
+                    const jobs = [];
+                    for (const [id, p] of Object.entries(corpus.index || {})) {
+                      const st = (corpus.state || {})[id] || {};
+                      const hay = String((p.company || '') + ' ' + (p.title || '')).toLowerCase();
+                      if (terms.length && !terms.some(term => hay.includes(term))) continue;
+                      if (statuses.size && !statuses.has(String(st.status || 'sourced').toLowerCase())) continue;
+                      if (Number(st.fitScore || 0) < minFit) continue;
+                      jobs.push({ id, company: p.company || '', title: p.title || '', location: p.location || '',
+                        ats: p.ats || p.detectedAts || '', applyUrl: p.applyUrl || '', descriptionStatus: p.descriptionStatus || '',
+                        fitScore: st.fitScore, scoreKind: st.scoreKind || '', confidence: st.confidence || '',
+                        matchEvidence: st.matchEvidence || [], gaps: st.gaps || [], conflicts: st.conflicts || [],
+                        status: st.status || 'sourced', attempts: st.attempts || 0, reason: st.reason || '' });
+                    }
+                    jobs.sort((a, b) => Number(b.fitScore || 0) - Number(a.fitScore || 0));
+                    data = { jobs: jobs.slice(0, limit), matched: jobs.length };
+                  }
+                } catch (e) { data = { jobs: [], error: e.message }; }
+                _wsReloadSocket.send(JSON.stringify({ cmd: 'corpusSearchReply', reqId: msg.reqId, data }));
+              })();
             } else if (msg.cmd === 'getApplySet') {
               // Build the apply-set from the corpus for the dev-server /apply-run driver.
               (async () => {
@@ -185,12 +496,193 @@ if (DEV_MODE) {
               // Write LLM fit scores back into the corpus (from /apply-run rescore pass).
               (async () => {
                 let n = 0;
-                try { if (self.PJAIdb) for (const s of (msg.scores || [])) { if (s && s.id) { await self.PJAIdb.updateState(s.id, { fitScore: s.fitScore }); n++; } } }
+                try { if (self.PJAIdb) for (const s of (msg.scores || [])) { if (s && s.id) { await self.PJAIdb.updateState(s.id, { fitScore: s.fitScore, scoreKind: 'llm', descriptionFingerprint: s.descriptionFingerprint || '', evidenceFingerprint: s.evidenceFingerprint || '', candidateFingerprint: s.candidateFingerprint || '', matchEvidence: s.matchEvidence || [], gaps: s.gaps || [], conflicts: s.conflicts || [], confidence: s.confidence || '' }); n++; } } }
                 catch (e) { console.error('PJA: updateScores failed', e); }
                 _wsReloadSocket.send(JSON.stringify({ cmd: 'updateScoresReply', reqId: msg.reqId, data: { updated: n } }));
               })();
+            } else if (msg.cmd === 'resetCorpusJobs') {
+              // Explicit, narrowly-scoped retry reset used after a verified automation fix. Never
+              // alters applied/dead postings and only touches caller-supplied canonical IDs.
+              (async () => {
+                let reset = 0;
+                try {
+                  if (self.PJAIdb) for (const id of (msg.ids || [])) {
+                    const cur = id && await self.PJAIdb.getJob(id);
+                    if (!cur || /^(applied|dead)$/i.test(String(cur.state && cur.state.status || ''))) continue;
+                    await self.PJAIdb.updateState(id, { status: 'sourced', reason: '', attempts: 0, updatedAt: Date.now() });
+                    reset++;
+                  }
+                } catch (e) { console.error('PJA: resetCorpusJobs failed', e); }
+                _wsReloadSocket.send(JSON.stringify({ cmd: 'resetCorpusJobsReply', reqId: msg.reqId, data: { reset } }));
+              })();
             } else if (msg.cmd === 'openTab') {
               chrome.tabs.create({ url: msg.url });
+            } else if (msg.cmd === 'startRankedApply') {
+              // Installation is acknowledged and the service worker is the final atomic owner of
+              // the active-run lock. The HTTP caller must not report "queued" until this succeeds.
+              (async () => {
+                let data;
+                try {
+                  const existing = await new Promise(r => chrome.storage.local.get('pja_ranked_apply', r));
+                  const active = existing.pja_ranked_apply;
+                  if (!msg.master || msg.master.status !== 'applying') throw new Error('invalid ranked master');
+                  if (!msg.force && active && active.status === 'applying' && active.runId !== msg.master.runId) {
+                    data = { ok: false, conflict: true, runId: active.runId };
+                  } else {
+                    await pjaSetLocal({ pja_ranked_apply: msg.master });
+                    const started = await pjaDispatchRankedCurrent(msg.master);
+                    data = { ok: true, runId: started.runId, status: started.status,
+                      currentIndex: started.currentIndex, tabId: started.inFlightTabId };
+                  }
+                } catch (e) { data = { ok: false, error: e.message }; }
+                try { _wsReloadSocket.send(JSON.stringify({ cmd: 'startRankedApplyReply', reqId: msg.reqId, data })); } catch (_) {}
+              })();
+            } else if (msg.cmd === 'inspectActiveApply') {
+              const reply = data => { try { _wsReloadSocket.send(JSON.stringify({ cmd: 'inspectActiveApplyReply', reqId: msg.reqId, data })); } catch (_) {} };
+              chrome.tabs.query({}, async tabs => {
+                const ats = tabs.filter(t => /greenhouse\.io|lever\.co|ashbyhq\.com|myworkdayjobs|workday\.com|icims\.com|jobvite\.com|smartrecruiters\.com|indeed\.com/i.test(t.url || ''));
+                const out = [];
+                for (const tab of ats.slice(-3)) {
+                  try {
+                    const frames = await chrome.scripting.executeScript({ target: { tabId: tab.id, allFrames: true }, func: () => {
+                      const visible = el => { const r = el.getBoundingClientRect(); return r.width > 0 && r.height > 0; };
+                      const label = el => (el.getAttribute('aria-label') || el.getAttribute('title') || el.textContent || el.value || '').trim().replace(/\s+/g, ' ').slice(0, 100);
+                      const controls = [...document.querySelectorAll('button,[role=button],input[type=submit],a')].filter(visible).map(el => ({ tag: el.tagName, type: el.getAttribute('type') || '', role: el.getAttribute('role') || '', disabled: !!el.disabled || el.getAttribute('aria-disabled') === 'true', text: label(el) })).filter(x => x.text).slice(0, 80);
+                      const required = [...document.querySelectorAll('[required],[aria-required=true]')].filter(visible).map(el => ({ tag: el.tagName, type: el.getAttribute('type') || '', name: (el.getAttribute('name') || '').slice(0, 80), invalid: el.getAttribute('aria-invalid') || '', checked: 'checked' in el ? !!el.checked : undefined, empty: 'value' in el ? !String(el.value || '').trim() : undefined })).slice(0, 80);
+                      const radios = [...document.querySelectorAll('input[type=radio]')].map(el => ({ id: (el.id || '').slice(0, 80), name: (el.name || '').slice(0, 80), value: String(el.value || '').slice(0, 80), checked: !!el.checked, ariaLabel: (el.getAttribute('aria-label') || '').slice(0, 100), labelledBy: (el.getAttribute('aria-labelledby') || '').slice(0, 100), parentText: (el.parentElement?.textContent || '').trim().replace(/\s+/g, ' ').slice(0, 100) })).slice(0, 80);
+                      const errors = [...document.querySelectorAll('[role=alert],[aria-invalid=true],[class*=error],[class*=invalid]')].filter(visible).map(label).filter(Boolean).slice(0, 30);
+                      return { url: location.href, title: document.title, controls, required, radios, errors, textTail: (document.body?.innerText || '').trim().replace(/\s+/g, ' ').slice(-1200) };
+                    }});
+                    out.push({ tabId: tab.id, url: tab.url, frames: frames.map(x => x.result).filter(Boolean) });
+                  } catch (e) { out.push({ tabId: tab.id, url: tab.url, error: e.message }); }
+                }
+                reply({ tabs: out });
+              });
+            } else if (msg.cmd === 'injectResume') {
+              // Dev-server-triggered résumé upload: reads pja_resume_b64 (a data URL) and injects
+              // it into the file input of the tab matching msg.urlMatch, via a DataTransfer in the
+              // page's MAIN world. Works around the MCP file_upload tool being unable to attach the
+              // stored résumé. Reusable across any ATS with a standard <input type=file>.
+              (() => {
+                const reqId = msg.reqId;
+                const reply = data => { try { _wsReloadSocket.send(JSON.stringify({ cmd: 'injectResumeReply', reqId, data })); } catch (_) {} };
+                chrome.storage.local.get(['pja_resume_b64', 'pja_resume_filename'], d => {
+                  const b64 = d.pja_resume_b64; const filename = d.pja_resume_filename || 'resume.pdf';
+                  if (!b64) { reply({ ok: false, err: 'no pja_resume_b64' }); return; }
+                  const urlMatch = msg.urlMatch || 'myworkdayjobs.com';
+                  chrome.tabs.query({}, async tabs => {
+                    const matches = tabs.filter(t => (t.url || '').includes(urlMatch));
+                    if (!matches.length) { reply({ ok: false, err: 'no tab matching ' + urlMatch }); return; }
+                    const results = [];
+                    for (const tab of matches) {
+                    await new Promise(done => {
+                    chrome.scripting.executeScript({
+                      target: { tabId: tab.id, allFrames: true }, world: 'MAIN', args: [b64, filename],
+                      func: (b64, fname) => {
+                        const dbg = { b64len: (b64 || '').length };
+                        try {
+                          const parts = b64.split(',');
+                          const mime = (parts[0] || '').match(/:(.*?);/)?.[1] || 'application/pdf';
+                          const bin = atob(parts[1] || parts[0]);
+                          const bytes = new Uint8Array(bin.length);
+                          for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+                          const file = new File([bytes], fname, { type: mime });
+                          dbg.mime = mime; dbg.binLen = bin.length; dbg.fileSize = file.size;
+                          const inputs = [...document.querySelectorAll('input[type=file]')];
+                          dbg.inputCount = inputs.length;
+                          const input = inputs.find(el => el.offsetParent !== null) || inputs[0];
+                          if (!input) return { ok: false, err: 'no file input', dbg };
+                          const dt = new DataTransfer(); dt.items.add(file);
+                          dbg.dtLen = dt.files.length;
+                          try { input.files = dt.files; } catch (e) { dbg.assignErr = String(e); }
+                          dbg.afterAssign = input.files?.length;
+                          if (!(input.files && input.files.length > 0)) {
+                            try { Object.defineProperty(input, 'files', { value: dt.files, configurable: true }); } catch (_) {}
+                          }
+                          input.dispatchEvent(new Event('change', { bubbles: true }));
+                          input.dispatchEvent(new Event('input', { bubbles: true }));
+                          // Also fire a drop event on the dropzone (Workday listens for DnD)
+                          try {
+                            const zone = input.closest('[data-automation-id]') || input.parentElement;
+                            if (zone) { const de = new DragEvent('drop', { bubbles: true }); Object.defineProperty(de, 'dataTransfer', { value: dt }); zone.dispatchEvent(de); }
+                          } catch (_) {}
+                          dbg.finalFiles = input.files?.length;
+                          return { ok: input.files && input.files.length > 0, files: input.files?.length || 0, name: input.files?.[0]?.name || '', dbg };
+                        } catch (e) { return { ok: false, err: String(e), dbg }; }
+                      }
+                    }, r => { results.push({ tabId: tab.id, url: (tab.url || '').slice(-50), result: r?.[0]?.result || { ok: false, err: 'no result' } }); done(); });
+                    });
+                    }
+                    const anyOk = results.some(x => x.result && x.result.ok);
+                    reply({ ok: anyOk, injected: results.filter(x => x.result?.ok).length, tabs: results });
+                  });
+                });
+              })();
+            } else if (msg.cmd === 'successFactorsStart') {
+              // Start an already-open SAP SuccessFactors RMK apply flow through the page's
+              // own MAIN-world handler. This does not fill or submit the application.
+              (async () => {
+                const reqId = msg.reqId;
+                const reply = data => { try { _wsReloadSocket.send(JSON.stringify({ cmd: 'successFactorsStartReply', reqId, data })); } catch (_) {} };
+                try {
+                  const requested = String(msg.urlMatch || '').trim();
+                  const tabs = await chrome.tabs.query({});
+                  const webTabs = tabs.filter(tab => /^https?:/i.test(tab.url || ''));
+                  const exact = requested && webTabs.find(tab => (tab.url || '') === requested);
+                  const substring = requested && webTabs.find(tab => (tab.url || '').includes(requested));
+                  const domainMatches = webTabs.filter(tab => {
+                    try {
+                      const host = new URL(tab.url).hostname.toLowerCase();
+                      return host.startsWith('careers.') || host.includes('successfactors');
+                    } catch (_) { return false; }
+                  });
+                  const tab = exact || substring || domainMatches.find(tab => tab.active) || domainMatches[domainMatches.length - 1];
+                  if (!tab) {
+                    reply({ ok: false, error: requested
+                      ? `no tab matching ${requested} or a careers/SuccessFactors domain`
+                      : 'no careers/SuccessFactors tab found' });
+                    return;
+                  }
+
+                  const injected = await chrome.scripting.executeScript({
+                    target: { tabId: tab.id },
+                    world: 'MAIN',
+                    func: () => {
+                      const apply = globalThis.j2w && globalThis.j2w.Apply;
+                      const handler = apply && apply.handleApplyNowButton;
+                      const diagnostics = {
+                        url: location.href,
+                        title: document.title,
+                        j2wPresent: !!globalThis.j2w,
+                        applyPresent: !!apply,
+                        handlerType: typeof handler,
+                      };
+                      if (typeof handler !== 'function') {
+                        return { ok: false, error: 'j2w.Apply.handleApplyNowButton is unavailable', diagnostics };
+                      }
+                      try {
+                        const eventLike = {
+                          target: {}, currentTarget: {},
+                          preventDefault() {}, stopPropagation() {},
+                        };
+                        const result = handler.call(apply, eventLike);
+                        diagnostics.invoked = true;
+                        diagnostics.returnType = typeof result;
+                        return { ok: true, diagnostics };
+                      } catch (e) {
+                        diagnostics.invoked = false;
+                        return { ok: false, error: String(e && (e.message || e)), diagnostics };
+                      }
+                    },
+                  });
+                  const result = injected && injected[0] && injected[0].result;
+                  reply(Object.assign({ tabId: tab.id, tabUrl: tab.url }, result || {
+                    ok: false, error: 'MAIN-world invocation returned no diagnostics',
+                  }));
+                } catch (e) {
+                  reply({ ok: false, error: e.message || String(e) });
+                }
+              })();
             } else if (msg.cmd === 'startEasyApply') {
               // Backend-triggered Easy Apply: seed the EA queue into a fresh LinkedIn tab's
               // sessionStorage, then reload so content.js resumeApplyOnLoad runs the auto-apply
@@ -202,7 +694,8 @@ if (DEV_MODE) {
                 chrome.storage.local.get(['pja_profile', 'pja_answers'], d => {
                   const queue = { status: 'applying', jobs: eaJobs, currentIndex: 0,
                     results: { applied: [], skipped: [], errors: [] },
-                    profile: d.pja_profile || {}, answers: d.pja_answers || {} };
+                    profile: d.pja_profile || {}, answers: d.pja_answers || {},
+                    runId: eaJobs[0].runId || null, startedAt: eaJobs[0].applicationAt || Date.now() };
                   // Open the SEARCH page (currentJobId): its detail panel has a reliable Easy Apply
                   // <button> (the job-view control is a flaky <a> whose click navigates to a cold
                   // /apply/ page → Next reloads → loop). pjaFillForm is now scoped to the modal so
@@ -231,20 +724,24 @@ if (DEV_MODE) {
               if (ijobs.length) {
                 chrome.storage.local.get(['pja_profile', 'pja_answers'], d => {
                   const queue = { status: 'applying', jobs: ijobs, currentIndex: 0,
-                    results: { applied: [], skipped: [] }, profile: d.pja_profile || {}, answers: d.pja_answers || {} };
+                    results: { applied: [], skipped: [] }, profile: d.pja_profile || {}, answers: d.pja_answers || {},
+                    runId: ijobs[0].runId || null, startedAt: ijobs[0].applicationAt || Date.now() };
                   chrome.storage.local.set({ pja_indeed_queue: queue, pja_indeed_paused: null }, () => {
                     chrome.tabs.create({ url: 'https://www.indeed.com/viewjob?jk=' + ijobs[0].jobId, active: true });
                   });
                 });
               }
             } else if (msg.cmd === 'startScan') {
-              // Backend-trigger a job scanner (sources candidates → pja_shortlist). source:'indeed'
-              // runs the Indeed scanner; otherwise the LinkedIn scanner. Opens the search URL, then
+              // Backend-trigger a job scanner (sources candidates → pja_shortlist). Supports
+              // LinkedIn, Indeed, and conservative one-page Glassdoor collection.
               // runs the platform's start-scan in the tab.
               const isIndeed = msg.source === 'indeed';
+              const isGlassdoor = msg.source === 'glassdoor';
               const scanUrl = msg.url || (isIndeed
                 ? 'https://www.indeed.com/jobs?q=process+engineer&l=California'
-                : 'https://www.linkedin.com/jobs/search/?f_AL=true&keywords=quality%20engineer&location=California');
+                : isGlassdoor
+                  ? 'https://www.glassdoor.com/Jobs/process-engineer-jobs-SRCH_KO0,16.htm?location=California'
+                  : 'https://www.linkedin.com/jobs/search/?f_AL=true&keywords=quality%20engineer&location=California');
               chrome.tabs.create({ url: scanUrl, active: true }, tab => {
                 const onUpd = (tid, info) => {
                   if (tid === tab.id && info.status === 'complete') {
@@ -254,6 +751,7 @@ if (DEV_MODE) {
                         target: { tabId: tab.id },
                         func: (fast, source) => {
                           if (source === 'indeed') { if (typeof window.__pjaStartIndeedScan === 'function') window.__pjaStartIndeedScan({}); }
+                          else if (source === 'glassdoor') { if (typeof window.__pjaStartGlassdoorScan === 'function') window.__pjaStartGlassdoorScan({}); }
                           else { if (typeof window.__pjaStartScan === 'function') window.__pjaStartScan({ fast }); }
                         },
                         args: [!!msg.fast, msg.source || ''],
@@ -341,6 +839,9 @@ function injectContentScriptsIntoExistingTabs() {
     'content/auto-apply.js',
     'content/external-apply.js',
     'content/job-scraper.js',
+    'content/indeed-scraper.js',
+    'content/glassdoor-scraper.js',
+    'content/indeed-apply.js',
     'content/content.js'
   ];
   const targetUrls = [
@@ -384,6 +885,30 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
     chrome.storage.local.set({ pja_fiber_inject_err: { tabId, url: tab.url, err: String(err), ts: Date.now() } });
   });
 });
+
+// Recover Greenhouse jobs that redirect to an unpermitted corporate careers host. The matching
+// gh_jid proves this is the same posting; keep a per-tab guard to avoid redirect loops.
+const pjaGreenhouseFallbackTabs = new Map();
+chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
+  if (changeInfo.status !== 'complete' || !tab.url || /greenhouse\.io/i.test(tab.url)) return;
+  chrome.storage.local.get(['pja_ext_queue', 'pja_ext_current'], d => {
+    const q = d.pja_ext_queue, cur = d.pja_ext_current;
+    if (!q || q.status !== 'applying' || !cur || cur._handled) return;
+    const fallback = self.PJAApplySelect && self.PJAApplySelect.greenhouseEmbedFallback
+      ? self.PJAApplySelect.greenhouseEmbedFallback(cur.applyUrl, tab.url) : '';
+    if (!fallback) return;
+    const guard = cur.id || cur.applyUrl;
+    if (pjaGreenhouseFallbackTabs.get(tabId) === guard) return;
+    pjaGreenhouseFallbackTabs.set(tabId, guard);
+    chrome.tabs.update(tabId, { url: fallback }, () => {
+      chrome.storage.local.set({ pja_greenhouse_fallback: {
+        tabId, from: tab.url, to: fallback, ok: !chrome.runtime.lastError,
+        error: chrome.runtime.lastError ? chrome.runtime.lastError.message : null, ts: Date.now()
+      } });
+    });
+  });
+});
+chrome.tabs.onRemoved.addListener(tabId => pjaGreenhouseFallbackTabs.delete(tabId));
 
 // Note: autofill.js + external-apply.js are injected by manifest content_scripts (<all_urls>)
 // on every page load — no need for programmatic injection via onUpdated.
@@ -925,7 +1450,7 @@ async function activateTab(tabId) {
 // ── CDP trusted click (bypasses Workday's isTrusted check) ─────────────────
 // Strategy: suppress click_filter via rapid interval + focus button + Space key (bypasses
 // pointer hit-testing) + mouse click at coords. Dual approach maximises success rate.
-async function cdpTrustedClick(tabId, selector) {
+async function cdpTrustedClick(tabId, selector, options = {}) {
   await activateTab(tabId);
 
   // Start a 20ms interval that keeps click_filter hidden, focus button, get coords.
@@ -982,15 +1507,19 @@ async function cdpTrustedClick(tabId, selector) {
 
   try { await chrome.debugger.attach({ tabId }, '1.3'); } catch (_) {}
 
-  // Strategy A: CDP Space key on focused button — keyboard events bypass click_filter entirely
-  await chrome.debugger.sendCommand({ tabId }, 'Input.dispatchKeyEvent', {
-    type: 'keyDown', key: ' ', code: 'Space', windowsVirtualKeyCode: 32, nativeVirtualKeyCode: 32, modifiers: 0
-  });
-  await new Promise(r => setTimeout(r, 60));
-  await chrome.debugger.sendCommand({ tabId }, 'Input.dispatchKeyEvent', {
-    type: 'keyUp', key: ' ', code: 'Space', windowsVirtualKeyCode: 32, nativeVirtualKeyCode: 32, modifiers: 0
-  });
-  await new Promise(r => setTimeout(r, 120));
+  // Strategy A: CDP Space key on focused button — keyboard events bypass click_filter entirely.
+  // Prompt toggles request single=true because Space followed by a mouse click opens and then
+  // immediately closes the dropdown. Submit/Next callers keep the dual strategy.
+  if (!options.single) {
+    await chrome.debugger.sendCommand({ tabId }, 'Input.dispatchKeyEvent', {
+      type: 'keyDown', key: ' ', code: 'Space', windowsVirtualKeyCode: 32, nativeVirtualKeyCode: 32, modifiers: 0
+    });
+    await new Promise(r => setTimeout(r, 60));
+    await chrome.debugger.sendCommand({ tabId }, 'Input.dispatchKeyEvent', {
+      type: 'keyUp', key: ' ', code: 'Space', windowsVirtualKeyCode: 32, nativeVirtualKeyCode: 32, modifiers: 0
+    });
+    await new Promise(r => setTimeout(r, 120));
+  }
 
   // Strategy B: mouse click at button coords (click_filter suppressed by interval)
   await chrome.debugger.sendCommand({ tabId }, 'Input.dispatchMouseEvent', {
@@ -1044,9 +1573,44 @@ async function cdpAttachDiag(tabId, where) {
   catch (e) {
     const m = String(e && e.message || e);
     if (/already attached to (this|the) (extension|debuggee)|Another debugger.*this extension/i.test(m)) return true; // us — fine
+    // An extension reload can terminate the old service-worker while its debugger session remains
+    // attached briefly. The new worker sees the generic "Another debugger is already attached"
+    // error. Detach succeeds only when this extension owns that orphan; if DevTools/another
+    // extension owns it, detach/reattach fails and we preserve the safe synthetic fallback.
+    if (/another debugger is already attached/i.test(m)) {
+      try {
+        await chrome.debugger.detach({ tabId });
+        await new Promise(r => setTimeout(r, 80));
+        await chrome.debugger.attach({ tabId }, '1.3');
+        await cdpDbg(where + ' recovered orphaned debugger attachment');
+        return true;
+      } catch (retryErr) {
+        await cdpDbg(where + ' attach-recovery-FAIL: ' + String(retryErr && retryErr.message || retryErr).slice(0, 70));
+      }
+    }
     await cdpDbg(where + ' attach-FAIL: ' + m.slice(0, 90));
     return false;
   }
+}
+
+// Only one debugger command sequence may own a tab at a time. Greenhouse can start several
+// react-select fills close together (location, education, policy questions); without serialization
+// their attach/detach cycles race and Chrome reports "Another debugger is already attached" even
+// though every request came from this extension. Keep a short per-tab promise chain and recover the
+// chain after failures so one rejected operation never poisons later work.
+const pjaCdpTabQueues = new Map();
+function pjaWithCdpTabLock(tabId, work) {
+  const prior = pjaCdpTabQueues.get(tabId) || Promise.resolve();
+  const next = prior.catch(() => {}).then(() => {
+    let timer;
+    const bounded = new Promise((resolve, reject) => {
+      timer = setTimeout(() => reject(new Error('cdp-tab-lock-timeout')), 8000);
+      Promise.resolve().then(work).then(resolve, reject);
+    });
+    return bounded.finally(() => clearTimeout(timer));
+  });
+  pjaCdpTabQueues.set(tabId, next);
+  return next.finally(() => { if (pjaCdpTabQueues.get(tabId) === next) pjaCdpTabQueues.delete(tabId); });
 }
 
 // ── CDP trusted click for LinkedIn Easy Apply step buttons ──────────────────
@@ -1062,18 +1626,19 @@ async function cdpLinkedInClick(tabId, x, y) {
 
   const attachedC = await cdpAttachDiag(tabId, 'click');
   if (!attachedC) throw new Error('cdp-attach-failed');
-  await chrome.debugger.sendCommand({ tabId }, 'Input.dispatchMouseEvent', {
-    type: 'mouseMoved', x: xr, y: yr, button: 'none', buttons: 0, clickCount: 0, modifiers: 0
-  });
-  await new Promise(r => setTimeout(r, 40));
-  await chrome.debugger.sendCommand({ tabId }, 'Input.dispatchMouseEvent', {
-    type: 'mousePressed', x: xr, y: yr, button: 'left', buttons: 1, clickCount: 1, modifiers: 0
-  });
-  await new Promise(r => setTimeout(r, 70));
-  await chrome.debugger.sendCommand({ tabId }, 'Input.dispatchMouseEvent', {
-    type: 'mouseReleased', x: xr, y: yr, button: 'left', buttons: 0, clickCount: 1, modifiers: 0
-  });
-  try { await chrome.debugger.detach({ tabId }); } catch (_) {}
+  try {
+    await chrome.debugger.sendCommand({ tabId }, 'Input.dispatchMouseEvent', {
+      type: 'mouseMoved', x: xr, y: yr, button: 'none', buttons: 0, clickCount: 0, modifiers: 0
+    });
+    await new Promise(r => setTimeout(r, 40));
+    await chrome.debugger.sendCommand({ tabId }, 'Input.dispatchMouseEvent', {
+      type: 'mousePressed', x: xr, y: yr, button: 'left', buttons: 1, clickCount: 1, modifiers: 0
+    });
+    await new Promise(r => setTimeout(r, 70));
+    await chrome.debugger.sendCommand({ tabId }, 'Input.dispatchMouseEvent', {
+      type: 'mouseReleased', x: xr, y: yr, button: 'left', buttons: 0, clickCount: 1, modifiers: 0
+    });
+  } finally { try { await chrome.debugger.detach({ tabId }); } catch (_) {} }
 }
 
 // ── CDP trusted type: click at coords to focus, then type text via real key events ──
@@ -1293,6 +1858,16 @@ async function _selfHealAct(action, tabId, applyUrl) {
 }
 
 chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
+  if (msg.type === 'APPLICATION_LEDGER_EVENT') {
+    pjaAppendApplicationEvent(msg.event || {})
+      .then(ledger => {
+        sendResponse({ ok: true, events: Object.keys(ledger.events || {}).length });
+        if (msg.closeTab && _sender.tab && _sender.tab.id != null) chrome.tabs.remove(_sender.tab.id).catch(() => {});
+      })
+      .catch(e => sendResponse({ ok: false, error: e.message }));
+    return true;
+  }
+
   if (msg.type === 'PJA_APPLY_OUTCOME') {
     const action = _nextSelfHeal(msg.outcome, 2);
     if (action !== 'none') _selfHealAct(action, _sender.tab && _sender.tab.id, msg.applyUrl).catch(() => {});
@@ -1301,21 +1876,24 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   }
 
   if (msg.type === 'WORKDAY_TRUSTED_CLICK') {
-    cdpTrustedClick(_sender.tab.id, msg.selector)
+    // Autofill can open referral, phone-code, and address prompts close together. Serialize all
+    // trusted-click debugger sessions per tab so one attach/detach cycle cannot invalidate the
+    // next field's click (the symptom is a valid State button reporting an open failure).
+    pjaWithCdpTabLock(_sender.tab.id, () => cdpTrustedClick(_sender.tab.id, msg.selector, { single: msg.single === true }))
       .then(() => sendResponse({ ok: true }))
       .catch(e => sendResponse({ error: e.message }));
     return true;
   }
 
   if (msg.type === 'CDP_TYPE_AT') {
-    cdpTypeAt(_sender.tab.id, msg.x, msg.y, msg.text)
+    pjaWithCdpTabLock(_sender.tab.id, () => cdpTypeAt(_sender.tab.id, msg.x, msg.y, msg.text))
       .then(() => sendResponse({ ok: true }))
       .catch(e => sendResponse({ error: e.message }));
     return true;
   }
 
   if (msg.type === 'LINKEDIN_TRUSTED_CLICK') {
-    cdpLinkedInClick(_sender.tab.id, msg.x, msg.y)
+    pjaWithCdpTabLock(_sender.tab.id, () => cdpLinkedInClick(_sender.tab.id, msg.x, msg.y))
       .then(() => sendResponse({ ok: true }))
       .catch(e => {
         try { chrome.storage.local.get('pja_dbg', d => { const a=(d.pja_dbg||[]).slice(-40); a.push(new Date().toISOString().slice(11,19)+' [EA] CDP_ERROR: '+(e.message||e)); chrome.storage.local.set({pja_dbg:a}); }); } catch(_){}
@@ -1522,9 +2100,16 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
                 setVal(emailEl, email);
               } else {
                 // signin and createaccount: fill email + password
-                if (!emailEl) { resolve({ ok: false, reason: 'no_email_field' }); return; }
-                setVal(emailEl, email);
-                if (pwEls[0]) setVal(pwEls[0], password);
+                // Two-step Workday tenants (including KLA) remove the email input after the
+                // Continue step and render a password-only sign-in screen.  Email remains
+                // mandatory for account creation, but an existing sign-in may legitimately
+                // have only the password field.
+                if (formType === 'createaccount' && !emailEl) {
+                  resolve({ ok: false, reason: 'no_email_field' }); return;
+                }
+                if (!pwEls[0]) { resolve({ ok: false, reason: 'no_password_field' }); return; }
+                if (emailEl) setVal(emailEl, email);
+                setVal(pwEls[0], password);
                 if (formType === 'createaccount' && pwEls[1]) setVal(pwEls[1], password);
 
                 if (formType === 'createaccount') {
@@ -1805,6 +2390,19 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
 
   if (msg.type === 'SET_EXT_QUEUE') {
     chrome.storage.local.set({ pja_ext_queue: msg.payload }, () => sendResponse({ ok: true }));
+    return true;
+  }
+
+  // Navigate the owning tab from the service worker. Embedded ATS content scripts can be blocked
+  // or silently ignored when assigning cross-origin `window.top.location`, leaving
+  // pja_navigate_to unconsumed and the queue stalled between jobs.
+  if (msg.type === 'OPEN_EXT_NEXT' && msg.url) {
+    const tabId = _sender && _sender.tab && _sender.tab.id;
+    if (tabId != null) {
+      chrome.tabs.update(tabId, { url: msg.url }, () => sendResponse({ ok: !chrome.runtime.lastError }));
+    } else {
+      chrome.tabs.create({ url: msg.url }, () => sendResponse({ ok: !chrome.runtime.lastError }));
+    }
     return true;
   }
 

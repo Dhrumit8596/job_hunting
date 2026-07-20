@@ -27,7 +27,7 @@ module.exports = async (t) => {
   // 2,500 distinct roles across 50 companies (=> 2% max concentration) via PER-RECORD writes.
   const big = [];
   for (let i = 0; i < 2500; i++) {
-    big.push(makeJob({ id: i, title: 'Process Engineer ' + i, company: 'Co' + (i % 50), location: 'San Jose, CA', ats: 'greenhouse' }));
+    big.push(makeJob({ id: i, title: 'Process Engineer ' + i, company: 'Co' + (i % 50), location: 'San Jose, CA', ats: 'greenhouse', description: 'Process control, SPC, metrology, and root-cause requirements.' }));
   }
   const r1 = await idb.upsertJobs(big, 'api-registry', () => ({ fitScore: 60 }));
   t.eq(r1.added, 2500, 'idb: 2500 per-record writes succeeded (no quota/silent-write failure)');
@@ -35,7 +35,7 @@ module.exports = async (t) => {
 
   // second modality
   const disc = [];
-  for (let i = 0; i < 6; i++) disc.push(makeJob({ id: 'd' + i, title: 'Metrology Engineer ' + i, company: 'DiscCo' + i, location: 'Remote, US', ats: 'remotive' }));
+  for (let i = 0; i < 6; i++) disc.push(makeJob({ id: 'd' + i, title: 'Metrology Engineer ' + i, company: 'DiscCo' + i, location: 'Remote, US', ats: 'remotive', description: 'Optical metrology and quality requirements.' }));
   await idb.upsertJobs(disc, 'discovery', () => ({ fitScore: 65 }));
   t.eq(await idb.count(), 2506, 'idb: 2506 after discovery batch');
 
@@ -45,11 +45,22 @@ module.exports = async (t) => {
   t.eq(r2.dupById, 2500, 'idb: all 2500 counted as id-dups');
   t.eq(await idb.count(), 2506, 'idb: count unchanged after re-upsert');
 
-  // role-key dedup across modalities: same company+title as an existing job, different id+modality
-  const clash = [makeJob({ id: 'clashX', title: 'Process Engineer 0', company: 'Co0', location: 'Remote, US', ats: 'jobicy' })];
+  // Same visible role across modalities is ambiguous without an exact direct URL, so it survives.
+  const clash = [makeJob({ id: 'clashX', title: 'Process Engineer 0', company: 'Co0', location: 'San Jose, CA', ats: 'jobicy', description: 'Detailed process requirements.' })];
   const r3 = await idb.upsertJobs(clash, 'discovery', () => ({ fitScore: 70 }));
-  t.eq(r3.added, 0, 'idb: same role from another modality collapsed');
-  t.eq(r3.dupByRole, 1, 'idb: counted as role-dup');
+  t.eq(r3.added, 1, 'idb: same-title/location cross-source requisition survives without exact URL identity');
+  t.eq(r3.dupByRole, 0, 'idb: ambiguous role similarity is not counted as identity');
+
+  // Exact direct URLs are safe cross-source identity and can enrich one posting.
+  const exactA = makeJob({ id: 'exact-a', title: 'Yield Engineer', company: 'ExactCo', location: 'Fremont, CA', ats: 'greenhouse', applyUrl: 'https://boards.greenhouse.io/exact/jobs/44' });
+  const exactB = makeJob({ id: 'exact-b', title: 'Yield Engineer', company: 'ExactCo', location: 'Fremont, CA', ats: 'linkedin', applyUrl: 'https://boards.greenhouse.io/exact/jobs/44', description: 'Full SPC and metrology requirements.' });
+  await idb.upsertJobs([exactA], 'api-registry', () => ({ fitScore: 60 }));
+  const exactR = await idb.upsertJobs([exactB], 'browser-linkedin', () => ({ fitScore: 70 }));
+  t.eq(exactR.added, 0, 'idb: exact direct URL duplicate collapses safely');
+  t.eq(exactR.dupByRole, 1, 'idb: exact direct URL duplicate counted');
+  const exactStored = await idb.getJob('greenhouse:exact-a');
+  t.eq(exactStored.applyUrl, exactA.applyUrl, 'idb route: direct URL remains coherent');
+  t.eq(exactStored.sourceJobId, 'exact-a', 'idb route: source id remains paired with direct route');
 
   // getJob returns posting + state (use a non-zero id: makeJob maps falsy id 0 -> role-key id)
   const j7 = await idb.getJob('greenhouse:7');
@@ -59,15 +70,28 @@ module.exports = async (t) => {
   // applied-state correctness: exclude a known applied role
   const removed = await idb.excludeApplied([roleKey({ company: 'Co1', title: 'Process Engineer 1' })]);
   t.eq(removed, 1, 'idb: excludeApplied removes the applied role');
-  t.eq(await idb.count(), 2505, 'idb: count drops by 1 after exclusion');
+  t.eq(await idb.count(), 2507, 'idb: count drops by 1 after exclusion');
 
   // GATE at 2,000+ scale
   const g = await idb.gateReport({ target: 200 });
-  t.eq(g.atLeastTarget, true, 'idb-gate: >=200 unique (2505)');
+  t.eq(g.atLeastTarget, true, 'idb-gate: >=200 unique at scale');
   t.eq(g.atLeast2Modalities, true, 'idb-gate: 2 modalities');
+  t.eq(g.descriptionsReady, true, 'idb-gate: target supply has grounded descriptions');
   t.eq(g.allScored, true, 'idb-gate: all fit-scored');
   t.eq(g.concentrationOk, true, 'idb-gate: concentration <=25%');
   t.eq(g.pass, true, 'idb-gate: PASS at 2,000+ on real IndexedDB');
+
+  // Duplicate source records enrich the existing posting instead of discarding a later, fuller JD.
+  const rich = makeJob({ id: 8, title: 'Process Engineer 8', company: 'Co8', location: 'San Jose, CA',
+    ats: 'greenhouse', description: 'Own high-volume wafer inspection, thin-film metrology, SPC, defect reduction, and root-cause analysis.' });
+  const richResult = await idb.upsertJobs([rich], 'browser-linkedin', () => ({ fitScore: 70 }));
+  t.eq(richResult.dupById, 1, 'idb: duplicate id recognized during enrichment');
+  t.eq((await idb.getJob('greenhouse:8')).description, rich.description, 'idb: richer duplicate description retained');
+
+  // Distinct ids from the same ATS survive even if employer/title/location are identical.
+  const req2 = makeJob({ id: 'req-2', title: 'Process Engineer 8', company: 'Co8', location: 'San Jose, CA', ats: 'greenhouse' });
+  t.eq((await idb.upsertJobs([req2], 'api-registry', () => ({ fitScore: 60 }))).added, 1,
+    'idb: distinct same-ATS requisition is not collapsed by mirror key');
 
   // importNormalized preserves apply-progress across a re-source (idempotency)
   await idb.updateState('greenhouse:7', { status: 'applied', appliedAt: 111 });
@@ -80,6 +104,29 @@ module.exports = async (t) => {
   t.eq(j7b.state.status, 'applied', 'importNormalized preserves applied status across re-source (not reset to sourced)');
   t.eq(j7b.state.fitScore, 80, 'importNormalized still refreshes fitScore while preserving status');
 
+  // Re-sourcing the same description must not overwrite a prior evidence-grounded LLM score.
+  const fp = idb.descriptionFingerprint('stable requirements');
+  await idb.updateState('greenhouse:7', { status: 'sourced', fitScore: 92, scoreKind: 'llm',
+    descriptionFingerprint: fp, matchEvidence: ['wafer', 'metrology', 'SPC'], confidence: 'high' });
+  const same = await idb.importNormalized({
+    index: { 'greenhouse:7': { id: 'greenhouse:7', company: 'Co7', title: 'Process Engineer 7',
+      location: 'San Jose, CA', roleKey: 'co7::process engineer 7', modality: 'api-registry', description: 'stable requirements' } },
+    state: { 'greenhouse:7': { fitScore: 60, scoreKind: 'heuristic', status: 'sourced', descriptionFingerprint: fp } },
+  });
+  t.eq(same.preservedEvidence, 1, 'idb: same-description refresh reports preserved LLM evidence');
+  t.eq((await idb.getJob('greenhouse:7')).state.fitScore, 92, 'idb: heuristic refresh cannot downgrade current LLM score');
+
+  // A changed description invalidates the old evidence and returns the job to heuristic scoring.
+  const changedFp = idb.descriptionFingerprint('changed requirements');
+  await idb.importNormalized({
+    index: { 'greenhouse:7': { id: 'greenhouse:7', company: 'Co7', title: 'Process Engineer 7',
+      location: 'San Jose, CA', roleKey: 'co7::process engineer 7', modality: 'api-registry', description: 'changed requirements' } },
+    state: { 'greenhouse:7': { fitScore: 61, scoreKind: 'heuristic', status: 'sourced', descriptionFingerprint: changedFp } },
+  });
+  const changed = await idb.getJob('greenhouse:7');
+  t.eq(changed.state.scoreKind, 'heuristic', 'idb: changed JD invalidates old LLM evidence');
+  t.eq(changed.state.fitScore, 61, 'idb: changed JD receives fresh heuristic score pending rescore');
+
   // Phase E: corpusSummary status breakdown + matching count
   const sum = await idb.corpusSummary({ topN: 3, matchThreshold: 60 });
   t.ok(sum.statusCounts && sum.statusCounts.sourced > 0, 'corpusSummary: statusCounts.sourced present');
@@ -88,6 +135,16 @@ module.exports = async (t) => {
   // schemaVersion recorded via importNormalized path
   await idb.setMeta('schemaVersion', idb.SCHEMA_VERSION);
   t.eq(await idb.getMeta('schemaVersion'), idb.SCHEMA_VERSION, 'idb: schemaVersion persisted');
+
+  // A gate-passing authoritative refresh retires postings absent from the new run.
+  await idb.upsertJobs([makeJob({ id: 'stale-1', title: 'Closed Role', company: 'OldCo', location: 'CA', ats: 'greenhouse' })], 'api-registry');
+  const replaced = await idb.importNormalized({
+    index: { 'greenhouse:fresh-1': { id: 'greenhouse:fresh-1', title: 'Fresh Role', company: 'NewCo', location: 'CA', ats: 'greenhouse', roleKey: 'newco::fresh role', modality: 'api-registry' } },
+    state: { 'greenhouse:fresh-1': { fitScore: 60, status: 'sourced' } },
+  }, { replaceMissing: true });
+  t.ok(replaced.retired > 0, 'idb: authoritative refresh reports retired absent records');
+  t.eq(await idb.getJob('greenhouse:stale-1'), null, 'idb: absent/closed posting cannot remain sourced forever');
+  t.eq(await idb.count(), 1, 'idb: replacement leaves only the current run corpus');
 
   await idb.clearAll();
 };

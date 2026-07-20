@@ -46,10 +46,12 @@ module.exports = (t) => {
   t.eq(log[0].channel, 'external', 'applied-log: enriched with channel');
 
   // confirmation upgrades the SAME record (no duplicate) submitting -> applied
-  w.pjaWriteAppliedLog(job, { status: 'applied', reason: 'applied' });
+  w.pjaWriteAppliedLog(job, { status: 'applied', reason: 'applied', confirmationSource: 'page', confirmedAt: 1234 });
   log = store.pja_applied_log;
   t.eq(log.length, 1, 'applied-log: idempotent by company::title (no duplicate on re-write)');
   t.eq(log[0].status, 'applied', 'applied-log: submitting upgraded to applied');
+  t.eq(log[0].confirmationSource, 'page', 'applied-log: explicit confirmation source retained');
+  t.eq(log[0].confirmedAt, 1234, 'applied-log: confirmation timestamp retained');
 
   // a later 'submitting'/'skipped' must NOT downgrade a confirmed apply
   w.pjaWriteAppliedLog({ company: 'Acme Robotics', title: 'Quality Engineer' }, { status: 'submitting' });

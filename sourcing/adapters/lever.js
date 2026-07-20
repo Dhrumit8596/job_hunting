@@ -17,6 +17,7 @@ function normalize(raw, source) {
     applyUrl,
     ats: ATS,
     postedAt: raw.createdAt ? new Date(raw.createdAt).toISOString() : '',
+    description: raw.descriptionPlain || [raw.description, ...(raw.lists || []).map(x => `${x.text || ''} ${x.content || ''}`)].join(' '),
   });
 }
 

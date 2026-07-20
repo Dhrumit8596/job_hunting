@@ -24,11 +24,12 @@ function normalize(raw, source) {
     applyUrl,
     ats: ATS,
     postedAt: raw.updated_at || raw.first_published || '',
+    description: raw.content || '',
   });
 }
 
 async function fetchJobs(source, { timeoutMs = 15000 } = {}) {
-  const url = `https://boards-api.greenhouse.io/v1/boards/${encodeURIComponent(source.slug)}/jobs`;
+  const url = `https://boards-api.greenhouse.io/v1/boards/${encodeURIComponent(source.slug)}/jobs?content=true`;
   const ctrl = new AbortController();
   const t = setTimeout(() => ctrl.abort(), timeoutMs);
   try {

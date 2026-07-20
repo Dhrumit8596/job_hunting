@@ -2,13 +2,12 @@
 'use strict';
 
 /**
- * PJA Dev Server — routes extension analysis through local `claude` CLI
- * Uses your existing Claude Code subscription — zero extra API cost.
+ * PJA Dev Server — routes extension analysis through a local Claude or Codex CLI.
  *
  * Usage:
  *   node dev-server.js
  *
- * Requires: `claude` CLI to be installed and authenticated (claude login)
+ * Engine: `node dev-server.js --engine codex` or PJA_AI_ENGINE=codex (default: claude).
  *
  * Hot-reload:
  *   curl -X POST http://localhost:6174/reload
@@ -18,15 +17,22 @@
 const http  = require('http');
 const fs    = require('fs');
 const path  = require('path');
+const crypto = require('crypto');
 const { WebSocketServer } = require('ws');
-const { spawn, exec } = require('child_process');
+const { exec } = require('child_process');
 const { buildRestartPlan } = require('./chrome-restart');
+const { parseEngine, runAiCli } = require('./ai-cli');
 
-const PORT = 6174;
+const PORT = Number(process.env.PJA_DEV_PORT || 6174);
+if (!Number.isInteger(PORT) || PORT < 1 || PORT > 65535) throw new Error('PJA_DEV_PORT must be a valid TCP port');
+const AI_ENGINE = parseEngine();
 
 // Connected extension background workers (WebSocket clients)
 const wsClients = new Set();
 let _lastQueueStatus = null;
+// Process-local planning mutex. The extension service worker independently enforces the final
+// active-run lock, but this closes the minutes-long scoreAll race between concurrent HTTP calls.
+let applyRunPlanning = false;
 
 // Candidate-specific analyzer prompt is loaded from candidate.local.txt (gitignored) so no
 // personal profile data ships in the repo. Falls back to a generic prompt if absent.
@@ -35,13 +41,20 @@ const GENERIC_SYSTEM_PROMPT =
 score how well the candidate matches the job posting. Return ONLY valid JSON, no markdown:
 {"fitScore":<integer 0-100>,"tnEligible":<true|false>,"matchedSkills":[<skills the candidate has that match>],"gaps":[<skills the job requires that the candidate lacks>],"recruiterTitle":"<LinkedIn recruiter title>","dmMessage":"<DM under 280 chars>","emailMessage":"<Subject: line first, under 500 chars>","linkedinSearchQuery":"<search query>"}`;
 
+const CANDIDATE_PROFILE_PATH = path.join(__dirname, 'candidate.local.txt');
+const HAS_CANDIDATE_PROFILE = (() => {
+  try { return fs.existsSync(CANDIDATE_PROFILE_PATH) && fs.statSync(CANDIDATE_PROFILE_PATH).size > 0; }
+  catch (_) { return false; }
+})();
 const SYSTEM_PROMPT = (() => {
   try {
-    const p = path.join(__dirname, 'candidate.local.txt');
-    if (fs.existsSync(p)) return fs.readFileSync(p, 'utf8');
+    if (HAS_CANDIDATE_PROFILE) return fs.readFileSync(CANDIDATE_PROFILE_PATH, 'utf8');
   } catch (_) {}
   return GENERIC_SYSTEM_PROMPT;
 })();
+const CANDIDATE_FINGERPRINT = HAS_CANDIDATE_PROFILE
+  ? crypto.createHash('sha256').update(SYSTEM_PROMPT).digest('hex').slice(0, 24)
+  : '';
 
 const JSON_SCHEMA = JSON.stringify({
   type: 'object',
@@ -59,69 +72,11 @@ const JSON_SCHEMA = JSON.stringify({
 });
 
 function runClaudeWithSystemPrompt(systemPrompt, userPrompt, timeoutMs = 90000) {
-  return new Promise((resolve, reject) => {
-    const child = spawn('claude', [
-      '--print',
-      '--system-prompt',       systemPrompt,
-      '--output-format',       'json',
-      '--no-session-persistence',
-      '--model',               'haiku'
-    ], { env: process.env });
-
-    let stdout = '';
-    let stderr = '';
-    let settled = false;
-    const done = fn => (...a) => { if (!settled) { settled = true; clearTimeout(timer); fn(...a); } };
-    const ok = done(resolve), bad = done(reject);
-    // Kill a hung CLI call so one stuck request can't stall a whole batch run.
-    const timer = setTimeout(() => { try { child.kill('SIGKILL'); } catch (_) {} bad(new Error('claude CLI timeout')); }, timeoutMs);
-    child.stdout.on('data', d => stdout += d);
-    child.stderr.on('data', d => stderr += d);
-    child.on('error', e => bad(new Error(`Cannot run claude CLI: ${e.message}`)));
-    child.on('close', code => {
-      if (code !== 0) bad(new Error(`claude exited ${code}: ${stderr.slice(0, 300)}`));
-      else {
-        try { const env = JSON.parse(stdout.trim()); ok(env.result || stdout.trim()); }
-        catch { ok(stdout.trim()); }
-      }
-    });
-    child.stdin.write(userPrompt);
-    child.stdin.end();
-  });
+  return runAiCli({ engine: AI_ENGINE, systemPrompt, userPrompt, timeoutMs });
 }
 
 function runClaude(userPrompt) {
-  return new Promise((resolve, reject) => {
-    const child = spawn('claude', [
-      '--print',
-      '--system-prompt',       SYSTEM_PROMPT,
-      '--output-format',       'json',
-      '--no-session-persistence',
-      '--model',               'haiku'
-    ], { env: process.env });
-
-    let stdout = '';
-    let stderr = '';
-
-    child.stdout.on('data', d => stdout += d);
-    child.stderr.on('data', d => stderr += d);
-    child.on('error', e => reject(new Error(`Cannot run claude CLI: ${e.message}`)));
-    child.on('close', code => {
-      if (code !== 0) reject(new Error(`claude exited ${code}: ${stderr.slice(0, 300)}`));
-      else {
-        try {
-          const envelope = JSON.parse(stdout.trim());
-          resolve(envelope.result || stdout.trim());
-        } catch {
-          resolve(stdout.trim());
-        }
-      }
-    });
-
-    // Send prompt via stdin (handles long job descriptions safely)
-    child.stdin.write(userPrompt);
-    child.stdin.end();
-  });
+  return runClaudeWithSystemPrompt(SYSTEM_PROMPT, userPrompt);
 }
 
 const CORS = {
@@ -191,14 +146,39 @@ function wsAsk(cmd, payload, replyCmd, timeoutMs = 8000) {
   });
 }
 
+function applicationAuditFromStorage(storage, options = {}) {
+  const Ledger = require('./application-ledger');
+  let ledger = storage && storage.pja_application_ledger || Ledger.emptyLedger();
+  ledger = Ledger.reduceLedger(ledger, ((storage && storage.pja_applied_log) || []).map((row, i) => ({
+    ...row, eventId: row.eventId || `legacy_${i}_${row.runId || ''}_${row.jobId || ''}`,
+    applicationAt: row.appliedAt || row.ts,
+    occurredAt: row.updatedAt || row.confirmedAt || row.appliedAt || row.ts,
+  })));
+  return { ledger, audit: Ledger.auditLedger(ledger, options) };
+}
+
 // Score one chunk (<=10) of jobs via the same prompt /batch-score uses.
-const SCORE_SYSTEM_PROMPT = `You score job fit for the candidate, a Canadian moving to California on a TN visa. Her ACTUAL skills (from resume): wafer inspection (~2,500/day), thin film metrology, photolithography, defect detection, thickness measurement, cleanroom, yield improvement, GMP, SPC, quality management/control, 5S, root cause analysis, EH&S, SDS handling, data management. She has a B.E. (Environmental Engineering). She does NOT have: FMEA, 8D, ISO 13485, optical metrology, supplier audits, Python, CAD.
-TN VISA RULE (critical): TN status is only for PROFESSIONAL roles (Engineer/Scientist + degree). Any Technician/Tech/Operator/Associate/Assembler/Supervisor/Manager/Coordinator/Lead title is NOT TN-eligible → score it 0-25 no matter how well skills match. Engineer/Scientist titles are eligible. No H-1B available; roles needing US citizenship/clearance → ≤30.
-BEST FITS (TN-eligible, score 85-95): Wafer Inspection/Metrology/Yield/Defect/Process(-Integration) Engineer in semiconductor; Thin Film/Photolithography/CMP/Etch Process Engineer. Quality/Reliability/Equipment/Manufacturing Engineer (semi/medtech) 70-88. TOP PRIORITY (score 90-95): roles in her core domain (wafer/metrology/inspection/quality/process) at MEDICAL-DEVICE / diagnostics / medtech companies — her current role is at a medical-device / point-of-care diagnostics company, so medical-device + wafer/metrology/quality is her single strongest match. Deduct 10-15 per required gap (FMEA/8D/ISO13485/Python/CAD). Score 0-100. Return ONLY a JSON array [{id, score}]. No markdown, no explanation.`;
+const SCORE_SYSTEM_PROMPT = `${SYSTEM_PROMPT}
+
+FOR BATCH FIT SCORING, the verified candidate/resume profile above is authoritative. Ignore any
+earlier output-format instruction and return the JSON ARRAY schema below. A title containing
+"Associate Engineer" or "Lead Engineer" is still an engineering profession; evaluate duties and
+seniority instead of rejecting it solely for that modifier. Hard citizenship, clearance,
+export-control, work-authorization, degree, location, or seniority conflicts must be explicit.
+If the prompt above does not actually contain candidate/resume facts, never infer them: score at
+most 25 with low confidence until a local candidate profile is configured.
+
+Return ONLY a JSON array. Each item must be {"id":"...","score":0-100,"matchEvidence":[at least 0 concise resume-to-requirement matches],"gaps":[required qualifications not evidenced],"conflicts":[hard conflicts],"confidence":"high|medium|low"}. Evidence must be supported by both the posting text and resume facts. Do not count hedged or potential matches as evidence. If posting requirements are missing, confidence must be low. No markdown.`;
+
+function scoringExcerpt(description) {
+  const text = String(description || '');
+  if (text.length <= 12000) return text;
+  return text.slice(0, 7000) + '\n[... middle omitted ...]\n' + text.slice(-5000);
+}
 
 async function scoreJobChunk(batch) {
-  const jobList = batch.map((j, i) => `Job ${i + 1}: "${j.title}" at "${j.company}" (${j.location})`).join('\n---\n');
-  const prompt = `Score each job 0-100 for the candidate's fit. Return ONLY a JSON array, no other text:\n[{"id":"<job id>","score":<0-100>},...]\n\nJobs:\n${jobList}\n\nJob IDs (in order): ${batch.map(j => JSON.stringify(j.id)).join(', ')}`;
+  const jobList = batch.map((j, i) => `Job ${i + 1}: id=${JSON.stringify(j.id)}\nTitle: ${j.title}\nCompany: ${j.company}\nLocation: ${j.location}\nPosting: ${scoringExcerpt(j.description)}`).join('\n---\n');
+  const prompt = `Score each job using only the resume facts and posting text. A score of 75+ requires at least three direct requirement matches, no hard conflict, realistic seniority, and medium/high confidence.\n\nJobs:\n${jobList}`;
   const raw = await runClaudeWithSystemPrompt(SCORE_SYSTEM_PROMPT, prompt);
   const s = raw.indexOf('['), e = raw.lastIndexOf(']');
   if (s === -1 || e === -1) return [];
@@ -208,6 +188,11 @@ async function scoreJobChunk(batch) {
 // Score all jobs in chunks of 10, with bounded concurrency. Resilient: a chunk that errors
 // or times out leaves its jobs unscored (→ shortlist) instead of stalling the whole run.
 async function scoreAll(jobs, concurrency = 4) {
+  // Deterministic safety boundary: prompt instructions are not the enforcement layer. Without a
+  // verified local resume, no job can obtain an autonomous-apply score.
+  if (!HAS_CANDIDATE_PROFILE) return (jobs || []).map(j => ({ ...j, fitScore: 25,
+    matchEvidence: [], gaps: ['verified local candidate profile is not configured'],
+    conflicts: [], confidence: 'low' }));
   const chunks = [];
   for (let i = 0; i < jobs.length; i += 10) chunks.push(jobs.slice(i, i + 10));
   const byId = {};
@@ -218,16 +203,22 @@ async function scoreAll(jobs, concurrency = 4) {
       let scores = [];
       try { scores = await scoreJobChunk(chunks[idx]); }
       catch (e) { console.log(`[PJA] chunk ${idx + 1} failed: ${e.message}`); }
-      for (const s of scores) if (s && s.id != null) byId[String(s.id)] = Number(s.score);
+      for (const s of scores) if (s && s.id != null) byId[String(s.id)] = s;
       console.log(`[PJA] scored chunk ${++done}/${chunks.length}`);
     }
   }
   await Promise.all(Array.from({ length: Math.min(concurrency, chunks.length || 1) }, worker));
   const { tnAdjustScore, medicalWaferBoost } = require('./sourcing/filter');
   return jobs.map(j => {
-    const raw = byId[String(j.id)] != null ? byId[String(j.id)] : null;
-    if (raw == null) return { ...j, fitScore: null };
-    return { ...j, fitScore: medicalWaferBoost(j.title, j.company, j.description, tnAdjustScore(j.title, raw)) };
+    const result = byId[String(j.id)] || null;
+    if (!result) return { ...j, fitScore: null, matchEvidence: [], gaps: [], conflicts: [], confidence: 'low' };
+    const matchEvidence = Array.isArray(result.matchEvidence) ? result.matchEvidence.filter(Boolean).slice(0, 8) : [];
+    const gaps = Array.isArray(result.gaps) ? result.gaps.filter(Boolean).slice(0, 8) : [];
+    const conflicts = Array.isArray(result.conflicts) ? result.conflicts.filter(Boolean).slice(0, 8) : [];
+    const confidence = ['high', 'medium', 'low'].includes(String(result.confidence || '').toLowerCase()) ? String(result.confidence).toLowerCase() : 'low';
+    let fitScore = medicalWaferBoost(j.title, j.company, j.description, tnAdjustScore(j.title, Number(result.score)));
+    if (matchEvidence.length < 3 || conflicts.length || confidence === 'low') fitScore = Math.min(fitScore, 74);
+    return { ...j, fitScore, matchEvidence, gaps, conflicts, confidence };
   });
 }
 
@@ -239,7 +230,7 @@ async function handleRequest(req, res) {
 
   if (req.method === 'GET' && req.url === '/health') {
     res.writeHead(200, CORS);
-    res.end(JSON.stringify({ ok: true, engine: 'claude-cli', clients: wsClients.size }));
+    res.end(JSON.stringify({ ok: true, engine: `${AI_ENGINE}-cli`, clients: wsClients.size }));
     return;
   }
 
@@ -296,7 +287,7 @@ async function handleRequest(req, res) {
     return;
   }
 
-  // ── /start-scan: backend-trigger the LinkedIn scanner to source EA candidates → pja_shortlist ──
+  // ── /start-scan: backend-trigger LinkedIn / Indeed / Glassdoor browser collection ──
   if (req.method === 'POST' && req.url === '/start-scan') {
     let body = '';
     req.on('data', d => body += d);
@@ -311,6 +302,20 @@ async function handleRequest(req, res) {
       res.end(JSON.stringify({ ok: true, pushed }));
       console.log(`[PJA] /start-scan → ${pushed} client(s) url=${url || '(default)'}`);
     });
+    return;
+  }
+
+  // Sanitized DOM diagnostics for the currently open ATS form. This intentionally omits field
+  // values and profile data; it exposes only controls, labels, validation state, and page text.
+  if (req.method === 'GET' && req.url === '/inspect-apply') {
+    (async () => {
+      try {
+        const data = await wsAsk('inspectActiveApply', {}, 'inspectActiveApplyReply', 10000);
+        res.writeHead(200, CORS); res.end(JSON.stringify({ ok: true, data }));
+      } catch (e) {
+        res.writeHead(500, CORS); res.end(JSON.stringify({ ok: false, error: e.message }));
+      }
+    })();
     return;
   }
 
@@ -337,6 +342,43 @@ async function handleRequest(req, res) {
       res.writeHead(200, CORS);
       res.end(JSON.stringify({ ok: true, pushed, url }));
       console.log(`[PJA] /open-tab → ${url} to ${pushed} client(s)`);
+    });
+    return;
+  }
+
+  // ── /inject-resume: tell the extension to inject the stored résumé (pja_resume_b64) into the
+  // file input of the tab matching `urlMatch`. Works around the MCP file_upload tool. ──
+  if (req.method === 'POST' && req.url === '/inject-resume') {
+    let body = '';
+    req.on('data', d => body += d);
+    req.on('end', async () => {
+      const o = body ? JSON.parse(body) : {};
+      const r = await wsAsk('injectResume', { urlMatch: o.urlMatch || 'myworkdayjobs.com' }, 'injectResumeReply', 15000);
+      console.log('[PJA] /inject-resume →', JSON.stringify(r));
+      res.writeHead(200, CORS);
+      res.end(JSON.stringify(r));
+    });
+    return;
+  }
+
+  // Start SAP SuccessFactors RMK's client-side apply flow on an already-open job tab.
+  // This only invokes RMK's own Apply Now handler; the normal ATS automation remains
+  // responsible for filling the resulting form and deciding whether it can be submitted.
+  if (req.method === 'POST' && req.url === '/successfactors-start') {
+    let body = '';
+    req.on('data', d => body += d);
+    req.on('end', async () => {
+      try {
+        const o = body ? JSON.parse(body) : {};
+        const r = await wsAsk('successFactorsStart', { urlMatch: String(o.urlMatch || '') },
+          'successFactorsStartReply', 15000);
+        console.log('[PJA] /successfactors-start →', JSON.stringify(r));
+        res.writeHead(200, CORS);
+        res.end(JSON.stringify(r));
+      } catch (e) {
+        res.writeHead(400, CORS);
+        res.end(JSON.stringify({ ok: false, error: e.message }));
+      }
     });
     return;
   }
@@ -447,6 +489,47 @@ async function handleRequest(req, res) {
       } catch(e) {
         res.writeHead(400, CORS);
         res.end(JSON.stringify({ error: e.message }));
+      }
+    });
+    return;
+  }
+
+  // Merge one or more verified answers into the existing answer bank without callers having to
+  // round-trip the full (potentially sensitive) storage object through a shell command.
+  if (req.method === 'POST' && req.url === '/save-answers') {
+    let body = '';
+    req.on('data', d => body += d);
+    req.on('end', async () => {
+      try {
+        const o = body ? JSON.parse(body) : {};
+        const updates = Array.isArray(o.answers) ? o.answers : [o];
+        const valid = updates.filter(a => a && String(a.normalizedLabel || '').trim() &&
+          Object.prototype.hasOwnProperty.call(a, 'value'));
+        if (!valid.length) {
+          res.writeHead(400, CORS);
+          res.end(JSON.stringify({ ok: false, error: 'normalizedLabel and value are required' }));
+          return;
+        }
+        const st = await getStorageFromExtension(['pja_answers']);
+        const answers = st.pja_answers || {};
+        const savedAt = Date.now();
+        for (const update of valid) {
+          const key = String(update.normalizedLabel).trim();
+          const existing = answers[key] || {};
+          answers[key] = {
+            ...existing,
+            rawLabel: update.rawLabel || existing.rawLabel || key,
+            answer: update.value,
+            savedAt,
+            usedCount: Number(existing.usedCount || 0)
+          };
+        }
+        const pushed = setStorageToExtension({ pja_answers: answers });
+        res.writeHead(200, CORS);
+        res.end(JSON.stringify({ ok: true, pushed, saved: valid.map(a => String(a.normalizedLabel).trim()) }));
+      } catch (e) {
+        res.writeHead(400, CORS);
+        res.end(JSON.stringify({ ok: false, error: e.message }));
       }
     });
     return;
@@ -629,11 +712,11 @@ ${(description || '').slice(0, 6000)}`;
         const end   = raw.lastIndexOf('}');
         if (start === -1 || end === -1) throw new Error('No JSON object in response: ' + raw.slice(0, 120));
         const data = JSON.parse(raw.slice(start, end + 1));
-        data.engine = 'claude-dev';
+        data.engine = `${AI_ENGINE}-dev`;
 
         console.log(`done (${Date.now() - t0}ms) score=${data.fitScore}`);
         res.writeHead(200, CORS);
-        res.end(JSON.stringify({ success: true, data, engine: 'claude-dev' }));
+        res.end(JSON.stringify({ success: true, data, engine: `${AI_ENGINE}-dev` }));
       } catch (e) {
         console.error(`\n[PJA] Error: ${e.message}`);
         res.writeHead(500, CORS);
@@ -655,35 +738,10 @@ ${(description || '').slice(0, 6000)}`;
         process.stdout.write(`[PJA] Batch scoring ${batch.length} jobs… `);
         const t0 = Date.now();
 
-        const jobList = batch.map((j, i) =>
-          `Job ${i + 1}: "${j.title}" at "${j.company}"\n${(j.description || '').slice(0, 800)}`
-        ).join('\n---\n');
-
-        const prompt =
-`Score each job 0-100 for the candidate's fit. Return ONLY a JSON array, no other text:
-[{"id":"<job id>","score":<0-100>},...]
-
-Jobs:
-${jobList}
-
-Job IDs (in order): ${batch.map(j => JSON.stringify(j.id)).join(', ')}`;
-
-        const batchPrompt = `You score job fit for the candidate, a Canadian moving to California on a TN visa. Her ACTUAL skills (from resume): wafer inspection (~2,500/day), thin film metrology, photolithography, defect detection, thickness measurement, cleanroom, yield improvement, GMP, SPC, quality management/control, 5S, root cause analysis, EH&S, SDS handling, data management. She has a B.E. (Environmental Engineering). She does NOT have: FMEA, 8D, ISO 13485, optical metrology, supplier audits, Python, CAD.
-TN VISA RULE (critical): TN status is only for PROFESSIONAL roles (Engineer/Scientist + degree). Any Technician/Tech/Operator/Associate/Assembler/Supervisor/Manager/Coordinator/Lead title is NOT TN-eligible → score it 0-25 no matter how well skills match. Engineer/Scientist titles are eligible. No H-1B available; roles needing US citizenship/clearance → ≤30.
-BEST FITS (TN-eligible, score 85-95): Wafer Inspection/Metrology/Yield/Defect/Process(-Integration) Engineer in semiconductor; Thin Film/Photolithography/CMP/Etch Process Engineer. Quality/Reliability Engineer (semi/medtech) 70-88. TOP PRIORITY (score 90-95): her core domain (wafer/metrology/inspection/quality/process) at MEDICAL-DEVICE / diagnostics / medtech companies — her current role is at a medical-device / point-of-care diagnostics company, so medical-device + wafer/metrology/quality is her single strongest match. Deduct 10-15 per required gap (FMEA/8D/ISO13485/Python/CAD). Score 0-100. Return ONLY a JSON array [{id, score}]. No markdown, no explanation.`;
-
-        const raw = await runClaudeWithSystemPrompt(batchPrompt, prompt);
-        const start = raw.indexOf('[');
-        const end   = raw.lastIndexOf(']');
-        if (start === -1 || end === -1) throw new Error('No JSON array in response: ' + raw.slice(0, 120));
-        let scores = JSON.parse(raw.slice(start, end + 1));
-        // Apply TN grading + medical-wafer priority boost (medical-device domain relevance).
-        const { tnAdjustScore, medicalWaferBoost } = require('./sourcing/filter');
-        const jById = {}; for (const j of batch) jById[String(j.id)] = j;
-        scores = scores.map(s => {
-          const j = jById[String(s.id)] || {};
-          return { ...s, score: medicalWaferBoost(j.title, j.company, j.description, tnAdjustScore(j.title, s.score)) };
-        });
+        const scored = await scoreAll(batch, 1);
+        const scores = scored.map(j => ({ id: j.id, score: j.fitScore,
+          matchEvidence: j.matchEvidence || [], gaps: j.gaps || [], conflicts: j.conflicts || [],
+          confidence: j.confidence || 'low' }));
 
         console.log(`done (${Date.now() - t0}ms) scores=[${scores.map(s=>s.score).join(',')}]`);
         res.writeHead(200, CORS);
@@ -711,13 +769,16 @@ BEST FITS (TN-eligible, score 85-95): Wafer Inspection/Metrology/Yield/Defect/Pr
         }
         const scored = await scoreAll(unscored.map(j => ({ id: j.id || j.jobId, title: j.title, company: j.company, location: j.location, description: j.description || '' })));
         const byId = {};
-        for (const s of scored) byId[String(s.id)] = s.fitScore;
+        for (const s of scored) byId[String(s.id)] = s;
         const merged = list.map(j => {
           const id = String(j.id || j.jobId || '');
-          return (id in byId && byId[id] != null) ? { ...j, fitScore: byId[id], status: 'scored' } : j;
+          const s = byId[id];
+          return (s && s.fitScore != null) ? { ...j, fitScore: s.fitScore,
+            matchEvidence: s.matchEvidence || [], gaps: s.gaps || [], conflicts: s.conflicts || [],
+            confidence: s.confidence || 'low', status: 'scored' } : j;
         });
         setStorageToExtension({ pja_shortlist: merged });
-        const got = Object.values(byId).filter(v => v != null).length;
+        const got = Object.values(byId).filter(v => v && v.fitScore != null).length;
         res.writeHead(200, CORS); res.end(JSON.stringify({ ok: true, scored: got, requested: unscored.length, total: merged.length }));
         console.log(`[PJA] /score-shortlist → scored ${got}/${unscored.length}`);
       } catch (e) {
@@ -728,9 +789,8 @@ BEST FITS (TN-eligible, score 85-95): Wafer Inspection/Metrology/Yield/Defect/Pr
   }
 
   // ── /source: find roles across ATSes, fit-score, route to queue/shortlist ──
-  // body: { threshold=70, queueLimit=0, write=true }
-  //   queueLimit>0 → auto-queue that many top roles into pja_ext_queue (auto-submit).
-  //   queueLimit=0 → only write the scored shortlist (review-first), no submission.
+  // body: { threshold=70, write=true }. This is a legacy sourcing/review endpoint only;
+  // autonomous submission is intentionally exclusive to /apply-run's evidence gate.
   if (req.method === 'POST' && req.url === '/source') {
     let body = '';
     req.on('data', d => body += d);
@@ -738,13 +798,14 @@ BEST FITS (TN-eligible, score 85-95): Wafer Inspection/Metrology/Yield/Defect/Pr
       try {
         const o = body ? JSON.parse(body) : {};
         const threshold = o.threshold != null ? o.threshold : 70;
-        const queueLimit = o.queueLimit || 0;
+        const requestedQueueLimit = o.queueLimit || 0;
+        const queueLimit = 0; // fail closed: never bypass /apply-run's strict evidence gate
         const write = o.write !== false;
         const sources = (o.sources) || JSON.parse(fs.readFileSync(__dirname + '/sourcing/sources.json', 'utf8')).sources;
 
         // Dedupe against already-applied: durable applied log (survives queue overwrites) +
         // pja_jobs + current queue results.
-        const st = await getStorageFromExtension(['pja_jobs', 'pja_ext_queue', 'pja_shortlist', 'pja_applied_log']);
+        const st = await getStorageFromExtension(['pja_profile', 'pja_jobs', 'pja_ext_queue', 'pja_shortlist', 'pja_applied_log']);
         const { pjaCollectAppliedRecords } = require('./sourcing/dedupe');
         const applied = pjaCollectAppliedRecords(st);
 
@@ -759,7 +820,10 @@ BEST FITS (TN-eligible, score 85-95): Wafer Inspection/Metrology/Yield/Defect/Pr
           const existing = Array.isArray(st.pja_shortlist) ? st.pja_shortlist : [];
           const merged = existing.concat(result.scored.map(j => ({
             id: j.id, title: j.title, company: j.company, location: j.location,
-            applyUrl: j.applyUrl, ats: j.ats, fitScore: j.fitScore, source: 'sourcing',
+            applyUrl: j.applyUrl, ats: j.ats, fitScore: j.fitScore,
+            description: j.description || '', matchEvidence: j.matchEvidence || [],
+            gaps: j.gaps || [], conflicts: j.conflicts || [], confidence: j.confidence || 'low',
+            source: 'sourcing',
           })));
           const payload = { pja_shortlist: merged };
           wrote.shortlist = result.scored.length;
@@ -780,6 +844,7 @@ BEST FITS (TN-eligible, score 85-95): Wafer Inspection/Metrology/Yield/Defect/Pr
 
         res.writeHead(200, CORS);
         res.end(JSON.stringify({ success: true, totals: result.totals, wrote,
+          warning: requestedQueueLimit > 0 ? 'queueLimit ignored; use /apply-run for evidence-gated submission' : undefined,
           liveSources: result.stats.filter(s => s.count > 0).length,
           top: result.scored.slice().sort((a, b) => (b.fitScore || 0) - (a.fitScore || 0)).slice(0, 25)
             .map(j => ({ score: j.fitScore, company: j.company, title: j.title, location: j.location })) }));
@@ -794,9 +859,8 @@ BEST FITS (TN-eligible, score 85-95): Wafer Inspection/Metrology/Yield/Defect/Pr
 
   // ── /source-v2: multi-modal sourcing into the NORMALIZED store (Find-200 goal) ────────────
   // Runs Modality A (API registry) + Modality B (discovery) via sourcing/source-run, dedupes on
-  // the canonical id + role-key, excludes already-applied, and writes pja_job_index/pja_job_state
-  // (compact — no descriptions — so it stays well under the chrome.storage quota; the scale-safe
-  // IndexedDB corpus is populated extension-side via idb-store.importNormalized). Additive: the
+  // the canonical id + mirror-key, excludes already-applied, and imports the description-rich
+  // records directly into extension IndexedDB over an acknowledged WebSocket message. Additive: the
   // legacy /source (pja_shortlist) path is untouched.
   if (req.method === 'POST' && req.url === '/source-v2') {
     let body = '';
@@ -805,21 +869,24 @@ BEST FITS (TN-eligible, score 85-95): Wafer Inspection/Metrology/Yield/Defect/Pr
       try {
         const o = body ? JSON.parse(body) : {};
         const write = o.write !== false;
-        const st = await getStorageFromExtension(['pja_jobs', 'pja_ext_queue', 'pja_shortlist', 'pja_applied_log']);
-        const { pjaCollectAppliedRecords, appliedKeySet } = require('./sourcing/dedupe');
-        const appliedRoleKeys = Array.from(appliedKeySet(pjaCollectAppliedRecords(st)));
+        const st = await getStorageFromExtension(['pja_profile', 'pja_jobs', 'pja_ext_queue', 'pja_shortlist', 'pja_applied_log']);
+        const { pjaCollectAppliedRecords, appliedIdentity } = require('./sourcing/dedupe');
+        const applied = appliedIdentity(pjaCollectAppliedRecords(st));
 
         const { sourceAll } = require('./sourcing/source-run');
-        const { store, report } = await sourceAll({ appliedRoleKeys, target: o.target || 200 });
+        const willing = /^(yes|true|1)$/i.test(String((st.pja_profile || {}).willingToRelocate || ''));
+        const { store, report } = await sourceAll({ appliedIdentity: applied, target: o.target || 200, nationwideUS: willing,
+          browserJobs: Array.isArray(st.pja_shortlist) ? st.pja_shortlist : [],
+          maxBrowserAgeMs: o.maxBrowserAgeMs != null ? Number(o.maxBrowserAgeMs) : 48 * 60 * 60 * 1000 });
 
         let wrote = 0;
         if (write) {
-          setStorageToExtension({
-            pja_job_index: store.index,
-            pja_job_state: store.state,
-            pja_schema_version: 1,
-          });
-          wrote = Object.keys(store.index).length;
+          const imported = await wsAsk('importCorpus', { index: store.index, state: store.state,
+            // Only retire records absent from this run when the fresh corpus itself passed its
+            // supply/quality gate; a transient partial run must not wipe healthy prior coverage.
+            replaceMissing: report.gate.pass }, 'importCorpusReply', 120000);
+          if (!imported || imported.error || imported.ok === false) throw new Error('corpus import failed: ' + ((imported && imported.error) || 'no acknowledgement'));
+          wrote = imported.imported != null ? imported.imported : Object.keys(store.index).length;
         }
         console.log(`[PJA] /source-v2: unique=${report.gate.uniqueIds} modalities=${report.gate.modalities.join('+')} gate=${report.gate.pass ? 'PASS' : 'FAIL'}`);
         res.writeHead(200, CORS);
@@ -840,50 +907,216 @@ BEST FITS (TN-eligible, score 85-95): Wafer Inspection/Metrology/Yield/Defect/Pr
     let body = '';
     req.on('data', d => body += d);
     req.on('end', async () => {
+      let ownsPlanningLock = false;
       try {
         const o = body ? JSON.parse(body) : {};
-        const threshold = o.threshold != null ? o.threshold : 70;
-        const dailyCap = o.dailyCap != null ? o.dailyCap : 30;
-        const rescore = !!o.rescore;
+        const threshold = o.threshold != null ? o.threshold : 75;
+        const dailyCap = o.dailyCap != null ? o.dailyCap : 50;
+        const dailyTarget = o.targetConfirmed != null ? Math.max(1, Number(o.targetConfirmed) || 1)
+          : Math.max(1, Number(dailyCap) || 1);
+        // Zero means keep every qualified reserve. The global dispatcher stops as soon as the
+        // confirmed target is reached, so reserves replace failures without causing over-submit.
+        const attemptCap = o.attemptCap != null ? Math.max(0, Number(o.attemptCap) || 0) : 0;
+        // Evidence-grounded resume/JD rescoring is the safe default. Callers may explicitly set
+        // rescore:false for diagnostics, but autonomous apply planning should never trust title-only
+        // heuristic scores.
+        const rescore = o.rescore !== false;
         const stopBeforeSubmit = !!o.stopBeforeSubmit;
-        const dryRun = !!o.dryRun; // build + return the plan, but DON'T seed the queue or open tabs (no real applies)
+        // A heuristic-only request is diagnostic by definition and can never submit.
+        const dryRun = !!o.dryRun || !rescore; // build + return the plan, but DON'T seed/open tabs
         const atsAllow = Array.isArray(o.atsAllow) ? o.atsAllow : null; // restrict to these ATS strategies (e.g. no-account trial)
+        const requireEvidence = o.requireEvidence !== false;
+        const maxGaps = o.maxGaps != null ? Number(o.maxGaps) : 2;
+        const perCompanyCap = o.perCompanyCap != null ? Math.max(0, Number(o.perCompanyCap) || 0) : 0;
+        const includeAssisted = o.includeAssisted === true;
+        const timeZone = o.timeZone || 'America/Los_Angeles';
+        const Ledger = require('./application-ledger');
+        const day = o.day || Ledger.dayKey(Date.now(), timeZone);
+        const companyDeny = new Set((Array.isArray(o.companyDeny) ? o.companyDeny : [])
+          .map(x => String(x).trim().toLowerCase()).filter(Boolean));
+        const titleDeny = (Array.isArray(o.titleDeny) ? o.titleDeny : [])
+          .map(x => String(x).trim().toLowerCase()).filter(Boolean);
+        // Optional exact company+title allow-list. This lets callers run evidence-heavy LLM
+        // scoring on a reviewed shortlist instead of rescoring the entire corpus. Distinct
+        // requisitions that share a company/title are intentionally retained and are still
+        // deduped later by their canonical posting identity.
+        const normCandidatePart = value => String(value || '').toLowerCase()
+          .replace(/[^a-z0-9]+/g, ' ').trim();
+        const candidateKey = value => `${normCandidatePart(value && value.company)}::${normCandidatePart(value && value.title)}`;
+        const candidateAllow = new Set((Array.isArray(o.candidateAllow) ? o.candidateAllow : [])
+          .map(value => {
+            if (value && typeof value === 'object') return candidateKey(value);
+            const parts = String(value || '').split('::');
+            return parts.length >= 2 ? candidateKey({ company: parts.shift(), title: parts.join('::') }) : '';
+          }).filter(Boolean));
+        const candidateIds = new Set((Array.isArray(o.candidateIds) ? o.candidateIds : [])
+          .map(value => String(value || '').trim()).filter(Boolean));
+        const denied = j => companyDeny.has(String(j.company || '').trim().toLowerCase()) ||
+          titleDeny.some(term => String(j.title || '').toLowerCase().includes(term));
+        const allowed = j => (!candidateAllow.size || candidateAllow.has(candidateKey(j))) &&
+          (!candidateIds.size || candidateIds.has(String(j && j.id || '').trim()));
         if (![...wsClients].some(c => c.readyState === 1)) { res.writeHead(503, CORS); res.end(JSON.stringify({ error: 'no extension connected' })); return; }
+        if (!dryRun) {
+          if (applyRunPlanning) {
+            res.writeHead(409, CORS); res.end(JSON.stringify({ error: 'an application run is already being planned' })); return;
+          }
+          applyRunPlanning = true;
+          ownsPlanningLock = true;
+        }
+        const control = await getStorageFromExtension(['pja_ranked_apply', 'pja_application_ledger', 'pja_applied_log']);
+        if (!dryRun && !o.force) {
+          const run = control.pja_ranked_apply;
+          if (run && run.status === 'applying') {
+            res.writeHead(409, CORS); res.end(JSON.stringify({ error: 'an application run is already active',
+              runId: run.runId, currentIndex: run.currentIndex, confirmed: run.confirmedCount || 0,
+              remaining: run.remaining != null ? run.remaining : run.targetConfirmed })); return;
+          }
+        }
+        const todayAudit = applicationAuditFromStorage(control, { day, timeZone, target: dailyTarget }).audit;
+        const alreadyConfirmedToday = todayAudit.counts.confirmed;
+        const remainingTarget = todayAudit.remaining;
+        if (remainingTarget <= 0) {
+          res.writeHead(200, CORS); res.end(JSON.stringify({ success: true, dryRun, planned: 0,
+            note: 'daily confirmed target already reached', day, timeZone, dailyTarget,
+            alreadyConfirmedToday, remainingTarget: 0 })); return;
+        }
 
-        // 1. apply-set from the corpus (fit>=threshold, not applied, retryable), heuristic-gated.
-        const setResp = await wsAsk('getApplySet', { threshold, dailyCap, atsAllow }, 'applySetReply', 10000);
+        // 1. Pull every application-ready candidate before LLM ranking. A heuristic top-N bound
+        // cannot guarantee the true best match, so the autonomous path never pre-truncates it.
+        const setResp = await wsAsk('getApplySet', { threshold: rescore ? 0 : threshold,
+          dailyCap: rescore ? 0 : dailyCap, perCompanyCap: rescore ? 0 : perCompanyCap,
+          atsAllow, requireEvidence: !rescore && requireEvidence, maxGaps,
+          candidateFingerprint: !rescore ? CANDIDATE_FINGERPRINT : undefined }, 'applySetReply', 20000);
         let jobs = (setResp && setResp.jobs) || [];
         if (setResp.error) { res.writeHead(502, CORS); res.end(JSON.stringify({ error: 'getApplySet: ' + setResp.error })); return; }
-
-        // 2. optional LLM rescore → write real fit back to corpus → re-gate.
-        if (rescore && jobs.length) {
-          const scored = await scoreAll(jobs);
-          await wsAsk('updateScores', { scores: scored.map(j => ({ id: j.id, fitScore: j.fitScore })) }, 'updateScoresReply', 20000);
-          jobs = scored.filter(j => j.fitScore != null && j.fitScore >= threshold)
-            .sort((a, b) => (b.fitScore || 0) - (a.fitScore || 0)).slice(0, dailyCap);
+        if (candidateAllow.size || candidateIds.size) jobs = jobs.filter(allowed);
+        if (companyDeny.size || titleDeny.length) jobs = jobs.filter(j => !denied(j));
+        // LinkedIn Easy Apply is intentionally assisted because its modal-open action is rejected by
+        // automation in the current UI. Exclude it from unattended runs instead of silently waiting
+        // five minutes per role; callers can opt in with includeAssisted:true.
+        let assistedExcluded = 0;
+        if (!includeAssisted) {
+          const before = jobs.length;
+          jobs = jobs.filter(j => j.channel !== 'linkedin_easy_apply');
+          assistedExcluded = before - jobs.length;
         }
 
-        if (!jobs.length) { res.writeHead(200, CORS); res.end(JSON.stringify({ success: true, planned: 0, note: 'nothing eligible', corpusTotal: setResp.total })); return; }
+        // 2. Score every candidate whose evidence is not already valid for this exact JD. Reuse
+        // prior LLM evidence only when the description fingerprint still matches.
+        if (rescore && jobs.length) {
+          const { descriptionFingerprint } = require('./sourcing/jobstore');
+          jobs = jobs.filter(j => j.description && !/^(missing|stale|needs_description)$/i.test(String(j.descriptionStatus || '')));
+          const reusable = [], needsScore = [];
+          for (const j of jobs) {
+            const fp = descriptionFingerprint(j.description);
+            if (j.scoreKind === 'llm' && j.fitScore != null && j.descriptionFingerprint === fp &&
+                j.candidateFingerprint === CANDIDATE_FINGERPRINT) reusable.push(j);
+            else needsScore.push(j);
+          }
+          const scored = needsScore.length ? await scoreAll(needsScore) : [];
+          if (scored.length) await wsAsk('updateScores', { scores: scored.map(j => ({ id: j.id, fitScore: j.fitScore,
+            descriptionFingerprint: descriptionFingerprint(j.description),
+            candidateFingerprint: CANDIDATE_FINGERPRINT,
+            evidenceFingerprint: `${descriptionFingerprint(j.description)}:${CANDIDATE_FINGERPRINT}`,
+            matchEvidence: j.matchEvidence,
+            gaps: j.gaps, conflicts: j.conflicts, confidence: j.confidence })) }, 'updateScoresReply', 120000);
+          const ranked = reusable.concat(scored)
+            .filter(j => j.fitScore != null && j.fitScore >= threshold && (!requireEvidence || ((j.matchEvidence || []).length >= 3 && (j.gaps || []).length <= maxGaps && !(j.conflicts || []).length && ['high', 'medium'].includes(String(j.confidence || '').toLowerCase()))))
+            .sort((a, b) => (b.fitScore || 0) - (a.fitScore || 0));
+          const perCo = {}, selected = [];
+          for (const j of ranked) {
+            const co = String(j.company || '').trim().toLowerCase();
+            if (perCompanyCap > 0 && (perCo[co] || 0) >= perCompanyCap) continue;
+            perCo[co] = (perCo[co] || 0) + 1;
+            selected.push(j);
+            if (attemptCap > 0 && selected.length >= attemptCap) break;
+          }
+          jobs = selected;
+          if (companyDeny.size || titleDeny.length) jobs = jobs.filter(j => !denied(j));
+        }
+
+        if (!jobs.length) { res.writeHead(200, CORS); res.end(JSON.stringify({ success: true, planned: 0,
+          note: 'nothing eligible', corpusTotal: setResp.total, assistedExcluded, day, timeZone,
+          dailyTarget, alreadyConfirmedToday, remainingTarget })); return; }
 
         // 3. build the queue + seed current, then open the first job's tab to start the loop.
-        const queueJobs = jobs.map(j => ({ id: j.id, title: j.title, company: j.company, ats: j.ats || j.strategy,
-          applyUrl: j.applyUrl, location: j.location, fitScore: j.fitScore, profile: {}, answers: {} }));
+        const queueJobs = jobs.map(j => ({ id: j.id, jobId: j.sourceJobId || j.jobId || '',
+          sourceJobId: j.sourceJobId || j.jobId || '', title: j.title, company: j.company,
+          ats: j.ats || j.strategy, strategy: j.strategy || '', channel: j.channel || 'external',
+          applyUrl: j.applyUrl, listingUrl: j.listingUrl || '', location: j.location, fitScore: j.fitScore,
+          matchEvidence: j.matchEvidence || [], gaps: j.gaps || [], conflicts: j.conflicts || [],
+          confidence: j.confidence || '', profile: {}, answers: {} }));
         const runId = 'apply-' + Date.now();
-        const queue = { status: 'applying', jobs: queueJobs, currentIndex: 0, results: { applied: [], skipped: [] }, runId, startedAt: Date.now() };
+        const plannedAt = Date.now();
+        for (const j of queueJobs) { j.runId = runId; j.applicationAt = plannedAt; }
         const byStrategy = {};
         for (const j of queueJobs) { const k = j.ats || 'generic'; byStrategy[k] = (byStrategy[k] || 0) + 1; }
+        const easyApplyJobs = queueJobs.filter(j => j.channel === 'linkedin_easy_apply');
+        const indeedApplyJobs = queueJobs.filter(j => j.channel === 'indeed_apply');
+        const externalJobs = queueJobs.filter(j => j.channel !== 'linkedin_easy_apply' && j.channel !== 'indeed_apply');
+        const byChannel = { external: externalJobs.length, linkedin_easy_apply: easyApplyJobs.length,
+          indeed_apply: indeedApplyJobs.length };
 
         if (!dryRun) {
-          const first = Object.assign({}, queueJobs[0], { returnUrl: 'https://www.linkedin.com/jobs/search/?f_AL=true', runId });
-          setStorageToExtension({ pja_ext_queue: queue, pja_ext_current: first, pja_ext_stop_before_submit: stopBeforeSubmit, pja_navigate_to: queueJobs[0].applyUrl });
-          wsSend('openTab', { url: queueJobs[0].applyUrl });
+          const master = { status: 'applying', jobs: queueJobs, currentIndex: 0, inFlightIndex: null,
+            results: { confirmed: [], failed: [], unverified: [], skipped: [] }, blockedChannels: [],
+            runId, targetConfirmed: dailyTarget, dailyTarget, day, timeZone,
+            confirmedCount: alreadyConfirmedToday, remaining: remainingTarget,
+            stopBeforeSubmit, startedAt: plannedAt, updatedAt: plannedAt };
+          const started = await wsAsk('startRankedApply', { master, force: !!o.force },
+            'startRankedApplyReply', 30000);
+          if (!started || started.ok !== true) {
+            res.writeHead(started && started.conflict ? 409 : 502, CORS);
+            res.end(JSON.stringify({ success: false, error: started && (started.error ||
+              (started.conflict ? 'an application run became active while planning' : 'ranked start was not acknowledged')) || 'ranked start was not acknowledged',
+              activeRunId: started && started.runId })); return;
+          }
         }
-        console.log(`[PJA] /apply-run${dryRun ? ' (dry-run)' : ''}: ${dryRun ? 'planned' : 'queued'} ${queueJobs.length} (threshold=${threshold}, rescore=${rescore}) byStrategy=${JSON.stringify(byStrategy)}`);
+        console.log(`[PJA] /apply-run${dryRun ? ' (dry-run)' : ''}: ${dryRun ? 'planned' : 'queued'} ${queueJobs.length} (threshold=${threshold}, rescore=${rescore}) byChannel=${JSON.stringify(byChannel)} byStrategy=${JSON.stringify(byStrategy)}`);
         res.writeHead(200, CORS);
-        res.end(JSON.stringify({ success: true, dryRun, planned: queueJobs.length, runId, byStrategy, corpusTotal: setResp.total,
-          top: queueJobs.slice(0, 12).map(j => ({ fit: j.fitScore, company: j.company, title: j.title, ats: j.ats })) }));
+        const previewLimit = Math.max(1, Math.min(500, Number(o.previewLimit) || 12));
+        res.end(JSON.stringify({ success: true, dryRun, planned: queueJobs.length,
+          targetConfirmed: remainingTarget, dailyTarget, alreadyConfirmedToday, remainingTarget,
+          day, timeZone, assistedExcluded, includeAssisted,
+          reserveCount: Math.max(0, queueJobs.length - remainingTarget), runId, byChannel,
+          byStrategy, corpusTotal: setResp.total,
+          top: jobs.slice(0, previewLimit).map(j => ({ fit: j.fitScore, company: j.company, title: j.title,
+            ats: j.ats || j.strategy, channel: j.channel || 'external', matchEvidence: j.matchEvidence || [],
+            gaps: j.gaps || [], conflicts: j.conflicts || [], confidence: j.confidence || '' })) }));
       } catch (e) {
         console.error('[PJA] /apply-run error:', e.message);
+        res.writeHead(500, CORS); res.end(JSON.stringify({ success: false, error: e.message }));
+      } finally { if (ownsPlanningLock) applyRunPlanning = false; }
+    });
+    return;
+  }
+
+  // ── /applied-audit: exact run/day count from the serialized confirmation ledger. Legacy log
+  // rows are folded in conservatively; only rows carrying explicit page/email evidence count.
+  if (req.method === 'POST' && req.url === '/applied-audit') {
+    let body = '';
+    req.on('data', d => body += d);
+    req.on('end', async () => {
+      try {
+        const o = body ? JSON.parse(body) : {};
+        const st = await getStorageFromExtension(['pja_application_ledger', 'pja_applied_log']);
+        const Ledger = require('./application-ledger');
+        let ledger = applicationAuditFromStorage(st, { day: null }).ledger;
+        const auditOpts = { target: o.target != null ? Number(o.target) : 50,
+          timeZone: o.timeZone || 'America/Los_Angeles' };
+        if (Object.prototype.hasOwnProperty.call(o, 'runId')) auditOpts.runId = o.runId;
+        if (Object.prototype.hasOwnProperty.call(o, 'day')) auditOpts.day = o.day;
+        if (o.now != null) auditOpts.now = o.now;
+        let reconciliation = null;
+        if (Array.isArray(o.emails) && o.emails.length) {
+          reconciliation = Ledger.reconcileEmails(ledger, o.emails, auditOpts);
+          ledger = reconciliation.ledger;
+        }
+        const audit = Ledger.auditLedger(ledger, auditOpts);
+        res.writeHead(200, CORS);
+        res.end(JSON.stringify({ success: true, ...audit,
+          emailMatches: reconciliation ? reconciliation.matches : [] }));
+      } catch (e) {
         res.writeHead(500, CORS); res.end(JSON.stringify({ success: false, error: e.message }));
       }
     });
@@ -936,6 +1169,65 @@ BEST FITS (TN-eligible, score 85-95): Wafer Inspection/Metrology/Yield/Defect/Pr
         client.send(JSON.stringify({ cmd: 'getCorpus', target: o.target || 200, reqId }));
         setTimeout(() => { if (!responded) { responded = true; client.removeListener('message', onMsg); res.writeHead(504, CORS); res.end(JSON.stringify({ error: 'timeout' })); } }, 5000);
       } catch (e) { res.writeHead(400, CORS); res.end(JSON.stringify({ error: e.message })); }
+    });
+    return;
+  }
+
+  // Read one corpus record by canonical id for targeted eligibility diagnostics.
+  if (req.method === 'POST' && req.url === '/corpus-job') {
+    let body = '';
+    req.on('data', d => body += d);
+    req.on('end', async () => {
+      try {
+        const o = body ? JSON.parse(body) : {};
+        if (!o.id) {
+          res.writeHead(400, CORS); res.end(JSON.stringify({ ok: false, error: 'id is required' })); return;
+        }
+        const data = await wsAsk('getCorpusJob', { id: String(o.id) }, 'corpusJobReply', 10000);
+        res.writeHead(200, CORS); res.end(JSON.stringify({ ok: true, data }));
+      } catch (e) {
+        res.writeHead(500, CORS); res.end(JSON.stringify({ ok: false, error: e.message }));
+      }
+    });
+    return;
+  }
+
+  // Search description-free job metadata in the live IndexedDB corpus.
+  if (req.method === 'POST' && req.url === '/corpus-search') {
+    let body = '';
+    req.on('data', d => body += d);
+    req.on('end', async () => {
+      try {
+        const o = body ? JSON.parse(body) : {};
+        const data = await wsAsk('searchCorpus', {
+          terms: Array.isArray(o.terms) ? o.terms : [], statuses: Array.isArray(o.statuses) ? o.statuses : ['sourced'],
+          minFit: o.minFit, limit: o.limit
+        }, 'corpusSearchReply', 15000);
+        res.writeHead(200, CORS); res.end(JSON.stringify({ ok: true, ...data }));
+      } catch (e) {
+        res.writeHead(500, CORS); res.end(JSON.stringify({ ok: false, error: e.message }));
+      }
+    });
+    return;
+  }
+
+  // Reset only named, non-terminal corpus records after a verified automation bug has been fixed.
+  // Normal retry caps remain intact for every other posting.
+  if (req.method === 'POST' && req.url === '/reset-corpus-jobs') {
+    let body = '';
+    req.on('data', d => body += d);
+    req.on('end', async () => {
+      try {
+        const o = body ? JSON.parse(body) : {};
+        const ids = (Array.isArray(o.ids) ? o.ids : []).map(String).filter(Boolean).slice(0, 20);
+        if (!ids.length) {
+          res.writeHead(400, CORS); res.end(JSON.stringify({ ok: false, error: 'ids are required' })); return;
+        }
+        const data = await wsAsk('resetCorpusJobs', { ids }, 'resetCorpusJobsReply', 15000);
+        res.writeHead(200, CORS); res.end(JSON.stringify({ ok: true, ...data }));
+      } catch (e) {
+        res.writeHead(500, CORS); res.end(JSON.stringify({ ok: false, error: e.message }));
+      }
     });
     return;
   }
@@ -1127,7 +1419,7 @@ wss.on('connection', ws => {
 
 server.listen(PORT, '127.0.0.1', () => {
   console.log(`\n🔬 PJA dev server  →  http://localhost:${PORT}`);
-  console.log(`   Engine            : claude CLI (your subscription, no extra cost)`);
+  console.log(`   Engine            : ${AI_ENGINE} CLI`);
   console.log(`   Hot-reload        : curl -X POST http://localhost:${PORT}/reload`);
   console.log(`   Stop              : Ctrl+C\n`);
 });

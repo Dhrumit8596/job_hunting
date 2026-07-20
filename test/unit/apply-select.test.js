@@ -2,12 +2,15 @@
 // Phase B core: apply-set selection gating + result→state mapping + pool-cleared summary.
 const path = require('path');
 require(path.resolve(__dirname, '../../sourcing/detect-ats'));
-const { buildApplySet, resultToState, poolStatus, roleKey, exceededBudget, watchdogDecision } = require(path.resolve(__dirname, '../../sourcing/apply-select'));
+const { buildApplySet, resultToState, poolStatus, roleKey, greenhouseEmbedFallback, exceededBudget,
+  watchdogDecision, queueJobKey } = require(path.resolve(__dirname, '../../sourcing/apply-select'));
 
 function corpus(entries) {
   const index = {}, state = {};
   for (const e of entries) {
-    index[e.id] = { id: e.id, company: e.company, title: e.title, applyUrl: e.applyUrl, ats: e.ats || '' };
+    index[e.id] = { id: e.id, company: e.company, title: e.title, applyUrl: e.applyUrl,
+      ats: e.ats || '', description: e.description || 'Role responsibilities and required qualifications.',
+      descriptionStatus: e.descriptionStatus || 'full', channel: e.channel || '' };
     state[e.id] = { fitScore: e.fit, status: e.status || 'sourced', attempts: e.attempts || 0 };
   }
   return { index, state };
@@ -42,6 +45,27 @@ module.exports = (t) => {
   const set2 = buildApplySet(c, { threshold: 70, appliedRoleKeys: [roleKey({ company: 'Carbon', title: 'Process Engineer' })] });
   t.ok(!set2.map(j => j.id).includes('greenhouse:1'), 'excludes role in applied log');
 
+  const exactCorpus = corpus([
+    { id: 'greenhouse:10', company: 'Acme', title: 'Process Engineer', applyUrl: 'https://boards.greenhouse.io/acme/jobs/10', fit: 85 },
+    { id: 'greenhouse:11', company: 'Acme', title: 'Process Engineer', applyUrl: 'https://boards.greenhouse.io/acme/jobs/11', fit: 84 },
+  ]);
+  exactCorpus.index['greenhouse:10'].sourceJobId = '10';
+  exactCorpus.index['greenhouse:11'].sourceJobId = '11';
+  const exactSet = buildApplySet(exactCorpus, { threshold: 70, appliedRecords: [{ company: 'Acme', title: 'Process Engineer', jobId: '10' }] });
+  t.eq(exactSet.map(j => j.id), ['greenhouse:11'], 'exact applied id excludes only that requisition, not same-title sibling');
+  t.eq(buildApplySet(exactCorpus, { threshold: 70, appliedRecords: [{ company: 'Acme', title: 'Process Engineer' }] }).length, 0,
+    'legacy id-less applied record retains conservative role-key fallback');
+  const collisionCorpus = corpus([
+    { id: 'workday:alpha:R1234', company: 'Alpha Fab', title: 'Process Engineer', applyUrl: 'https://alpha.example/jobs/R1234', fit: 90 },
+    { id: 'workday:beta:R1234', company: 'Beta Fab', title: 'Process Engineer', applyUrl: 'https://beta.example/jobs/R1234', fit: 89 },
+  ]);
+  collisionCorpus.index['workday:alpha:R1234'].sourceJobId = 'R1234';
+  collisionCorpus.index['workday:beta:R1234'].sourceJobId = 'R1234';
+  t.eq(buildApplySet(collisionCorpus, { threshold: 70, appliedRecords: [
+    { company: 'Alpha Fab', title: 'Process Engineer', jobId: 'R1234' },
+  ] }).map(j => j.id), ['workday:beta:R1234'],
+  'tenant-local applied job IDs do not suppress a different employer');
+
   // maxAttempts: a deferred job at the cap is not retried
   const c2 = corpus([{ id: 'x:1', company: 'A', title: 'Process Engineer', applyUrl: 'https://boards.greenhouse.io/a/jobs/1', fit: 80, status: 'needs_manual', attempts: 3 }]);
   t.eq(buildApplySet(c2, { threshold: 70, maxAttempts: 3 }).length, 0, 'deferred at maxAttempts not retried');
@@ -64,6 +88,24 @@ module.exports = (t) => {
   t.eq(psiqCount, 2, 'per-company cap: at most 2 from PsiQ');
   t.ok(new Set(capped.map(j => j.company)).size >= 3, 'per-company cap: batch spans multiple companies');
   t.eq(buildApplySet(conc, { threshold: 70, dailyCap: 10, perCompanyCap: 0 }).filter(j => j.company === 'PsiQ').length, 4, 'perCompanyCap=0 disables the cap');
+
+  // Evidence gate: a score alone is insufficient for high-confidence auto-apply.
+  const evidenceCorpus = corpus([
+    { id: 'e:1', company: 'Strong', title: 'Metrology Engineer', applyUrl: 'https://jobs.lever.co/strong/1', fit: 90 },
+    { id: 'e:2', company: 'Conflict', title: 'Quality Engineer', applyUrl: 'https://jobs.lever.co/conflict/2', fit: 90 },
+  ]);
+  evidenceCorpus.state['e:1'] = { ...evidenceCorpus.state['e:1'], matchEvidence: ['wafer inspection', 'thin film metrology', 'SPC'], gaps: [], conflicts: [], confidence: 'high' };
+  evidenceCorpus.state['e:2'] = { ...evidenceCorpus.state['e:2'], matchEvidence: ['GMP', 'quality control', 'RCA'], gaps: [], conflicts: ['US citizenship required'], confidence: 'high' };
+  const evidenceSet = buildApplySet(evidenceCorpus, { threshold: 75, requireEvidence: true });
+  t.eq(evidenceSet.map(j => j.id), ['e:1'], 'evidence gate requires 3 matches and rejects hard conflicts');
+  t.eq(evidenceSet[0].matchEvidence.length, 3, 'selection carries audit evidence into queue');
+  evidenceCorpus.state['e:1'].gaps = ['Python', 'CAD', 'optical metrology'];
+  t.eq(buildApplySet(evidenceCorpus, { threshold: 75, requireEvidence: true }).length, 0, 'evidence gate rejects more than two material gaps');
+  evidenceCorpus.state['e:1'].gaps = [];
+  evidenceCorpus.state['e:1'].candidateFingerprint = 'resume-v1';
+  t.eq(buildApplySet(evidenceCorpus, { threshold: 75, requireEvidence: true,
+    candidateFingerprint: 'resume-v2' }).length, 0,
+  'evidence gate rejects scores produced from a different resume fingerprint');
 
   // atsAllow: hard restrict to no-account ATSes (supervised-trial safety guarantee)
   const allow = buildApplySet(c, { threshold: 70, atsAllow: ['greenhouse'] });
@@ -97,8 +139,21 @@ module.exports = (t) => {
   t.eq(watchdogDecision(Q, { runId: 'r1', idx: 1, startedAt: 1000 }, 2000).action, 'reset', 'wd: idx changed → reset');
   t.eq(watchdogDecision(Q, { runId: 'r0', idx: 2, startedAt: 1000 }, 2000).action, 'reset', 'wd: runId changed → reset');
   t.eq(watchdogDecision(Q, { runId: 'r1', idx: 2, startedAt: 1000 }, 1000 + 60000).action, 'wait', 'wd: within cap → wait');
-  t.eq(watchdogDecision(Q, { runId: 'r1', idx: 2, startedAt: 1000 }, 1000 + 400000).action, 'advance', 'wd: past 5-min cap → advance');
+  t.eq(watchdogDecision(Q, { runId: 'r1', idx: 2, startedAt: 1000 }, 1000 + 179000).action, 'wait', 'wd: just inside 3-min cap → wait');
+  t.eq(watchdogDecision(Q, { runId: 'r1', idx: 2, startedAt: 1000 }, 1000 + 181000).action, 'advance', 'wd: past 3-min cap → advance');
   t.eq(watchdogDecision(Q, { runId: 'r1', idx: 2, startedAt: 1000 }, 1000 + 20000, { capMs: 10000 }).action, 'advance', 'wd: custom cap honored');
+  const rankedA = { status: 'applying', currentIndex: 0, runId: 'same-run',
+    jobs: [{ company: 'A', title: 'Engineer', jobId: '123', applyUrl: 'https://a.example/apply/123' }] };
+  const rankedB = { ...rankedA,
+    jobs: [{ company: 'B', title: 'Engineer', jobId: '123', applyUrl: 'https://b.example/apply/123' }] };
+  const firstTracker = watchdogDecision(rankedA, {}, 1000).wd;
+  t.eq(watchdogDecision(rankedB, firstTracker, 1000 + 181000).action, 'reset',
+    'wd: one-job reserve with same run/index resets by canonical job identity');
+  t.ok(queueJobKey(rankedA.jobs[0]) !== queueJobKey(rankedB.jobs[0]),
+    'wd: tenant-local raw IDs do not collide when routes differ');
+
+  t.eq(greenhouseEmbedFallback('https://job-boards.greenhouse.io/peakenergy/jobs/4913996007', 'https://peakenergy.com/careers?gh_jid=4913996007'), 'https://boards.greenhouse.io/embed/job_app?for=peakenergy&token=4913996007', 'GH corporate redirect -> embedded application');
+  t.eq(greenhouseEmbedFallback('https://job-boards.greenhouse.io/peakenergy/jobs/4913996007', 'https://peakenergy.com/careers?gh_jid=999'), '', 'GH fallback requires matching job id');
 
   // --- poolStatus ---
   const ps = poolStatus(c, { threshold: 70 });

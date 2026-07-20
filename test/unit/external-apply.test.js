@@ -98,8 +98,14 @@ module.exports = (t) => {
   t.eq(w.pjaDeterministicAnswer('Do you now or will you ever require sponsorship?'), 'No', 'det: sponsorship -> No');
   t.eq(w.pjaDeterministicAnswer('Are you legally authorized to work in the US?'), 'Yes', 'det: work-auth -> Yes');
   t.eq(w.pjaDeterministicAnswer('Are you now or have you ever been a Penumbra employee?'), 'No', 'det: employed-here -> No');
+  t.eq(w.pjaDeterministicAnswer('Have you previously worked for Pure Storage?'), 'No', 'det: previously worked here -> No');
   t.eq(w.pjaDeterministicAnswer('Do you now or have you ever worked for Pricewaterhouse Cooper (PwC)?'), 'No', 'det: PwC -> No');
   t.eq(w.pjaDeterministicAnswer('Are you at least 18 years of age?'), 'Yes', 'det: 18+ -> Yes');
+  t.eq(w.pjaProfileFieldForLabel('If yes, please enter visa type', { visaStatus: 'TN Visa' }), 'TN Visa', 'profile map: conditional visa type -> stored visa status');
+  t.eq(w.pjaProfileFieldForLabel('How would you describe your gender identity?', { gender: 'Female' }), 'Female', 'profile map: gender identity -> stored gender');
+  t.eq(w.pjaDeterministicAnswer('Are you able and willing to be on site 5 days per week?'), 'Yes', 'det: able and willing onsite -> Yes');
+  t.eq(w.pjaDeterministicAnswer('Do you have any immediate family that works for HeartFlow?'), 'No', 'det: immediate family employed by company -> No');
+  t.eq(w.pjaDeterministicAnswer('Have you ever been or are you currently debarred?'), 'No', 'det: debarment -> No');
   t.eq(w.pjaDeterministicAnswer('How did you hear about us?'), 'LinkedIn', 'det: how-did-you-hear -> LinkedIn');
   t.eq(w.pjaDeterministicAnswer('What is the highest level of education you have completed?'), null, 'det: education -> null (AI handles)');
   t.eq(w.pjaDeterministicAnswer('Describe your experience with SPC'), null, 'det: open-ended "describe" -> null');
@@ -107,6 +113,16 @@ module.exports = (t) => {
   // --- acknowledgment / certification statements -> honest Yes (reading/agreeing is part of applying) ---
   t.eq(w.pjaDeterministicAnswer('I have read and understand the Export Control statement included in the job description above.'), 'Yes', 'det: export-control ack -> Yes');
   t.eq(w.pjaDeterministicAnswer('I acknowledge that I have read the privacy notice.'), 'Yes', 'det: acknowledge -> Yes');
+  t.eq(w.pjaDeterministicAnswer('Acknowledge/Confirm'), 'Yes', 'det: bare acknowledge/confirm -> Yes');
+  t.eq(w.pjaDeterministicAnswer('Does the deemed export rule affect your employment by Everpure?'), 'No', 'det: Canadian applicant unaffected by sanctioned-nation rule');
+  t.eq(w.pjaDeterministicAnswer('Are you available to work at one of our office locations five days per week?'), 'Yes', 'det: office availability -> Yes');
+  t.eq(w.pjaDeterministicAnswer('What are your desired base salary expectations?'), '$80,000 - $95,000 depending on role and responsibilities', 'det: salary custom question uses standard range');
+  t.eq(w.pjaDeterministicAnswer('Have you ever been employed by the U.S. federal government or a contractor that performed work for the federal government?'), 'No', 'det: no federal employment');
+  t.eq(w.pjaDeterministicAnswer('Do you have any relatives currently employed by the federal government or Department of Defense?'), 'No', 'det: no federal-government relatives');
+  t.eq(w.pjaCoerceToOption('Yes', ['Acknowledge/Confirm']), 'Acknowledge/Confirm', 'single acknowledgment checkbox: Yes -> sole option');
+  t.ok(w.pjaSameQueuedJob({ id: 'req-1', applyUrl: 'https://a' }, { id: 'req-1', applyUrl: 'https://b' }), 'queue identity prefers matching id');
+  t.ok(!w.pjaSameQueuedJob({ id: 'req-1' }, { id: 'req-2' }), 'different queue ids are stale');
+  t.ok(w.pjaSameQueuedJob({ applyUrl: 'https://a' }, { applyUrl: 'https://a' }), 'queue identity falls back to apply URL');
   t.eq(w.pjaDeterministicAnswer('I certify that the information provided is accurate.'), 'Yes', 'det: certify -> Yes');
   t.eq(w.pjaDeterministicAnswer('Please describe how many years of experience you have.'), null, 'det: open-ended not mis-caught as ack -> null');
 
@@ -142,4 +158,5 @@ module.exports = (t) => {
   t.eq(co('option label objects', [{ label: 'Yes' }, { label: 'No' }]), null,
     'coerce: no match → null (caller keeps original)');
   t.eq(co('No', [{ label: 'Yes' }, { label: 'No' }]), 'No', 'coerce: works on {label} option objects');
+  t.eq(co('Female', ['Woman', 'Man', 'Non-binary']), 'Woman', 'coerce: EEO Female synonym maps to Woman');
 };

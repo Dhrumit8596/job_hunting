@@ -9,12 +9,103 @@
 // without hand-checking slugs — that's how a run scales to whatever volume is needed.
 const fs = require('fs');
 const path = require('path');
-const greenhouse = require('./adapters/greenhouse');
-const lever = require('./adapters/lever');
+const { getAdapter } = require('./adapters');
 const { filterJobs, isExportControlledCompany } = require('./filter');
 
-const ADAPTERS = { greenhouse, lever };
 const SOURCES_PATH = path.resolve(__dirname, 'sources.json');
+
+function normalizeKeyPart(value) {
+  return String(value || '').trim().replace(/\/+$/, '').toLowerCase();
+}
+
+// Slug-backed ATSes are identified by slug. Workday tenants are identified by their exact CXS
+// endpoint because they do not have a portable board slug in this registry.
+function sourceKey(source) {
+  const ats = normalizeKeyPart(source && source.ats);
+  const identity = ats === 'workday'
+    ? normalizeKeyPart(source && source.apiUrl)
+    : ats === 'eightfold'
+      ? [normalizeKeyPart(source && source.origin), normalizeKeyPart(source && source.domain)].filter(Boolean).join('|')
+    : ats === 'successfactors'
+      ? normalizeKeyPart(source && (source.baseUrl || source.origin || source.siteBase))
+    : normalizeKeyPart(source && source.slug);
+  return ats && identity ? `${ats}:${identity}` : '';
+}
+
+function isBlockedSource(source) {
+  return isExportControlledCompany(source && source.name) ||
+    isExportControlledCompany(source && source.slug);
+}
+
+function isPlaceholderSource(source) {
+  return /placeholder|\(check\)/i.test(String(source && source.name || ''));
+}
+
+function sourceShapeError(source) {
+  if (!source || typeof source !== 'object') return 'source must be an object';
+  const ats = normalizeKeyPart(source.ats);
+  if (!ats) return 'missing ats';
+  if (!getAdapter(ats)) return `unsupported ats ${ats}`;
+  if (!String(source.name || '').trim()) return 'missing name';
+  if (ats === 'workday') {
+    if (!String(source.apiUrl || '').trim()) return 'workday source missing apiUrl';
+    if (!String(source.siteBase || '').trim()) return 'workday source missing siteBase';
+  } else if (ats === 'eightfold') {
+    if (!String(source.origin || '').trim()) return 'eightfold source missing origin';
+    if (!String(source.domain || '').trim()) return 'eightfold source missing domain';
+    try {
+      const origin = new URL(String(source.origin));
+      if (origin.protocol !== 'https:') return 'eightfold source origin must be https';
+    } catch (_) { return 'eightfold source origin must be a valid URL'; }
+  } else if (ats === 'successfactors') {
+    if (!String(source.baseUrl || '').trim()) return 'successfactors source missing baseUrl';
+    try {
+      const baseUrl = new URL(String(source.baseUrl));
+      if (baseUrl.protocol !== 'https:') return 'successfactors source baseUrl must be https';
+    } catch (_) { return 'successfactors source baseUrl must be a valid URL'; }
+    if (!/united states|\bus\b/i.test(String(source.locationSearch || source.location || ''))) {
+      return 'successfactors source must be scoped to the United States';
+    }
+  } else if (!String(source.slug || '').trim()) {
+    return `${ats} source missing slug`;
+  }
+  if (ats === 'smartrecruiters' && normalizeKeyPart(source.country) !== 'us') {
+    return 'smartrecruiters source must be scoped to country=us';
+  }
+  return '';
+}
+
+function validateRegistry(sources) {
+  if (!Array.isArray(sources)) return ['registry sources must be an array'];
+  const errors = [];
+  const seen = new Map();
+  for (let i = 0; i < sources.length; i++) {
+    const source = sources[i];
+    const label = `source[${i}] ${String(source && source.name || '').trim() || '(unnamed)'}`;
+    const shapeError = sourceShapeError(source);
+    if (shapeError) errors.push(`${label}: ${shapeError}`);
+    const key = sourceKey(source);
+    if (key) {
+      if (seen.has(key)) errors.push(`${label}: duplicate identity ${key} (first at source[${seen.get(key)}])`);
+      else seen.set(key, i);
+    }
+    if (isPlaceholderSource(source)) {
+      errors.push(`${label}: placeholder/check name is not allowed`);
+    }
+    if (isBlockedSource(source)) errors.push(`${label}: export-controlled source is not allowed`);
+  }
+  return errors;
+}
+
+function candidateToSource(candidate) {
+  const keys = ['ats', 'slug', 'name', 'apiUrl', 'siteBase', 'country', 'query', 'queries',
+    'origin', 'domain', 'baseUrl', 'searchPath', 'location', 'locationSearch',
+    'pageSize', 'perQueryMax'];
+  const source = {};
+  for (const key of keys) if (candidate[key] != null) source[key] = candidate[key];
+  source.ats = normalizeKeyPart(source.ats);
+  return source;
+}
 
 // Best-effort domain-fit candidates (medtech, lab/genomics tools, hardware, robotics, battery).
 // Dead slugs simply return nothing and are dropped. Export-controlled firms are skipped on append.
@@ -208,48 +299,75 @@ const CANDIDATES = [
   { ats: 'greenhouse', slug: 'machinalabs', name: 'Machina Labs' },
 ];
 
-async function probe(c) {
-  const adapter = ADAPTERS[c.ats];
+async function probe(c, opts = {}) {
+  const adapter = getAdapter(c && c.ats);
   if (!adapter) return { ...c, live: false, total: 0, eligible: 0, err: 'no adapter' };
   try {
-    const jobs = await adapter.fetchJobs(c);
+    const jobs = await adapter.fetchJobs(c, opts);
     const total = jobs.length;
-    const eligible = filterJobs(jobs).length;
+    const nationwideUS = normalizeKeyPart(c && c.country) === 'us';
+    const eligible = filterJobs(jobs, { nationwideUS }).length;
     return { ...c, live: total > 0, total, eligible };
   } catch (e) {
     return { ...c, live: false, total: 0, eligible: 0, err: e.message };
   }
 }
 
-(async () => {
+async function runCli() {
   const append = process.argv.includes('--append');
   const reg = JSON.parse(fs.readFileSync(SOURCES_PATH, 'utf8'));
-  const existing = new Set(reg.sources.map(s => s.ats + ':' + s.slug));
+  const registryErrors = validateRegistry(reg.sources);
+  if (registryErrors.length) {
+    throw new Error(`registry validation failed:\n${registryErrors.map(e => `  - ${e}`).join('\n')}`);
+  }
+  const existing = new Set(reg.sources.map(sourceKey).filter(Boolean));
 
   const results = [];
   for (const c of CANDIDATES) { results.push(await probe(c)); }
 
   results.sort((a, b) => b.eligible - a.eligible || b.total - a.total);
-  console.log('\n  ATS         SLUG                       TOTAL  ELIGIBLE  STATUS');
+  console.log('\n  ATS         IDENTIFIER                                    TOTAL  ELIGIBLE  STATUS');
   for (const r of results) {
-    const dup = existing.has(r.ats + ':' + r.slug);
-    const blocked = isExportControlledCompany(r.name);
-    const status = !r.live ? 'dead' : dup ? 'already in registry' : blocked ? 'export-blocked' : 'NEW';
-    console.log(`  ${r.ats.padEnd(11)} ${r.slug.padEnd(26)} ${String(r.total).padStart(5)}  ${String(r.eligible).padStart(8)}  ${status}`);
+    const dup = existing.has(sourceKey(r));
+    const blocked = isBlockedSource(r);
+    const placeholder = isPlaceholderSource(r);
+    const status = !r.live ? 'dead' : dup ? 'already in registry' : blocked ? 'export-blocked' : placeholder ? 'invalid-name' : 'NEW';
+    const identity = String(r.slug || r.apiUrl || '-');
+    console.log(`  ${String(r.ats).padEnd(11)} ${identity.padEnd(45)} ${String(r.total).padStart(5)}  ${String(r.eligible).padStart(8)}  ${status}`);
   }
 
   if (append) {
-    const toAdd = results.filter(r => r.live && !existing.has(r.ats + ':' + r.slug) && !isExportControlledCompany(r.name))
-      .map(r => ({ ats: r.ats, slug: r.slug, name: r.name }));
+    const toAdd = results.filter(r => r.live && !existing.has(sourceKey(r)) && !isBlockedSource(r) && !isPlaceholderSource(r))
+      .map(candidateToSource);
     if (toAdd.length) {
       reg.sources.push(...toAdd);
+      const errors = validateRegistry(reg.sources);
+      if (errors.length) throw new Error(`refusing invalid append:\n${errors.map(e => `  - ${e}`).join('\n')}`);
       fs.writeFileSync(SOURCES_PATH, JSON.stringify(reg, null, 2) + '\n');
       console.log(`\n  appended ${toAdd.length} live source(s): ${toAdd.map(s => s.name).join(', ')}`);
     } else {
       console.log('\n  nothing new to append.');
     }
   } else {
-    const newLive = results.filter(r => r.live && !existing.has(r.ats + ':' + r.slug) && !isExportControlledCompany(r.name)).length;
+    const newLive = results.filter(r => r.live && !existing.has(sourceKey(r)) && !isBlockedSource(r) && !isPlaceholderSource(r)).length;
     console.log(`\n  ${newLive} new live source(s) available — re-run with --append to add them.`);
   }
-})();
+}
+
+if (require.main === module) {
+  runCli().catch(e => { console.error(e.message); process.exit(1); });
+}
+
+module.exports = {
+  CANDIDATES,
+  SOURCES_PATH,
+  normalizeKeyPart,
+  sourceKey,
+  isBlockedSource,
+  isPlaceholderSource,
+  sourceShapeError,
+  validateRegistry,
+  candidateToSource,
+  probe,
+  runCli,
+};

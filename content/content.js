@@ -739,7 +739,24 @@ select.pcw-input{cursor:pointer}
     if (/\/checkpoint\/|\/challenge\//.test(location.pathname)
         || /security verification|quick security check|are you a human|unusual activity/i.test(document.body?.innerText || '')) {
       const rawCp = sessionStorage.getItem('pja_apply_queue');
-      if (rawCp) { try { const q = JSON.parse(rawCp); q.status = 'paused_checkpoint'; sessionStorage.setItem('pja_apply_queue', JSON.stringify(q)); } catch (_) {} }
+      if (rawCp) {
+        try {
+          const q = JSON.parse(rawCp);
+          const job = q.jobs && q.jobs[q.currentIndex || 0];
+          q.status = 'paused_checkpoint';
+          sessionStorage.setItem('pja_apply_queue', JSON.stringify(q));
+          if (job) {
+            if (job.id) chrome.runtime.sendMessage({ type: 'UPDATE_CORPUS_STATE', id: job.id,
+              reason: 'linkedin_checkpoint' }, () => void chrome.runtime.lastError);
+            chrome.runtime.sendMessage({ type: 'APPLICATION_LEDGER_EVENT', closeTab: !!job.rankedRun,
+              event: { runId: job.runId || q.runId || null, jobId: job.jobId || job.id || null,
+                applyUrl: job.applyUrl || location.href, company: job.company, title: job.title,
+                channel: 'linkedin_easy_apply', status: 'blocked', success: false,
+                reason: 'linkedin_checkpoint', applicationAt: job.applicationAt || q.startedAt || Date.now(),
+                occurredAt: Date.now() } }, () => void chrome.runtime.lastError);
+          }
+        } catch (_) {}
+      }
       try { chrome.storage.local.set({ pja_ea_paused: { reason: 'checkpoint', url: location.href, ts: Date.now() } }); } catch (_) {}
       return;
     }
@@ -778,6 +795,19 @@ select.pcw-input{cursor:pointer}
 
     const finishAndAdvance = (result) => {
       try { chrome.storage.local.set({ pja_ea_lastresult: { at: Date.now(), jobId: job.jobId, title: job.title, result } }); } catch(e) {}
+      const uncertain = /unconfirmed|unclear|assumed|inferred/i.test(String(result && result.reason || ''));
+      const ledgerEvent = {
+          runId: job.runId || queue.runId || null, jobId: job.jobId || job.id || null,
+          applyUrl: job.applyUrl || `https://www.linkedin.com/jobs/view/${job.jobId}/`,
+          company: job.company, title: job.title, channel: 'linkedin_easy_apply',
+          status: result && result.success ? 'applied' : uncertain ? 'submitted' : 'failed',
+          success: result && result.success ? true : (uncertain ? null : false),
+          reason: result && result.reason || '', confirmationSource: result && result.success ? 'page' : null,
+          confirmedAt: result && result.success ? Date.now() : null,
+          applicationAt: job.applicationAt || queue.startedAt || Date.now(), occurredAt: Date.now()
+        };
+      const signalLedger = () => { try { chrome.runtime.sendMessage({ type: 'APPLICATION_LEDGER_EVENT',
+        event: ledgerEvent, closeTab: !!job.rankedRun }, () => void chrome.runtime.lastError); } catch (_) {} };
       // LinkedIn daily Easy Apply cap: HALT the whole queue (don't burn the rest of the jobs on the
       // limit notice) and surface it so the run pivots to other sources / resumes tomorrow.
       if (result && (result.halt || result.reason === 'daily_limit')) {
@@ -786,8 +816,16 @@ select.pcw-input{cursor:pointer}
           sessionStorage.setItem('pja_apply_queue', JSON.stringify(queue));
           chrome.storage.local.set({ pja_ea_paused: { reason: 'daily_limit', ts: Date.now() } });
         } catch (e) {}
+        signalLedger();
         return;
       }
+      // Keep the normalized corpus in sync for the LinkedIn channel too (external-apply already
+      // does this itself). `id` is the corpus canonical id; jobId remains LinkedIn's source id.
+      try {
+        if (job.id) chrome.runtime.sendMessage({ type: 'UPDATE_CORPUS_STATE', id: job.id,
+          reason: result && result.success ? 'applied' : ((result && result.reason) || 'unknown') },
+        () => void chrome.runtime.lastError);
+      } catch (_) {}
       const r = queue.results;
       if (result.success) {
         r.applied.push(job);
@@ -808,7 +846,9 @@ select.pcw-input{cursor:pointer}
                 company: job.company, title: job.title, jobId: job.jobId || null,
                 applyUrl: `https://www.linkedin.com/jobs/view/${job.jobId}/`,
                 location: job.location || null, channel: 'easy-apply',
-                status: 'applied', reason: 'easy_apply', confirmedEmail: false, appliedAt: Date.now()
+                runId: job.runId || queue.runId || null,
+                status: 'applied', reason: 'easy_apply', confirmationSource: 'page',
+                confirmedAt: Date.now(), confirmedEmail: false, appliedAt: Date.now()
               });
               chrome.storage.local.set({ pja_applied_log: log });
             }
@@ -860,8 +900,10 @@ select.pcw-input{cursor:pointer}
               return `• <a href="${url}" target="_blank" style="color:#1d4ed8;text-decoration:underline">${escHtml(j.title)}</a>: ${escHtml(j.skipReason || j.reason)}`;
             }).join('<br>');
         }
+        signalLedger();
       } else {
         sessionStorage.setItem('pja_apply_queue', JSON.stringify(queue));
+        signalLedger();
         setTimeout(() => {
           // Humane pacing: randomized 15–40s gap between jobs to protect the LinkedIn account
           // from anti-automation throttling. Advance via the search page (reliable Easy Apply button).

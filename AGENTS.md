@@ -1,6 +1,6 @@
-# CLAUDE.md
+# AGENTS.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+This file provides guidance to Codex (Codex.ai/code) when working with code in this repository.
 
 > **Naming:** the `pja_` / `PJA` prefix used throughout (storage keys, function names) is an
 > opaque internal namespace for this extension — it is **not** a person's name. Do **not**
@@ -10,7 +10,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Dev workflow
 
-**Start the dev server** (keep running in background; Claude is the default):
+**Start the dev server** (keep running in background; Codex is the default):
 ```bash
 node dev-server.js
 # Or run the exact same endpoints through Codex CLI:
@@ -30,7 +30,7 @@ curl http://localhost:6174/health
 # {"clients":1} = ready   {"clients":0} = go to chrome://extensions and click reload
 ```
 
-Extension ID: `lpojofmpdljggmdmoamdggapnabfkham`  
+Extension ID: `lpojofmpdljggmdmoamdggapnabfkham`
 Dev server port: **6174** (HTTP + WebSocket on same port)
 
 **Manual test queue** — paste into the Settings page console (`chrome-extension://…/settings/settings.html`):
@@ -47,7 +47,7 @@ This seeds `pja_ext_queue` + `pja_ext_current` into storage and opens the first 
 | `/reload` | POST | Broadcasts reload to extension |
 | `/inject` | POST | Re-injects content scripts into existing tabs |
 | `/analyze` | POST | Single job fit score (`{title, company, description}`) |
-| `/batch-score` | POST | Up to 10 jobs in one Claude call |
+| `/batch-score` | POST | Up to 10 jobs in one Codex call |
 | `/outreach` | POST | Generates DM + email for a job + person |
 | `/set-storage` | POST | `chrome.storage.local.set(body)` — body is passed **flat**, not nested |
 
@@ -127,7 +127,7 @@ file is kept as a regression guard — the fixes are load-bearing. Most importan
 - **BUG 2** — answer-bank fallback must route `SELECT → pjaFillSelect`, combobox → `pjaFillCombobox` (never `pjaSetNative` on a select).
 - **BUG 3** — `pjaClickRadio` must use the native `checked` setter + dispatch `input` before `change`/`click`.
 - **BUG 5** — `BATCH_SCORE_JOBS` / `FIND_OUTREACH_PEOPLE` are `DEV_MODE`-guarded.
-- **BUG 6** — `DEV_MODE = true` is **intentional** here (dev server / `claude` CLI is the AI engine; Nano is bypassed on purpose).
+- **BUG 6** — `DEV_MODE = true` is **intentional** here (dev server / `Codex` CLI is the AI engine; Nano is bypassed on purpose).
 
 Run `npm test` after touching the fill paths (`autofill.test.js`, `combobox.test.js`, `selfid.test.js`).
 

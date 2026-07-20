@@ -37,6 +37,7 @@
         "*://*.indeed.com/viewjob*",
         "*://*.indeed.com/jobs*",
         "*://smartapply.indeed.com/*",
+        "*://profile.indeed.com/*",
         "*://*.glassdoor.com/job-listing/*",
         "*://*.glassdoor.com/Jobs/*",
         "*://*.greenhouse.io/*",
@@ -77,6 +78,7 @@
         "content/external-apply.js",
         "content/job-scraper.js",
         "content/indeed-scraper.js",
+        "content/glassdoor-scraper.js",
         "content/indeed-apply.js",
         "content/content.js"
       ],
@@ -85,12 +87,14 @@
     },
     {
       "matches": ["<all_urls>"],
-      "js": ["sourcing/detect-ats.js", "sourcing/apply-select.js", "content/apply-router.js", "content/apply-account.js", "content/external-apply.js"],
+      "js": ["sourcing/detect-ats.js", "sourcing/apply-select.js", "content/apply-router.js", "content/apply-account.js", "content/external-apply.js", "content/indeed-apply.js"],
       "run_at": "document_idle",
       "all_frames": false,
       "exclude_matches": [
         "*://*.linkedin.com/*",
-        "*://*.indeed.com/*",
+        "*://indeed.com/*",
+        "*://www.indeed.com/*",
+        "*://smartapply.indeed.com/*",
         "*://*.glassdoor.com/*",
         "*://localhost/*",
         "*://127.0.0.1/*"

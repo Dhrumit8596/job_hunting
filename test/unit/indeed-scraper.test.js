@@ -39,6 +39,8 @@ module.exports = (t) => {
   t.eq(m1.title, 'Manufacturing Engineer', 'indeed: title parsed');
   t.eq(m1.company, 'ECA Medical Instruments', 'indeed: company parsed');
   t.eq(m1.platform, 'indeed', 'indeed: platform tagged');
+  t.eq(m1.sourcePlatform, 'indeed', 'indeed: canonical sourcePlatform tagged');
+  t.eq(m1.channel, 'indeed_apply', 'indeed: application channel tagged');
   t.eq(m1.indeedApply, true, 'indeed: "Easily apply" → indeedApply=true');
   t.eq(m1.isEasyApply, false, 'indeed: not LinkedIn EA');
   t.ok(/viewjob\?jk=abc123$/.test(m1.applyUrl), 'indeed: applyUrl is the viewjob URL');
@@ -52,4 +54,20 @@ module.exports = (t) => {
   t.eq(w.pjaIndeedChallenged(), false, 'indeed: normal results page → not challenged');
   const wc = load('<!DOCTYPE html><body><div>Additional Verification Required</div><iframe src="https://hcaptcha.com/x"></iframe></body>');
   t.eq(wc.pjaIndeedChallenged(), true, 'indeed: captcha/hcaptcha page → challenged (pause)');
+  t.eq(w.pjaIndeedDetailMatches('abc123', 'Manufacturing Engineer',
+    'https://www.indeed.com/jobs?q=x&vjk=abc123', 'Old title'), false,
+  'indeed: new job key cannot reuse the previous panel title/JD');
+  t.eq(w.pjaIndeedDetailMatches('abc123', 'Manufacturing Engineer',
+    'https://www.indeed.com/jobs?q=x&vjk=abc123', 'Manufacturing Engineer'), true,
+  'indeed: detail identity requires job key and title agreement');
+  t.eq(w.pjaIndeedDetailMatches('abc123', 'Manufacturing Engineer',
+    'https://www.indeed.com/jobs?q=x&vjk=old', 'Senior Software Engineer'), false,
+  'indeed: stale prior detail panel rejected');
+  t.eq(w.pjaIndeedDetailMatches('abc123', 'Manufacturing Engineer',
+    'https://www.indeed.com/jobs?q=x&vjk=old', 'Manufacturing Engineer'), false,
+  'indeed: matching title cannot override a different visible job key');
+  t.eq(w.pjaIndeedPanelAdvanced('abc123', 'https://www.indeed.com/jobs?vjk=old',
+    'old requirements', 'old requirements'), false, 'indeed: waits for JD mutation after job-key movement');
+  t.eq(w.pjaIndeedPanelAdvanced('abc123', 'https://www.indeed.com/jobs?vjk=old',
+    'old requirements', 'new requirements'), true, 'indeed: accepts mutated JD content');
 };

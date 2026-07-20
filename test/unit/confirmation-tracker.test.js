@@ -18,7 +18,7 @@ module.exports = (t) => {
   t.eq(isConfirmationEmail({ subject: 'SPI / AOI Process Engineer at Foxconn and 5 more jobs for you' }), false, 'conf: job alert rejected');
   t.eq(isConfirmationEmail({ subject: 'Your weekly job digest' }), false, 'conf: digest rejected');
 
-  // --- reconcile: Lumilens 3 applies → all confirmed by the one thread; Velo3D unverifiable ---
+  // --- reconcile is one-email-to-one-application; a generic company email cannot prove 3 jobs ---
   const applied = [
     { company: 'Lumilens', title: 'IC Package FEA Engineer', status: 'applied', ts: 1000 },
     { company: 'Lumilens', title: 'Optical Test Engineer', status: 'applied', ts: 1000 },
@@ -34,10 +34,16 @@ module.exports = (t) => {
   ];
   const r = reconcile(applied, emails, { windowDays: 7 });
   t.eq(r.stats.applied, 5, 'reconcile: counts only status=applied');
-  t.eq(r.stats.confirmed, 4, 'reconcile: 3 Lumilens + 1 AeroVect confirmed');
-  t.eq(r.stats.unverifiable, 1, 'reconcile: Velo3D unverifiable (no email)');
-  t.eq(r.confirmed.filter(c => c.company === 'Lumilens').length, 3, 'reconcile: all 3 Lumilens roles confirmed by one email');
-  t.eq(r.unverifiable[0].company, 'Velo3D', 'reconcile: Velo3D is the unverifiable one');
+  t.eq(r.stats.confirmed, 2, 'reconcile: one Lumilens + one AeroVect application confirmed');
+  t.eq(r.stats.unverifiable, 3, 'reconcile: two extra Lumilens roles and Velo3D remain unverifiable');
+  t.eq(r.confirmed.filter(c => c.company === 'Lumilens').length, 1, 'reconcile: one email proves at most one same-company application');
+  t.eq(r.unverifiable.some(x => x.company === 'Velo3D'), true, 'reconcile: Velo3D is unverifiable');
+
+  const titled = reconcile([
+    { company: 'Acme', title: 'Quality Engineer', jobId: 'Q1', status: 'applied', appliedAt: 1000 },
+    { company: 'Acme', title: 'Process Engineer', jobId: 'P2', status: 'applied', appliedAt: 1000 },
+  ], [{ from: 'Acme Careers', subject: 'Thanks for applying — Process Engineer P2', date: 2000 }]);
+  t.eq(titled.confirmed[0].jobId, 'P2', 'reconcile: title/requisition evidence selects the exact same-company job');
 
   // --- time window: a confirmation arriving BEFORE the apply (or long after) does not match ---
   const late = reconcile(

@@ -25,6 +25,7 @@ function normalize(raw, source) {
     applyUrl,
     ats: ATS,
     postedAt: raw.publishedAt || raw.updatedAt || '',
+    description: raw.descriptionPlain || raw.descriptionHtml || raw.description || '',
   });
 }
 

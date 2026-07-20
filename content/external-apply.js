@@ -52,7 +52,7 @@
   } catch(_) {}
 
   try {
-    chrome.storage.local.get(['pja_ext_current', 'pja_answers', 'pja_ext_queue'], data => {
+    chrome.storage.local.get(['pja_ext_current', 'pja_answers', 'pja_ext_queue'], async data => {
       // Never run on LinkedIn/Indeed/Glassdoor (those are handled by content.js)
       if (/linkedin\.com|indeed\.com|glassdoor\.com/i.test(location.hostname)) return;
 
@@ -71,6 +71,36 @@
       if (!job) { console.log('PJA ext-apply: no pja_ext_current, skipping'); return; }
       console.log('PJA ext-apply: job read v2, _handled=', job._handled, 'company=', job.company);
 
+      const queue = data.pja_ext_queue;
+      // Only treat per-job lifecycle flags as valid for the queue run that created them.
+      const sameRun = queue && job.runId && job.runId === queue.runId;
+
+      // A submit may navigate before the original content-script instance can inspect the result.
+      // Recover that lifecycle here, but only promote it after the NEW page supplies a genuine
+      // confirmation signal. A navigation by itself is not proof that an application was accepted.
+      if (job._submitPending && sameRun && String(job._preSubmitUrl || '') !== String(location.href)) {
+        let confirmed = false;
+        for (let i = 0; i < 12; i++) {
+          if (i) await sleep(400);
+          const hasSubmitButton = pjaQueryAllExt('button[type=submit], input[type=submit]')
+            .some(b => /submit/i.test((b.textContent || '') + (b.value || '')));
+          const hasFormFields = pjaQueryAllExt('form input, form select, form textarea')
+            .some(el => el.type !== 'hidden');
+          confirmed = pjaIsSubmitSuccess({ text: document.body?.innerText || '', title: document.title,
+            url: location.href, preSubmitUrl: job._preSubmitUrl || '', hasSubmitButton,
+            hasFormFields, iterations: i });
+          if (confirmed) break;
+        }
+        delete job._submitPending;
+        delete job._preSubmitUrl;
+        delete job._submitStartedAt;
+        await new Promise(r => chrome.storage.local.set({ pja_ext_current: job }, r));
+        await recordResult(job, { success: confirmed,
+          reason: confirmed ? 'post_navigation_confirmation' : 'submit_unconfirmed_after_navigation' });
+        navigateBack(job);
+        return;
+      }
+
       // Guard: never redirect a non-ATS tab (e.g. google.com) — check expected host first.
       // Allow the mismatch when we've landed on a known ATS: company career domains
       // routinely redirect to their underlying ATS (e.g. jobs.jbsfoodsgroup.com → jobvite.com).
@@ -84,24 +114,44 @@
         } catch(e) {}
       }
 
-      const queue = data.pja_ext_queue;
-      // Only treat _handled=true as valid for THIS queue run (runId must match)
-      const sameRun = queue && job.runId && job.runId === queue.runId;
+      // `_handled` is now written only after result verification. Legacy optimistic handled flags
+      // lack `_confirmationSource`; never let those inflate the confirmed application count.
       if (job._handled && sameRun) {
         // recordResult may not have run if page navigation killed the script during submit.
         // Advance the queue now if currentIndex still points to this job, then navigate.
         const myIdx = queue.jobs.findIndex(j => (j.id || j.jobId) === (job.id || job.jobId));
         if (queue.status === 'applying' && myIdx >= 0 && queue.currentIndex === myIdx) {
-          console.log('PJA ext-apply: pre-nav handled, advancing queue for', job.company);
-          queue.results.applied.push({ ...queue.jobs[myIdx], appliedAt: Date.now(), note: 'pre-nav-handled' });
+          const wasConfirmed = job._confirmationSource === 'page';
+          console.log('PJA ext-apply: handled recovery, confirmed=', wasConfirmed, 'for', job.company);
+          const bucket = wasConfirmed ? queue.results.applied : queue.results.skipped;
+          bucket.push(wasConfirmed
+            ? { ...queue.jobs[myIdx], appliedAt: Date.now(), note: 'confirmed-before-navigation' }
+            : { ...queue.jobs[myIdx], skipReason: 'legacy_submit_unverified' });
           queue.currentIndex = myIdx + 1;
           if (queue.currentIndex >= queue.jobs.length) queue.status = 'done';
-          // Durable-log fix: this submit-navigated success never ran recordResult's log write.
-          // Upgrade the optimistic 'submitting' pre-write (or create it) to 'applied' via the
-          // shared idempotent writer, then persist the advanced queue and navigate on.
-          pjaWriteAppliedLog(job, { status: 'applied', reason: 'pre-nav-handled' }).then(() => {
-            chrome.storage.local.set({ pja_ext_queue: queue }, () => navigateBack(job));
-          });
+          const persist = wasConfirmed
+            ? pjaWriteAppliedLog(job, { status: 'applied', reason: 'confirmed-before-navigation',
+              confirmationSource: 'page', confirmedAt: job._confirmedAt || Date.now() })
+            : pjaWriteAppliedLog(job, { status: 'submitting', reason: 'legacy_submit_unverified' });
+          persist.then(() => chrome.storage.local.set({ pja_ext_queue: queue }, () => {
+            // Crash-recovery must also notify the serialized ledger/master. Previously this repaired
+            // only the legacy queue, leaving the global ranked run stuck until its watchdog marked a
+            // genuinely confirmed submission as failed.
+            const event = {
+              runId: job.runId || queue.runId || null, jobId: job.jobId || job.id || null,
+              applyUrl: job.applyUrl || location.href, company: job.company, title: job.title,
+              channel: job.channel || job.ats || 'external',
+              status: wasConfirmed ? 'applied' : 'submitted', success: wasConfirmed ? true : null,
+              reason: wasConfirmed ? 'confirmed-before-navigation' : 'legacy_submit_unverified',
+              confirmationSource: wasConfirmed ? 'page' : null,
+              confirmedAt: wasConfirmed ? (job._confirmedAt || Date.now()) : null,
+              applicationAt: job.applicationAt || queue.startedAt || Date.now(), occurredAt: Date.now(),
+            };
+            try {
+              chrome.runtime.sendMessage({ type: 'APPLICATION_LEDGER_EVENT', event,
+                closeTab: !!job.rankedRun }, () => { void chrome.runtime.lastError; navigateBack(job); });
+            } catch (_) { navigateBack(job); }
+          }));
         } else if (queue.status === 'applying') {
           console.log('PJA ext-apply: same-run handled, queue already advanced, calling navigateBack');
           navigateBack(job);
@@ -394,9 +444,23 @@
             }
             const submitBtn2 = findButton(/submit.*application|submit.*app|apply now|send application|complete application/i);
             if (!submitBtn2) { await recordResult(job, { success: false, reason: 'no_submit_after_spa' }); navigateBack(job); return; }
+            const preSubmitUrl2 = location.href;
+            job._submitPending = true;
+            job._preSubmitUrl = preSubmitUrl2;
+            job._submitStartedAt = Date.now();
+            try { await new Promise(r => chrome.storage.local.set({ pja_ext_current: job }, r)); } catch (_) {}
             submitBtn2.click();
-            await sleep(4000);
-            const success2 = /thank you|your application|received|submitted|confirmation|successfully/i.test(document.body.innerText);
+            let success2 = false;
+            for (let wait = 0; wait < 20; wait++) {
+              await sleep(400);
+              const hasSubmitButton = pjaQueryAllExt('button[type=submit], input[type=submit]')
+                .some(b => /submit/i.test((b.textContent || '') + (b.value || '')));
+              const hasFormFields = pjaQueryAllExt('form input, form select, form textarea')
+                .some(el => el.type !== 'hidden');
+              if (pjaIsSubmitSuccess({ text: document.body?.innerText || '', title: document.title,
+                url: location.href, preSubmitUrl: preSubmitUrl2, hasSubmitButton, hasFormFields,
+                iterations: wait })) { success2 = true; break; }
+            }
             await recordResult(job, { success: success2, reason: success2 ? 'applied' : 'submit_unclear' });
             navigateBack(job);
             return;
@@ -516,9 +580,10 @@
         }));
         // Extra hydration wait: progressBar appears before form fields render. Give it 3s.
         if (wdFormFound) await sleep(3000);
-        // Some tenants (e.g. AMAT) redirect to the External home/search after sign-in and
-        // drop the apply context. If we're NOT on the form and NOT on an apply path,
-        // re-navigate to the job's apply URL to resume (now signed in). Cap re-navs to avoid loops.
+        // Some tenants (e.g. AMAT/Dexcom) redirect to the job description after sign-in and
+        // drop the apply context. Re-opening the description URL just loops because the Workday
+        // auth branch intentionally does not run the generic description-page Apply clicker.
+        // Resume at Workday's stable manual-apply route instead. Cap re-navs to avoid loops.
         // BUT never re-nav on a post-submit/confirmation page (that means we already applied).
         const onCompletedPage = /\/completed\/|\/confirmation|thankyou/i.test(location.pathname) ||
           /view my applications|application.*submitted|thank you for (applying|your)/i.test(document.body?.innerText || '');
@@ -528,7 +593,12 @@
           if (renav < 2) {
             try { sessionStorage.setItem('pja_wd_renav_' + (job.id||''), String(renav + 1)); } catch(_) {}
             await new Promise(r => chrome.storage.local.get('pja_dbg', d => { const a=(d.pja_dbg||[]).slice(-19); a.push('[ext] post-signin re-nav to applyUrl attempt ' + (renav+1)); chrome.storage.local.set({pja_dbg:a}, r); }));
-            location.href = job.applyUrl;
+            const sourceUrl = String(job.applyUrl || '').trim();
+            const cleanUrl = sourceUrl.replace(/[?#].*$/, '').replace(/\/+$/, '');
+            const resumeUrl = /\/apply(?:\/|$)/i.test(cleanUrl)
+              ? sourceUrl
+              : cleanUrl + '/apply/applyManually';
+            location.href = resumeUrl;
             return; // page reloads; external-apply re-runs, now signed in → reaches the form
           }
         }
@@ -603,6 +673,23 @@
       }
     }
 
+    // Greenhouse can synchronously reload the original application after a delivered Submit click
+    // without showing validation errors or a confirmation. Retrying the identical form on every
+    // load only burns the cross-reload budget. The session marker is tab-local and names the job,
+    // so record one ambiguous attempt and advance; never promote it to applied without confirmation.
+    if (/greenhouse\.io/i.test(location.hostname) &&
+        pjaPrevAction === 'submit_clicked:' + String(job.company || '')) {
+      await new Promise(r => chrome.storage.local.get('pja_dbg', d => {
+        const a = (d.pja_dbg || []).slice(-39);
+        a.push('[submit] original form reloaded after click → submit_unclear');
+        chrome.storage.local.set({ pja_dbg: a }, r);
+      }));
+      sessionStorage.setItem('pja_last_action', 'recordResult:submit_unclear:' + job.company);
+      await recordResult(job, { success: false, reason: 'submit_unclear' });
+      navigateBack(job);
+      return;
+    }
+
     // Phase logger + per-step timeout so NO single fill sub-step can hang the whole apply. The
     // Antora watchdog_timeout was an unbounded await in a fill sub-step (e.g. pjaFillUnknownTextFields'
     // AI round-trip never calling back). On timeout we log and proceed — findMissingRequired then
@@ -614,6 +701,34 @@
       const wrapped = Promise.resolve(p).then(() => phaseLog(label + ' done')).catch(e => phaseLog(label + ' err ' + ((e && e.message) || e))).finally(() => clearTimeout(to));
       return Promise.race([wrapped, timeout]);
     };
+
+    // Some Greenhouse forms require a cover letter but initially expose only an "Enter manually"
+    // button, so the regular required-field/AI sweep cannot see a textarea. Reveal it and fill a
+    // truthful resume-grounded letter. Honor explicit keyword instructions on the form without
+    // inventing experience or credentials.
+    const prepareRequiredCoverLetter = async () => {
+      const groups = Array.from(document.querySelectorAll('fieldset,[role="group"],.field,[class*="field"],[class*="question"]'));
+      const group = groups.find(g => /cover letter\s*\*/i.test((g.textContent || '').slice(0, 300)));
+      if (!group) return false;
+      let textarea = group.querySelector('textarea');
+      if (!textarea) {
+        const manual = Array.from(group.querySelectorAll('button,a,[role="button"]'))
+          .find(b => /^enter manually$/i.test((b.textContent || '').trim()));
+        if (manual) { manual.click(); await sleep(500); textarea = group.querySelector('textarea'); }
+      }
+      if (!textarea || (textarea.value || '').trim()) return !!textarea;
+      const keyword = (document.body?.innerText || '').match(/include the word\s+["“']?([a-z][a-z-]*)["”']?/i)?.[1] || '';
+      const role = job.title || 'this role';
+      const company = job.company || 'your organization';
+      const runtimeSummary = String(profile.coverLetterSummary || profile.professionalSummary || profile.summary || '').trim().slice(0, 2000);
+      const fitSentence = runtimeSummary ? ` ${runtimeSummary}` : ' My experience aligns with the role requirements, and I would bring a careful, data-driven approach while being candid about areas I am still learning.';
+      const signature = profile.fullName || [profile.firstName, profile.lastName].filter(Boolean).join(' ') || 'Candidate';
+      const letter = `Dear Hiring Team,\n\nI am applying for the ${role} position at ${company}.${fitSentence}${keyword ? `\n\n${keyword}` : ''}\n\nThank you for your consideration.\n${signature}`;
+      if (typeof pjaSetNative === 'function') pjaSetNative(textarea, letter);
+      else { textarea.value = letter; textarea.dispatchEvent(new Event('input', { bubbles: true })); textarea.dispatchEvent(new Event('change', { bubbles: true })); }
+      return true;
+    };
+    await withTimeout(prepareRequiredCoverLetter(), 10000, 'cover-letter');
 
     // --- Fill all form fields ---
     await new Promise(r => chrome.storage.local.get('pja_dbg', d => {
@@ -664,18 +779,35 @@
     await withTimeout(pjaFillWorkdayWorkExperience(profile), 45000, 'wd-workexp');
 
     // --- Fallback fills ---
-    if (typeof pjaFillRequiredRadioFallback === 'function') pjaFillRequiredRadioFallback();
-    if (typeof pjaFillRequiredSelectFallback === 'function') pjaFillRequiredSelectFallback();
-    if (typeof pjaAutoCheckConsent === 'function') pjaAutoCheckConsent();
-    // Combobox fallback: required comboboxes still empty after all above — fill Yes/No by pattern
-    pjaFillRequiredComboboxFallback(profile, answers);
-
-    await sleep(500);
-
-    // --- Multi-step: handle Next button if needed ---
     const addDbg = msg => new Promise(r => chrome.storage.local.get('pja_dbg', d => {
       const arr = (d.pja_dbg || []).slice(-19); arr.push(msg); chrome.storage.local.set({ pja_dbg: arr }, r);
     }));
+    // These helpers are best-effort and shared with Easy Apply. A site-specific DOM edge case in
+    // any one of them must not abort the entire external-apply coroutine (previously that left the
+    // queue stuck until the five-minute SW watchdog advanced it). Isolate each helper and retain a
+    // precise phase marker so live runs identify the failing helper without sacrificing the job.
+    const safeFallback = async (name, fn) => {
+      if (typeof fn !== 'function') return;
+      try { fn(); await addDbg('[phase] ' + name + ' done'); }
+      catch (e) { await addDbg('[phase] ' + name + ' error=' + String(e && e.message || e).slice(0, 120)); }
+    };
+    await safeFallback('radio-fallback', typeof pjaFillRequiredRadioFallback === 'function' ? pjaFillRequiredRadioFallback : null);
+    await safeFallback('select-fallback', typeof pjaFillRequiredSelectFallback === 'function' ? pjaFillRequiredSelectFallback : null);
+    await safeFallback('consent-fallback', typeof pjaAutoCheckConsent === 'function' ? pjaAutoCheckConsent : null);
+    // Combobox fallback: required comboboxes still empty after all above — fill Yes/No by pattern.
+    await safeFallback('combobox-fallback', typeof pjaFillRequiredComboboxFallback === 'function'
+      ? () => pjaFillRequiredComboboxFallback(profile, answers) : null);
+
+    await sleep(500);
+    // Workday's State / Country / Phone Device Type prompts render as BUTTONS after the regular
+    // input fields hydrate. Run the dedicated trusted-click filler here, when the full step DOM is
+    // present, rather than relying only on pjaFillForm's earlier render-time pass.
+    if (typeof pjaFillWorkdayPromptButtons === 'function') {
+      await withTimeout(pjaFillWorkdayPromptButtons(profile), 20000, 'wd-prompts');
+      await sleep(300);
+    }
+
+    // --- Multi-step: handle Next button if needed ---
     let steps = 0;
     let stuckOnWdSelectinput = false;
     await addDbg('[ext] step-loop start url=' + location.pathname.slice(-40));
@@ -712,6 +844,10 @@
       // Fill Workday Work Experience fields at the top of each iteration — they render
       // late (after step transition) so the initial fill pass misses them. Idempotent.
       if (typeof pjaFillWorkdayWorkExperience === 'function') { await pjaFillWorkdayWorkExperience(profile); await sleep(300); }
+      if (typeof pjaFillWorkdayPromptButtons === 'function') {
+        await withTimeout(pjaFillWorkdayPromptButtons(profile), 20000, 'wd-prompts-step');
+        await sleep(200);
+      }
       const missing = findMissingRequired();
       // Workday selectinput fields can't be opened via JS — try Next anyway and let Workday validate.
       let hardMissing = missing.filter(m => m.type !== 'wd_selectinput');
@@ -722,7 +858,14 @@
         await addDbg('[ext] hardMissing=' + hardMissing.map(m=>m.label).join('|') + ' — re-filling late fields');
         if (typeof pjaFillWorkdayWorkExperience === 'function') await pjaFillWorkdayWorkExperience(profile);
         pjaFillForm(profile, answers);
-        await sleep(900);
+        if (window._pjaComboChain && typeof window._pjaComboChain.then === 'function') {
+          await Promise.race([window._pjaComboChain.catch(() => {}), sleep(30000)]);
+        }
+        await sleep(300);
+        if (typeof pjaFillWorkdayPromptButtons === 'function') {
+          await withTimeout(pjaFillWorkdayPromptButtons(profile), 20000, 'wd-prompts-refill');
+          await sleep(200);
+        }
         pjaFillRequiredComboboxFallback(profile, answers);
         await sleep(400);
         hardMissing = findMissingRequired().filter(m => m.type !== 'wd_selectinput');
@@ -792,6 +935,43 @@
       if (wdValidationError) {
         // Wait for Workday to re-render the form after showing "Errors Found".
         await new Promise(r => setTimeout(r, 2000));
+        // Keep a value-free snapshot of the controls that Workday rejected. The rolling pja_dbg
+        // buffer is too small to retain this evidence through the recovery fill passes, and raw
+        // input values can contain personal data. Labels, control metadata, and boolean presence
+        // flags are sufficient to diagnose a tenant-specific required question safely.
+        try {
+          const rejectedControls = Array.from(document.querySelectorAll(
+            '[aria-invalid="true"], [data-automation-id$="-error"], input[id^="question_"], ' +
+            'input[role="combobox"], [data-uxi-widget-type="selectinput"]'
+          )).map(el => {
+            const root = el.closest('fieldset,[data-automation-id^="formField"],[data-automation-id^="question"],div') || el.parentElement;
+            const selected = root?.querySelector('[data-automation-id="selectedItemList"], [class*="singleValue"], [class*="single-value"]');
+            const rawLabel = (typeof getLabelFor === 'function' ? getLabelFor(el) : '') ||
+              root?.querySelector('legend,label')?.textContent || el.getAttribute('aria-label') || '';
+            return {
+              id: String(el.id || '').slice(0, 80),
+              automationId: String(el.getAttribute('data-automation-id') || '').slice(0, 100),
+              tag: String(el.tagName || '').toLowerCase(),
+              type: String(el.getAttribute('type') || '').slice(0, 30),
+              role: String(el.getAttribute('role') || '').slice(0, 30),
+              widget: String(el.getAttribute('data-uxi-widget-type') || '').slice(0, 40),
+              label: String(rawLabel).trim().replace(/\s+/g, ' ').slice(0, 180),
+              required: !!el.required || el.getAttribute('aria-required') === 'true',
+              invalid: el.getAttribute('aria-invalid') === 'true' || /-error$/.test(el.getAttribute('data-automation-id') || ''),
+              valuePresent: 'value' in el ? !!String(el.value || '').trim() : undefined,
+              selectedPresent: !!selected?.textContent?.trim()
+            };
+          }).filter((item, index, all) => item.label || item.id || item.automationId)
+            .filter((item, index, all) => index === all.findIndex(other =>
+              other.id === item.id && other.automationId === item.automationId && other.label === item.label))
+            .slice(0, 80);
+          await new Promise(resolve => chrome.storage.local.set({
+            pja_wd_error_diag: {
+              ts: Date.now(), runId: job.runId || '', jobId: job.id || job.jobId || '',
+              step: stepTextBefore || '', controls: rejectedControls
+            }
+          }, resolve));
+        } catch (_) {}
         // Log which fields have Workday error markers to diagnose the actual failing field.
         // Include 0x0-size elements (hidden spinbuttons get aria-invalid but have no visible size).
         const errMarkers = Array.from(document.querySelectorAll('[data-automation-id$="-error"], [aria-invalid="true"]'))
@@ -811,7 +991,14 @@
         // and values that didn't commit before the first Next click.
         await pjaFillWorkdayWorkExperience(profile);
         if (typeof pjaFillForm === 'function') pjaFillForm(profile, answers);
-        await sleep(700);
+        if (window._pjaComboChain && typeof window._pjaComboChain.then === 'function') {
+          await Promise.race([window._pjaComboChain.catch(() => {}), sleep(30000)]);
+        }
+        await sleep(300);
+        if (typeof pjaFillWorkdayPromptButtons === 'function') {
+          await withTimeout(pjaFillWorkdayPromptButtons(profile), 20000, 'wd-prompts-error-recovery');
+          await sleep(250);
+        }
         await pjaFillWorkdayAppQuestions(profile);
         pjaFillRequiredComboboxFallback(profile, answers);
         if (typeof pjaFillRequiredRadioFallback === 'function') pjaFillRequiredRadioFallback();
@@ -1010,6 +1197,10 @@
       const cf = await pjaForceCountryField((job.profile && job.profile.country) || 'United States');
       if (cf) { await addDbg('[country] forced via fiber n=' + cf); await sleep(300); }
     }
+    if (typeof pjaForcePhoneField === 'function') {
+      const pf = await pjaForcePhoneField(profile.phone || job.profile?.phone || '');
+      if (pf) { await addDbg('[phone] forced via trusted typing n=' + pf); await sleep(300); }
+    }
     // Force-commit all required policy react-selects (sponsorship/work-auth/onsite/ack) via the
     // proven fiber bridge — the collect→answer flow intermittently missed them, failing submit.
     if (typeof pjaForceAllPolicyReactSelects === 'function') {
@@ -1027,8 +1218,15 @@
       // whole job (observed on the embedded-iframe path) until the SW watchdog force-advanced it.
       await withTimeout(pjaAnswerRequiredViaAI(job), 120000, 'answerer-postfill');
       await sleep(600);
-      if (typeof pjaForceCountryField === "function") await pjaForceCountryField((job.profile && job.profile.country) || 'United States');
-      if (typeof pjaForceAllPolicyReactSelects === 'function') { try { const pn = await pjaForceAllPolicyReactSelects(job.profile); if (pn) await addDbg('[policy-rs] post-AI committed n=' + pn); } catch (_) {} }
+      if (typeof pjaForceCountryField === "function") {
+        try { await withTimeout(pjaForceCountryField((job.profile && job.profile.country) || 'United States'), 8000, 'country-postfill'); } catch (_) {}
+      }
+      if (typeof pjaForcePhoneField === 'function') {
+        try { await withTimeout(pjaForcePhoneField(profile.phone || job.profile?.phone || ''), 8000, 'phone-postfill'); } catch (_) {}
+      }
+      if (typeof pjaForceAllPolicyReactSelects === 'function') {
+        try { const pn = await withTimeout(pjaForceAllPolicyReactSelects(job.profile), 8000, 'policy-postfill'); if (pn) await addDbg('[policy-rs] post-AI committed n=' + pn); } catch (_) {}
+      }
       missing = findMissingRequired();
       hardMissing = missing.filter(m => m.type !== 'wd_selectinput');
     }
@@ -1111,25 +1309,57 @@
       return;
     }
 
-    // Pre-mark as handled before click — page nav during submit kills this script,
-    // so content.js resumeExtApplyOnLoad can still advance the queue via _handled flag
-    job._handled = true;
+    // Persist a PENDING submit before the click so a navigation can be recovered. Pending is
+    // deliberately distinct from handled/applied: the destination page must still prove success.
+    const preSubmitUrl = location.href;
+    job._submitPending = true;
+    job._preSubmitUrl = preSubmitUrl;
+    job._submitStartedAt = Date.now();
     try { await new Promise(r => chrome.storage.local.set({ pja_ext_current: job }, r)); } catch(_) {}
     // Optimistic durable-log pre-write: we've passed validation + found the submit button, so
     // record 'submitting' BEFORE the click. If the submit navigates away and kills this script
     // (the Greenhouse under-count case), the entry already exists; the post-submit success path
     // and the resume path both upgrade it to 'applied'. Idempotent, so no duplicate.
     try { await pjaWriteAppliedLog(job, { status: 'submitting', reason: 'submit_clicked' }); } catch(_) {}
+    try {
+      chrome.runtime.sendMessage({ type: 'APPLICATION_LEDGER_EVENT', event: {
+        runId: job.runId || null, jobId: job.jobId || job.id || null,
+        applyUrl: job.applyUrl || location.href, company: job.company, title: job.title,
+        channel: job.channel || job.ats || 'external', status: 'submitting',
+        reason: 'submit_clicked', applicationAt: job._submitStartedAt, occurredAt: Date.now()
+      } }, () => void chrome.runtime.lastError);
+    } catch (_) {}
 
     console.log('PJA ext-apply: clicking submit:', submitBtn.textContent.trim().slice(0,40));
     sessionStorage.setItem('pja_last_action', 'submit_clicked:' + job.company);
-    const preSubmitUrl = location.href;
-    submitBtn.click();
+    if (/greenhouse\.io|ashbyhq\.com/i.test(location.hostname)) {
+      // Several Remix tenants accept synthetic field events but reject a synthetic final click:
+      // the page simply reloads with zero validation errors and no confirmation. Deliver the final
+      // action through CDP so event.isTrusted is true, as we already do for Remix option commits.
+      submitBtn.scrollIntoView({ block: 'center', behavior: 'instant' });
+      const sr = submitBtn.getBoundingClientRect();
+      const submitDelivery = await new Promise(resolve => {
+        let done = false;
+        const timer = setTimeout(() => { if (!done) { done = true; resolve('timeout'); } }, 5000);
+        try {
+          chrome.runtime.sendMessage({ type: 'LINKEDIN_TRUSTED_CLICK', x: sr.left + sr.width / 2, y: sr.top + sr.height / 2 }, resp => {
+            if (done) return;
+            done = true;
+            clearTimeout(timer);
+            resolve(chrome.runtime.lastError || resp?.error ? 'failed' : 'cdp');
+          });
+        } catch (_) { if (!done) { done = true; clearTimeout(timer); resolve('failed'); } }
+      });
+      await addDbg('[submit] ' + (/ashbyhq\.com/i.test(location.hostname) ? 'ashby' : 'greenhouse') + ' delivery=' + submitDelivery);
+      if (submitDelivery === 'failed') submitBtn.click();
+    } else {
+      submitBtn.click();
+    }
 
     // Poll every 400ms for up to 8s. Capture success the moment it appears —
     // Greenhouse SPA shows a brief confirmation then navigates away, so a
-    // single check after N seconds misses it. Also treat URL change or form
-    // disappearance as success signals (redirect = submission went through).
+    // single check after N seconds misses it. URL changes and form disappearance are observed,
+    // but the strict detector still requires explicit confirmation text or a confirmation route.
     let success = false;
     for (let i = 0; i < 20; i++) {
       await sleep(400);
@@ -1160,6 +1390,17 @@
           return lbl;
         }).filter(Boolean);
         await addDbg('[submit-fail] errs(' + errEls.length + '): ' + errs.join(' | ') + ' | pathHint=' + location.pathname.slice(-24));
+        // Keep a non-rolling failure ledger. pja_dbg is intentionally tiny and the next job's fill
+        // logs overwrite the useful validation evidence before a batch monitor can read it.
+        try {
+          await new Promise(r => chrome.storage.local.get('pja_submit_failures', d => {
+            const failures = (Array.isArray(d.pja_submit_failures) ? d.pja_submit_failures : []).slice(-99);
+            failures.push({ ts: Date.now(), runId: job.runId || '', jobId: job.id || job.jobId || '',
+              company: job.company || '', title: job.title || '', url: location.href.slice(0, 180),
+              errors: errs, reactSelectError });
+            chrome.storage.local.set({ pja_submit_failures: failures }, r);
+          }));
+        } catch (_) {}
         // Dump the ACTUAL element structure of the country + phone widgets so we know what they
         // really are (react-select vs native <select> vs custom) instead of guessing at the fix.
         const describe = (kw) => {
@@ -1554,7 +1795,11 @@
         //   Lever: div.attach-file, div.attach-or-paste
         //   Ashby: [data-testid*="file-upload"], [data-testid*="resume"]
         //   Generic: class-name patterns
-        const ghSection = Array.from(document.querySelectorAll(
+        const ashbyResumeInput = /ashbyhq\.com$/i.test(location.hostname)
+          ? document.querySelector('input[type="file"][name="_systemfield_resume"], input[type="file"][required]')
+          : null;
+        const ashbyResumeSection = ashbyResumeInput?.closest('[class*="field"], [class*="Field"], section, form > div');
+        const ghSection = ashbyResumeSection || Array.from(document.querySelectorAll(
           'div.file-upload, div[class*="file-upload"], div[class*="fileUpload"], ' +
           'div[class*="attach-file"], div[class*="attachFile"], div[class*="attach-or-paste"], ' +
           'div[class*="attachment-upload"], div[class*="resume-upload"], div[class*="upload-widget"], ' +
@@ -1581,11 +1826,11 @@
             );
           if (attachBtn) {
             // Arm the MAIN world override BEFORE clicking Attach — passes filename too
+            document.documentElement.removeAttribute('data-pja-resume-injected');
             document.dispatchEvent(new CustomEvent('pja:injectresume', {
               detail: { b64, filename },
               bubbles: false
             }));
-            document.documentElement.removeAttribute('data-pja-resume-injected');
             attachBtn.click();
             let injected = false;
             for (let i = 0; i < 30; i++) {
@@ -1664,8 +1909,8 @@
           dbgResume('strategy1.3 uploadBtn=' + !!(uploadBtn1_3) +
             (uploadBtn1_3 ? ' text=' + (uploadBtn1_3.textContent||'').trim().slice(0,25) : ''));
           if (uploadBtn1_3) {
-            document.dispatchEvent(new CustomEvent('pja:injectresume', { detail: { b64, filename }, bubbles: false }));
             document.documentElement.removeAttribute('data-pja-resume-injected');
+            document.dispatchEvent(new CustomEvent('pja:injectresume', { detail: { b64, filename }, bubbles: false }));
             uploadBtn1_3.click();
             let injected = false;
             for (let i = 0; i < 35; i++) {
@@ -1688,6 +1933,27 @@
             } else {
               dbgResume('strategy1.3 bridge ok');
             }
+            // Ashby may acknowledge the MAIN-world interception and then replace the file input,
+            // discarding its FileList. Verify persistence instead of equating bridge "ok" with an
+            // attached resume; re-inject into the current required input if necessary.
+            let persisted = false;
+            for (let i = 0; i < 20; i++) {
+              await sleep(200);
+              persisted = Array.from(document.querySelectorAll('input[type=file]'))
+                .some(inp => inp.files && inp.files.length > 0);
+              if (persisted || !document.contains(uploadBtn1_3) || /replace|remove/i.test(uploadBtn1_3.textContent || '')) break;
+            }
+            if (!persisted) {
+              const currentInput = uploadBtn1_3.closest('form,section,[class*="field"],[data-testid]')?.querySelector('input[type=file]')
+                || document.querySelector('input[type=file][required], input[type=file]');
+              if (currentInput) {
+                persisted = injectFileIntoInput(currentInput, makeFile(b64, filename));
+                await sleep(500);
+                persisted = persisted && !!(currentInput.files && currentInput.files.length);
+                dbgResume('strategy1.3 persistence reinject=' + persisted);
+              }
+            }
+            dbgResume('strategy1.3 persisted=' + persisted);
             resolve();
             return;
           }
@@ -1724,8 +1990,8 @@
             (wdUploadBtn ? ' text=' + (wdUploadBtn.textContent||wdUploadBtn.getAttribute('aria-label')||'').trim().slice(0,20) : '') +
             ' host=' + location.hostname.slice(0,25));
           if (wdUploadBtn) {
-            document.dispatchEvent(new CustomEvent('pja:injectresume', { detail: { b64, filename }, bubbles: false }));
             document.documentElement.removeAttribute('data-pja-resume-injected');
+            document.dispatchEvent(new CustomEvent('pja:injectresume', { detail: { b64, filename }, bubbles: false }));
             wdUploadBtn.click();
             let injected = false;
             for (let i = 0; i < 35; i++) {
@@ -1877,6 +2143,13 @@
   }
 
   async function handleSignIn(profile) {
+    // Use only the password the applicant explicitly saved in Settings. Generic ATS account
+    // creation previously invented a predictable fallback password, which could create an account
+    // the user did not know how to access later. Per-tenant credentials still take precedence.
+    const { pja_job_password: savedJobPassword } = await new Promise(resolve =>
+      chrome.storage.local.get('pja_job_password', resolve)
+    );
+
     // Accept Workday cookie consent banner if present (required for session cookies)
     const cookieAcceptBtn = document.querySelector('[data-automation-id="legalNoticeAcceptButton"]');
     if (cookieAcceptBtn) { cookieAcceptBtn.click(); await sleep(500); }
@@ -1915,7 +2188,8 @@
       if (pwFields.length >= 2) {
         const storedCreds = await getStoredWorkdayCreds();
         const email = profile.email;
-        const password = storedCreds?.password || `Applicant_ATS_${new Date().getFullYear()}!`;
+        const password = storedCreds?.password || savedJobPassword;
+        if (!password) return 'needs_password';
 
         // Helper: submit a Workday form via background's WORKDAY_SUBMIT_FORM (runs in MAIN world,
         // uses nativeInputValueSetter so React/Formik state is properly updated).
@@ -1989,7 +2263,11 @@
       const storedCreds = await getStoredWorkdayCreds();
       const emailField = getEmailField();
       const email1pw = storedCreds?.email || profile.email;
-      const password1pw = storedCreds?.password || `Applicant_ATS_${new Date().getFullYear()}!`;
+      const password1pw = storedCreds?.password || savedJobPassword;
+      if (!password1pw) {
+        if (emailField) fill(emailField, profile.email);
+        return 'needs_password';
+      }
 
       if (storedCreds) {
         // Sign in with stored credentials via WORKDAY_SUBMIT_FORM (main world)
@@ -2115,6 +2393,8 @@
       'input:not([type=hidden]):not([type=file]):not([type=submit]):not([type=button]):not([type=checkbox]):not([type=radio])'
     );
     for (const el of allInputs) {
+      if (/^iti-\d+__search-input$/i.test(el.id || '') ||
+          (el.type === 'search' && el.closest('[class*="iti"]'))) continue;
       if (!el.offsetParent || el.value.trim()) continue;
       const label = getLabelFor(el);
       if (!label) continue;
@@ -2146,6 +2426,10 @@
       '[aria-required="true"]:not([type=hidden]):not([type=file])'
     )) {
       if (!el.offsetParent && el.getBoundingClientRect().width === 0) continue; // hidden
+      // Workday prompt flyouts contain a transient required search input with an opaque generated
+      // id (for example "x9ie0"). It is a menu control, not an application question; treating it
+      // as an empty required field blocks the step immediately after State was selected.
+      if (el.closest('[data-automation-id="activeListContainer"], [role="listbox"]')) continue;
       // Skip div/button/section containers (e.g. Greenhouse file-upload wrappers) matched by aria-required
       const tag = el.tagName.toLowerCase();
       const role = (el.getAttribute('role') || '').toLowerCase();
@@ -2249,9 +2533,19 @@
     // 1. exact (normalized) match
     let hit = opts.find(o => norm(o) === na);
     if (hit) return hit;
+    // Equivalent EEO terminology varies across ATS forms. Map only exact demographic synonyms;
+    // this is profile truth, not an inference about qualifications.
+    const eeoAliases = { female: ['woman', 'women'], male: ['man', 'men'],
+      'non binary': ['nonbinary', 'gender non conforming', 'genderqueer'] };
+    const aliases = eeoAliases[na] || [];
+    if (aliases.length) { hit = opts.find(o => aliases.includes(norm(o))); if (hit) return hit; }
     // 2. leading Yes/No token — "no. my background is..." → the No option
     const lead = na.match(/^(yes|no)\b/);
     if (lead) { hit = opts.find(o => norm(o) === lead[1] || new RegExp('^' + lead[1] + '\\b').test(norm(o))); if (hit) return hit; }
+    // A required one-option checkbox group is an acknowledgment, not a Yes/No picker. Greenhouse
+    // renders these as e.g. ["Acknowledge/Confirm"]. A deterministic Yes means check that sole
+    // policy option; leaving it unmatched silently blocks submit.
+    if (na === 'yes' && opts.length === 1 && /acknowledge|confirm|agree|certify|consent/i.test(opts[0])) return opts[0];
     // 3. an option appears as a whole-word phrase inside the answer (longest option first)
     for (const o of [...opts].sort((x, y) => y.length - x.length)) {
       const no = norm(o);
@@ -2292,6 +2586,8 @@
     if (/\bzip\b|zip ?code|postal code/.test(L)) return profile.zip || null;
     if (/\bcity\b (you|do you)[\s\S]{0,15}(live|reside)|what city|which city/.test(L)) return profile.city || null;
     if (/highest (level of )?education|level of education|education (level|completed)|education you have (completed|attained)/.test(L)) return profile.degree || profile.education || null;
+    if (/visa (type|status)|immigration status|if yes[\s\S]{0,30}(visa|status)/.test(L)) return profile.visaStatus || null;
+    if (/gender identity|how (?:do|would) you describe your gender|\bgender\b/.test(L)) return profile.gender || null;
     return null;
   }
   if (typeof window !== 'undefined') window.pjaProfileFieldForLabel = pjaProfileFieldForLabel;
@@ -2301,12 +2597,12 @@
     if (/referr/i.test(t)) return 'No';
     if (/require.*sponsor|\bsponsorship\b|visa sponsor/i.test(t)) return 'No';
     if (/authoriz|eligible to work|legally (authorized|entitled|able)|right to work/i.test(t)) return 'Yes';
-    if (/(now or have you ever|currently)[\s\S]{0,40}(employee|employed|worked? (for|at))/i.test(t)) return 'No';
+    if (/(now or have you ever|currently|previously)[\s\S]{0,50}(employee|employed|worked? (for|at))|previously worked? (for|at)/i.test(t)) return 'No';
     if (/worked (for|at)[\s\S]{0,30}(pricewaterhouse|pwc)/i.test(t)) return 'No';
     if (/\bat least 18\b|\bover 18\b|\b18 (years|or older)\b|are you 18/i.test(t)) return 'Yes';
     if (/willing to (relocate|travel|commute)|able to[\s\S]{0,25}(relocate|commute|travel)|open to relocat|reliably commute|commute to /i.test(t)) return 'Yes';
     // Onsite / in-office ability — honest Yes: the candidate is Bay-Area-based and these roles are Bay Area.
-    if (/able to (come|be|work|report) ?(on-?site|in.?office|in person)|come on-?site|on-?site as (required|needed)|work (on-?site|in.?office|in person)|report to (the )?office|commute to (the )?(office|site)/i.test(t)) return 'Yes';
+    if (/able (?:and willing )?to (come|be|work|report)[\s\S]{0,20}(on[ -]?site|in.?office|in person)|available to work at[\s\S]{0,50}(office|site)[\s\S]{0,30}(day|week)|come on[ -]?site|on[ -]?site as (required|needed)|work (on[ -]?site|in.?office|in person)|report to (the )?office|commute to (the )?(office|site)/i.test(t)) return 'Yes';
     // Shift schedules (swing/night/rotating/weekends) — candidate is open to any shift.
     if (/shift schedule|swing shift|night shift|graveyard|rotating shift|able to work[\s\S]{0,15}shift|work[\s\S]{0,10}(nights|weekends)/i.test(t)) return 'Yes';
     // Located-in / commutable — Bay-Area-based, can commute within NorCal/CA. Defer clearly-distant
@@ -2324,9 +2620,16 @@
       }
     }
     // Conflict-of-interest / relatives at the company → No.
-    if (/friends or relatives|related to (an?|any)[\s\S]{0,30}(employee|customer)|immediate family[\s\S]{0,40}(employee|health care|use or prescribe)|conflict of interest|affiliated with a company that does business/i.test(t)) return 'No';
+    if (/friends or relatives|related to (an?|any)[\s\S]{0,30}(employee|customer)|immediate family[\s\S]{0,60}(employee|employed|work(?:s|ing)? (?:at|for)|health care|use or prescribe)|conflict of interest|affiliated with a company that does business/i.test(t)) return 'No';
+    if (/(?:ever|currently)[\s\S]{0,35}employed by[\s\S]{0,45}(?:u\.?s\.? )?federal government|contractor[\s\S]{0,45}performed work for[\s\S]{0,35}federal government|served in the military|political appointee/i.test(t)) return 'No';
+    if (/relatives[\s\S]{0,45}(?:employed by|work(?:ing)? for|serves? in)[\s\S]{0,80}(?:federal government|department of (?:health|defense)|military)|relatives[\s\S]{0,100}political appointee/i.test(t)) return 'No';
+    if (/\bdebarred\b|\bexcluded\b[\s\S]{0,30}(federal|government|health care|program)|\bsuspended\b[\s\S]{0,30}(federal|government|program)/i.test(t)) return 'No';
     // US-person / citizenship (export-control framings) — honest No: TN status is not a US person.
     if (/\bu\.?s\.? person\b|are you a (u\.?s\.? )?(citizen|national)\b|protected individual/i.test(t)) return 'No';
+    // Greenhouse/Pure Storage wording: the described deemed-export restriction applies only to
+    // citizens of sanctioned nations without a second non-sanctioned nationality/residency. The
+    // applicant is Canadian, so it does not affect employment.
+    if (/deemed export rule[\s\S]{0,50}affect (?:your )?employment/i.test(t)) return 'No';
     // Degree specifically in EE/ME — honest No (candidate's degree is Environmental Engineering).
     if (/degree in (electrical|mechanical)|electrical or mechanical engineering|(b\.?s\.?|m\.?s\.?) in (electrical|mechanical)/i.test(t)) return 'No';
     if (/background check|drug (test|screen)/i.test(t)) return 'Yes';
@@ -2334,11 +2637,13 @@
     // non-compete agreements, so a CA applicant is not bound by an enforceable one.
     if (/non-?compete|noncompete/i.test(t) && /\b(bound|subject|signed|have|are you)\b/i.test(t)) return 'No';
     if (/how did you hear|where did you (hear|find)|referral source|source of (this )?application/i.test(t)) return 'LinkedIn';
+    if (/desired (?:base )?salary|salary expectation|expected (?:base )?(?:salary|compensation)|compensation expectation/i.test(t))
+      return '$80,000 - $95,000 depending on role and responsibilities';
     // Acknowledgment / certification statements ("I have read and understand the Export Control
     // statement…", "I acknowledge…", "I certify…", "I agree…") — honest Yes: reading and agreeing
     // to a posted statement is part of applying. Excludes eligibility/legal-status framings, which
     // the sponsorship/authorization rules above answer, and open-ended prompts.
-    if (/^\s*i (have read|acknowledge|certify|understand|agree|consent)\b|i have read and (understand|agree)|acknowledge (that i|and (agree|understand))|i certify that/i.test(t) &&
+    if (/^\s*(?:i )?(?:have read|acknowledge(?:\/confirm)?|certify|understand|agree|consent)\b|i have read and (understand|agree)|acknowledge (that i|and (agree|understand))|i certify that/i.test(t) &&
         !/how many|describe|explain|please (provide|list|specify)/i.test(t)) return 'Yes';
     // Yes/No experience-screening — answer ONLY from her actual resume domains (honest, no
     // fabrication): Yes for documented skills, No for documented gaps, else defer to the AI.
@@ -2509,6 +2814,10 @@
         const isLocationField = /location|\bcity\b/i.test(f.label || '') && (f.el.id === 'candidate-location' || /location|city/i.test(f.el.id || '') || f.el.getAttribute('role') === 'combobox' || f.el.getAttribute('aria-autocomplete'));
         if (isLocationField && typeof pjaFillCombobox === 'function') pjaFillCombobox(f.el, ans);
         else if (f.type === 'radio' && typeof pjaSelectRadio === 'function') pjaSelectRadio(f.radios || [], ans);
+        else if (f.type === 'checkboxgroup' && typeof pjaCheckMatchingBox === 'function') {
+          const choice = pjaCoerceToOption(ans, f.options || []) || ans;
+          pjaCheckMatchingBox(f.members || [], choice);
+        }
         else if (f.type === 'select' && typeof pjaFillSelect === 'function') pjaFillSelect(f.el, ans);
         else if (f.type === 'combobox' && typeof pjaFillCombobox === 'function') pjaFillCombobox(f.el, ans);
         else if ((f.type === 'text' || f.type === 'textarea') && f.el) {
@@ -2564,7 +2873,7 @@
       // Option-typed fields (select/combobox/radio) need the answer to MATCH an option. The AI
       // often returns prose ("No. My background is...") for a Yes/No screen — coerce it to the
       // best-matching option so the filler can commit it (else it stays empty → skip).
-      if (['select', 'combobox', 'radio'].includes(f.type) && Array.isArray(f.options) && f.options.length) {
+      if (['select', 'combobox', 'radio', 'checkboxgroup'].includes(f.type) && Array.isArray(f.options) && f.options.length) {
         ans = pjaCoerceToOption(ans, f.options) || ans;
       }
       answerCache[norm(f.label)] = ans;
@@ -2693,7 +3002,10 @@
             if ((RANK[incomingStatus] ?? 1) >= (RANK[existing.status] ?? 1)) existing.status = incomingStatus;
             if (fields.reason) existing.reason = fields.reason;
             // fill any enrichment fields we didn't have before
-            const enr = { jobId: job.jobId || job.id, applyUrl: job.applyUrl, location: job.location, channel: job.channel || job.ats };
+            const enr = { jobId: job.jobId || job.id, applyUrl: job.applyUrl, location: job.location,
+            channel: job.channel || job.ats, runId: job.runId,
+            confirmationSource: fields.confirmationSource,
+            confirmedAt: fields.confirmedAt };
             for (const k in enr) { if (enr[k] != null && existing[k] == null) existing[k] = enr[k]; }
             existing.updatedAt = Date.now();
           } else {
@@ -2703,9 +3015,12 @@
               applyUrl: job.applyUrl || null,
               location: job.location || null,
               channel: job.channel || job.ats || 'external',
+              runId: job.runId || null,
               url: (typeof location !== 'undefined' ? location.href.slice(0, 200) : null),
               status: incomingStatus,
               reason: fields.reason || null,
+              confirmationSource: fields.confirmationSource || null,
+              confirmedAt: fields.confirmedAt || null,
               confirmedEmail: false,
               appliedAt: Date.now()
             });
@@ -2717,17 +3032,16 @@
   }
   if (typeof window !== 'undefined') window.pjaWriteAppliedLog = pjaWriteAppliedLog;
 
-  // Pure post-submit success detector (testable). Tightened to cut false 'submit_unclear':
-  // broader confirmation phrasings + URL/title tokens, and a redirect only counts as success
-  // when the application form is actually GONE (avoids false positives from in-page re-renders).
-  const PJA_SUBMIT_SUCCESS_RE = /thank you|thanks for (applying|your (application|interest|submission))|your application|application (received|complete|completed|submitted|confirmed|has been (received|submitted|sent|completed)|was (received|submitted|sent))|we.?ve received|we have received|received your application|submitted successfully|applied successfully|you.?ve applied|you have applied|submission (complete|received|successful)|appreciate your (interest|application)|confirmation/i;
+  // Pure post-submit success detector (testable). It intentionally requires an explicit
+  // confirmation phrase or route. A redirect/form disappearance is useful diagnostic evidence,
+  // but is not strong enough to claim that an application was accepted.
+  const PJA_SUBMIT_SUCCESS_RE = /thank(?:s| you) for (?:applying|your (?:application|submission))|application (?:received|complete|completed|submitted|confirmed|has been (?:received|submitted|sent|completed)|was (?:received|submitted|sent))|we.?ve received (?:your )?application|we have received (?:your )?application|received your application|submitted successfully|applied successfully|you.?ve applied|you have applied|submission (?:complete|received|successful)|appreciate your application|application confirmation/i;
   function pjaIsSubmitSuccess(snap) {
     snap = snap || {};
     const text = String(snap.text || ''), title = String(snap.title || ''), url = String(snap.url || '');
-    const preSubmitUrl = String(snap.preSubmitUrl || '');
-    const hasSubmitButton = snap.hasSubmitButton !== false;
-    const hasFormFields = snap.hasFormFields !== false;
-    const iterations = Number.isFinite(snap.iterations) ? snap.iterations : 99;
+    // Validation errors commonly re-render the original form alongside static career-site phrases
+    // such as "we appreciate your interest." An application form still being present always wins.
+    if (snap.hasSubmitButton === true || snap.hasFormFields === true) return false;
     // 1. Confirmation text in title or body (generic + per-ATS phrases via PJAAccount.matchesSuccess,
     // e.g. iCIMS "congratulations", so a real submit isn't misread as submit_unclear).
     const body6k = (title + ' ' + text).slice(0, 6000);
@@ -2738,30 +3052,68 @@
         if (window.PJAAccount.matchesSuccess(body6k, ats)) return true;
       }
     } catch (_) {}
-    // 2. Landed on a confirmation/post-apply route.
-    if (/thank|confirm|success|submitted|post-?apply|application[-_]?(complete|received|confirmation|success)|\/applied\b/i.test(url)) return true;
-    // 3. Redirected to a DIFFERENT path AND the form is gone → submission went through + redirect.
-    if (url && preSubmitUrl && url !== preSubmitUrl) {
-      const pathOf = u => { try { return new URL(u).pathname; } catch (_) { return u; } };
-      if (pathOf(url) !== pathOf(preSubmitUrl) && !hasFormFields) return true;
-    }
-    // 4. SPA replaced the form in-place (submit button + fields both gone) after a couple polls.
-    if (!hasSubmitButton && !hasFormFields && iterations >= 2) return true;
+    // 2. Landed on a confirmation/post-apply PATH. Never scan the hostname: otherwise every
+    // successfactors.com apply URL is a false positive merely because its domain contains "success".
+    let path = '';
+    try { path = new URL(url).pathname; } catch (_) { path = url.replace(/[?#].*$/, ''); }
+    if (/(?:^|\/)(?:thank(?:-?you)?|confirm(?:ation)?|success|submitted|post-?apply|application[-_]?(?:complete|received|confirmation|success)|applied)(?:\/|$)/i.test(path)) return true;
     return false;
   }
   if (typeof window !== 'undefined') window.pjaIsSubmitSuccess = pjaIsSubmitSuccess;
 
+  function pjaSameQueuedJob(a, b) {
+    if (!a || !b) return false;
+    const aid = String(a.id || a.jobId || ''), bid = String(b.id || b.jobId || '');
+    if (aid && bid) return aid === bid;
+    return !!a.applyUrl && !!b.applyUrl && String(a.applyUrl) === String(b.applyUrl);
+  }
+  if (typeof window !== 'undefined') window.pjaSameQueuedJob = pjaSameQueuedJob;
+
   async function recordResult(job, result) {
     console.log('PJA ext-apply RESULT:', job.company, result.success ? '✓ APPLIED' : '✗ SKIP:', result.reason || '', result.fields?.join('; ') || '');
-    // Mark job as handled so we don't re-process on reload
+    // A recovered/reopened tab can finish after another tab or the service-worker watchdog has
+    // already advanced the queue. Never let that stale result append duplicates, mutate corpus
+    // state, or advance the NEW current job (observed after queue recovery: 27 skips for 21 jobs).
+    const ownership = await new Promise(resolve => chrome.storage.local.get(['pja_ext_queue', 'pja_ext_current'], d => {
+      const q = d.pja_ext_queue, current = q && q.jobs && q.jobs[q.currentIndex];
+      resolve({ owns: !!q && q.status === 'applying' && pjaSameQueuedJob(current, job) && pjaSameQueuedJob(d.pja_ext_current, job), handled: !!d.pja_ext_current?._handled });
+    }));
+    if (!ownership.owns || ownership.handled) {
+      console.log('PJA ext-apply: stale/duplicate result ignored', job.company, job.title);
+      return;
+    }
+    // Mark handled only after the outcome was verified. This flag used to be written before the
+    // click, which allowed a bare navigation to become a false positive on reload.
+    const applicationAt = job._submitStartedAt || Date.now();
     job._handled = true;
+    if (result.success) {
+      job._confirmationSource = 'page';
+      job._confirmedAt = Date.now();
+    }
+    delete job._submitPending;
+    delete job._preSubmitUrl;
+    delete job._submitStartedAt;
     await new Promise(resolve => chrome.storage.local.set({ pja_ext_current: job }, resolve));
 
     // Bug2 fix: persist successful applies to a DURABLE log (pja_ext_queue gets overwritten each
     // run, so sourcing dedupe needs this to avoid re-surfacing already-applied roles).
     if (result.success) {
-      await pjaWriteAppliedLog(job, { status: 'applied', reason: result.reason });
+      await pjaWriteAppliedLog(job, { status: 'applied', reason: result.reason,
+        confirmationSource: 'page', confirmedAt: job._confirmedAt });
     }
+
+    const uncertain = /unconfirmed|unclear|assumed|inferred/i.test(String(result.reason || ''));
+    const pending = /ready_to_submit/i.test(String(result.reason || ''));
+    const ledgerEvent = {
+        runId: job.runId || null, jobId: job.jobId || job.id || null,
+        applyUrl: job.applyUrl || location.href, company: job.company, title: job.title,
+        channel: job.channel || job.ats || 'external',
+        status: result.success ? 'applied' : pending ? 'pending' : uncertain ? 'submitted' : 'failed',
+        success: result.success ? true : (uncertain || pending ? null : false), reason: result.reason || '',
+        confirmationSource: result.success ? 'page' : null,
+        confirmedAt: result.success ? job._confirmedAt : null,
+        applicationAt, occurredAt: Date.now()
+      };
 
     // Write the outcome back into the corpus (pja_job_state) so the pool reflects progress and
     // re-runs are idempotent. Fire-and-forget; background maps the reason via PJAApplySelect and
@@ -2777,7 +3129,10 @@
     return new Promise(resolve => {
       chrome.storage.local.get('pja_ext_queue', data => {
         const queue = data.pja_ext_queue;
-        if (!queue) { resolve(); return; }
+        if (!queue) {
+          try { chrome.runtime.sendMessage({ type: 'APPLICATION_LEDGER_EVENT', event: ledgerEvent, closeTab: !!job.rankedRun }, () => void chrome.runtime.lastError); } catch (_) {}
+          resolve(); return;
+        }
         // Guard against overwriting a new queue that was seeded while this run was in progress.
         if (queue.runId && job.runId && queue.runId !== job.runId) {
           console.log('PJA ext-apply: runId mismatch in recordResult, not writing', job.runId, '→', queue.runId);
@@ -2797,6 +3152,9 @@
         if (queue.currentIndex >= queue.jobs.length) queue.status = 'done';
 
         chrome.storage.local.set({ pja_ext_queue: queue }, () => {
+          // Signal the global ranked dispatcher only after this one-job queue is durably finished;
+          // otherwise its next queue could be overwritten by this callback.
+          try { chrome.runtime.sendMessage({ type: 'APPLICATION_LEDGER_EVENT', event: ledgerEvent, closeTab: !!job.rankedRun }, () => void chrome.runtime.lastError); } catch (_) {}
           // Push status to dev server for monitoring
           try {
             fetch('http://localhost:6174/queue-status', {
@@ -2816,6 +3174,9 @@
   }
 
   function navigateBack(job) {
+    // The central ranked dispatcher owns cross-job navigation and will close this one-job tab after
+    // its ledger event. Never race it by reading/reusing the next queue from this page.
+    if (job && job.rankedRun) return;
     // If next job in queue has a direct applyUrl, go there without LinkedIn roundtrip
     chrome.storage.local.get('pja_ext_queue', data => {
       const queue = data.pja_ext_queue;
@@ -2826,12 +3187,17 @@
             ...nextJob,
             profile: job.profile || {},
             answers: job.answers || {},
+            runId: queue.runId || job.runId || '',
             returnUrl: job.returnUrl || 'https://www.linkedin.com/jobs/search/?f_AL=true'
           };
           chrome.storage.local.set({ pja_ext_current: nextCurrent, pja_navigate_to: nextJob.applyUrl }, () => {
-            // window.top so that when we're inside an embedded ATS iframe, we navigate the whole tab
-            // to the next job (not just the iframe). Identical to window when not framed.
-            window.top.location.href = nextJob.applyUrl;
+            // Let the service worker update the owning tab. Cross-origin embedded ATS frames can
+            // silently fail to assign window.top.location, leaving the queue stuck between jobs.
+            try {
+              chrome.runtime.sendMessage({ type: 'OPEN_EXT_NEXT', url: nextJob.applyUrl }, resp => {
+                if (chrome.runtime.lastError || !resp?.ok) { try { window.top.location.href = nextJob.applyUrl; } catch (_) {} }
+              });
+            } catch (_) { try { window.top.location.href = nextJob.applyUrl; } catch (_) {} }
           });
           return;
         }

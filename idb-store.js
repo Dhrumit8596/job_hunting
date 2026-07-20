@@ -16,10 +16,115 @@
   // ── canonical identity (inlined mirror of sourcing/jobid.js) ──
   function norm(s) { return String(s == null ? '' : s).toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim(); }
   function roleKey(job) { return norm(job && job.company) + '::' + norm(job && job.title); }
+  function mirrorKey(job) { return roleKey(job) + '::' + norm(job && job.location); }
   function canonicalId(job) {
     const ats = norm(job && job.ats).replace(/\s+/g, '') || 'x';
     const rawId = job && job.id != null ? String(job.id).trim() : '';
     return rawId ? ats + ':' + rawId : 'norm:' + roleKey(job);
+  }
+
+  function descriptionFingerprint(text) {
+    const s = String(text || '').replace(/\s+/g, ' ').trim();
+    let h = 2166136261;
+    for (let i = 0; i < s.length; i++) { h ^= s.charCodeAt(i); h = Math.imul(h, 16777619); }
+    return s.length + ':' + (h >>> 0).toString(36);
+  }
+
+  function isAggregatorUrl(url) {
+    try { return /(^|\.)(linkedin|indeed|glassdoor)\.com$/i.test(new URL(url).hostname); }
+    catch (_) { return false; }
+  }
+
+  function applyUrlKey(value) {
+    try {
+      const u = new URL(String(value || '')); u.hash = '';
+      for (const k of Array.from(u.searchParams.keys())) if (/^(utm_.+|trk|trackingId|ref|refId|source|src|campaign|from)$/i.test(k)) u.searchParams.delete(k);
+      u.searchParams.sort();
+      return u.hostname.toLowerCase() + u.pathname.replace(/\/+$/, '') + u.search;
+    } catch (_) { return ''; }
+  }
+
+  function mergeUnique(a, b) { return Array.from(new Set([...(a || []), ...(b || [])].filter(Boolean))); }
+  function sourceRef(job, modality) {
+    return { modality: modality || 'unknown', platform: job.sourcePlatform || job.ats || '',
+      sourceJobId: String(job.sourceJobId || job.id || ''), listingUrl: job.listingUrl || job.applyUrl || '',
+      applyUrl: job.applyUrl || '', channel: job.channel || '', detectedAts: job.detectedAts || '',
+      isEasyApply: !!job.isEasyApply, indeedApply: !!job.indeedApply,
+      query: job.query || '', discoveredAt: job.discoveredAt || job.scrapedAt || '' };
+  }
+  function refKey(r) { return [r.modality, r.platform, r.sourceJobId, r.listingUrl].join('|'); }
+
+  function routeFrom(job) {
+    return { applyUrl: job.applyUrl || '', listingUrl: job.listingUrl || '',
+      sourcePlatform: job.sourcePlatform || '', sourceJobId: String(job.sourceJobId || job.id || ''),
+      channel: job.channel || '', detectedAts: job.detectedAts || '',
+      isEasyApply: !!job.isEasyApply, indeedApply: !!job.indeedApply };
+  }
+
+  function shouldReplaceRoute(existing, incoming) {
+    if (!existing.applyUrl) return !!incoming.applyUrl;
+    const oldDirect = !isAggregatorUrl(existing.applyUrl), nextDirect = !isAggregatorUrl(incoming.applyUrl);
+    if (!oldDirect && nextDirect && (incoming.channel || 'external') === 'external') return true;
+    return !!incoming.sourcePlatform && incoming.sourcePlatform === existing.sourcePlatform &&
+      String(incoming.sourceJobId || '') === String(existing.sourceJobId || '');
+  }
+
+  function mergePosting(existing, incoming, modality) {
+    if (!existing) return incoming;
+    const out = Object.assign({}, existing);
+    const desc = String(incoming.description || '').slice(0, 20000);
+    if (desc.length > String(out.description || '').length) {
+      out.description = desc;
+      out.descriptionStatus = incoming.descriptionStatus || 'complete';
+    }
+    const incomingRoute = routeFrom(incoming);
+    if (shouldReplaceRoute(out, incomingRoute)) Object.assign(out, incomingRoute);
+    for (const k of ['query', 'discoveredAt', 'postedAt']) if (!out[k] && incoming[k]) out[k] = incoming[k];
+    out.modalities = mergeUnique(out.modalities || [out.modality], incoming.modalities || [modality || incoming.modality]);
+    out.channels = mergeUnique(out.channels || [out.channel], incoming.channels || [incoming.channel]);
+    const refs = Array.isArray(out.sourceRefs) ? out.sourceRefs.slice() : [];
+    const incomingRefs = Array.isArray(incoming.sourceRefs) && incoming.sourceRefs.length
+      ? incoming.sourceRefs : [sourceRef(incoming, modality || incoming.modality)];
+    for (const ref of incomingRefs) if (!refs.some(r => refKey(r) === refKey(ref))) refs.push(ref);
+    out.sourceRefs = refs;
+    out.descriptionFingerprint = descriptionFingerprint(out.description);
+    return out;
+  }
+
+  // A full source-run import is authoritative for route identity. Preserve only safe historical
+  // enrichment (longer JD + provenance); never reintroduce a previously mixed channel/job id.
+  function refreshPosting(fresh, previous) {
+    const out = Object.assign({}, fresh);
+    if (!previous) { out.descriptionFingerprint = descriptionFingerprint(out.description); return out; }
+    if (String(previous.description || '').length > String(out.description || '').length) {
+      out.description = String(previous.description).slice(0, 20000);
+      out.descriptionStatus = previous.descriptionStatus || 'complete';
+    }
+    out.modalities = mergeUnique(out.modalities || [out.modality], previous.modalities || [previous.modality]);
+    out.channels = mergeUnique(out.channels || [out.channel], previous.channels || [previous.channel]);
+    const refs = Array.isArray(out.sourceRefs) ? out.sourceRefs.slice() : [];
+    for (const ref of (previous.sourceRefs || [])) if (!refs.some(r => refKey(r) === refKey(ref))) refs.push(ref);
+    out.sourceRefs = refs;
+    out.descriptionFingerprint = descriptionFingerprint(out.description);
+    return out;
+  }
+
+  function postingRecord(id, rk, mk, job, modality) {
+    const out = {
+      id, title: job.title, company: job.company, location: job.location,
+      remote: !!job.remote, applyUrl: job.applyUrl || '', ats: job.ats || '',
+      detectedAts: job.detectedAts || '', postedAt: job.postedAt || '',
+      modality: modality || 'unknown', modalities: [modality || 'unknown'], roleKey: rk, mirrorKey: mk,
+      description: String(job.description || '').slice(0, 20000),
+      descriptionStatus: job.descriptionStatus || (job.description ? 'complete' : 'needs_description'),
+      sourcePlatform: job.sourcePlatform || '', sourceJobId: String(job.sourceJobId || job.id || ''),
+      listingUrl: job.listingUrl || '', channel: job.channel || '', channels: job.channel ? [job.channel] : [],
+      query: job.query || '', discoveredAt: job.discoveredAt || job.scrapedAt || '',
+      isEasyApply: !!job.isEasyApply, indeedApply: !!job.indeedApply,
+      sourceRefs: Array.isArray(job.sourceRefs) && job.sourceRefs.length ? job.sourceRefs : [sourceRef(job, modality)],
+    };
+    out.descriptionFingerprint = descriptionFingerprint(out.description);
+    return out;
   }
 
   function idb() {
@@ -54,40 +159,46 @@
   }
 
   async function existingKeys(db) {
-    const ids = new Set(), rks = new Set();
+    const ids = new Set(), records = {}, mirrors = new Map(), directUrls = new Map();
     await new Promise((res, rej) => {
       const cur = db.transaction('index', 'readonly').objectStore('index').openCursor();
-      cur.onsuccess = () => { const c = cur.result; if (!c) return res(); ids.add(c.value.id); rks.add(c.value.roleKey); c.continue(); };
+      cur.onsuccess = () => { const c = cur.result; if (!c) return res(); const v = c.value; ids.add(v.id); records[v.id] = v; const mk = v.mirrorKey || mirrorKey(v); if (!mirrors.has(mk)) mirrors.set(mk, v.id); const dk = v.applyUrl && !isAggregatorUrl(v.applyUrl) ? applyUrlKey(v.applyUrl) : ''; if (dk && !directUrls.has(dk)) directUrls.set(dk, v.id); c.continue(); };
       cur.onerror = () => rej(cur.error);
     });
-    return { ids, rks };
+    return { ids, records, mirrors, directUrls };
   }
 
   async function upsertJobs(jobs, modality, stateFor) {
     const db = await openDb();
     try {
-      const { ids, rks } = await existingKeys(db);
-      const seenIds = new Set(ids), seenRk = new Set(rks);
-      let added = 0, dupById = 0, dupByRole = 0;
+      const { ids, records, mirrors, directUrls } = await existingKeys(db);
+      const seenIds = new Set(ids);
+      let added = 0, dupById = 0, dupByRole = 0, enriched = 0;
       const t = db.transaction(['index', 'state'], 'readwrite');
       const idxS = t.objectStore('index'), stS = t.objectStore('state');
       for (const job of jobs || []) {
         if (!job) continue;
-        const id = canonicalId(job), rk = roleKey(job);
-        if (seenIds.has(id)) { dupById++; continue; }
-        if (seenRk.has(rk)) { dupByRole++; continue; }
-        idxS.put({
-          id, title: job.title, company: job.company, location: job.location,
-          remote: !!job.remote, applyUrl: job.applyUrl || '', ats: job.ats || '',
-          detectedAts: job.detectedAts || '', postedAt: job.postedAt || '',
-          modality: modality || 'unknown', roleKey: rk,
-        });
+        const id = canonicalId(job), rk = roleKey(job), mk = mirrorKey(job);
+        if (seenIds.has(id)) {
+          dupById++; const merged = mergePosting(records[id], job, modality); records[id] = merged; idxS.put(merged);
+          const mergedKey = merged.applyUrl && !isAggregatorUrl(merged.applyUrl) ? applyUrlKey(merged.applyUrl) : '';
+          if (mergedKey) directUrls.set(mergedKey, id);
+          enriched++; continue;
+        }
+        const directKey = job.applyUrl && !isAggregatorUrl(job.applyUrl) ? applyUrlKey(job.applyUrl) : '';
+        const directId = directKey && directUrls.get(directKey), direct = directId && records[directId];
+        if (direct) {
+          dupByRole++; const merged = mergePosting(direct, job, modality); records[directId] = merged; idxS.put(merged); enriched++; continue;
+        }
+        const posting = postingRecord(id, rk, mk, job, modality);
+        idxS.put(posting); records[id] = posting;
         const st = typeof stateFor === 'function' ? (stateFor(job) || {}) : {};
         stS.put(Object.assign({ id, status: 'sourced', fitScore: null }, st));
-        seenIds.add(id); seenRk.add(rk); added++;
+        seenIds.add(id); if (!mirrors.has(mk)) mirrors.set(mk, id);
+        if (directKey && !directUrls.has(directKey)) directUrls.set(directKey, id); added++;
       }
       await txDone(t);
-      return { added, dupById, dupByRole };
+      return { added, dupById, dupByRole, enriched };
     } finally { db.close(); }
   }
 
@@ -95,11 +206,17 @@
   // refreshes the posting + fitScore but PRESERVES apply-progress: a job already applied /
   // needs_manual / needs_login / dead keeps that status (and attempts/reason/appliedAt) so re-runs
   // are idempotent and a re-source can't silently reset a completed job back to 'sourced'.
-  async function importNormalized(store) {
+  async function importNormalized(store, opts = {}) {
     const db = await openDb();
     try {
-      // read existing state first (separate txn) so we can merge progress
-      const existing = {};
+      // Read existing posting/state first so a refresh can retain a richer browser description,
+      // application progress, and still-valid LLM evidence.
+      const existing = {}, existingIndex = {};
+      await new Promise((res, rej) => {
+        const cur = db.transaction('index', 'readonly').objectStore('index').openCursor();
+        cur.onsuccess = () => { const c = cur.result; if (!c) return res(); existingIndex[c.value.id] = c.value; c.continue(); };
+        cur.onerror = () => rej(cur.error);
+      });
       await new Promise((res, rej) => {
         const cur = db.transaction('state', 'readonly').objectStore('state').openCursor();
         cur.onsuccess = () => { const c = cur.result; if (!c) return res(); existing[c.value.id] = c.value; c.continue(); };
@@ -107,25 +224,42 @@
       });
       const t = db.transaction(['index', 'state'], 'readwrite');
       const idxS = t.objectStore('index'), stS = t.objectStore('state');
-      let n = 0, preserved = 0;
+      let n = 0, preserved = 0, preservedEvidence = 0, retired = 0;
+      if (opts.replaceMissing === true) {
+        const incomingIds = new Set(Object.keys(store.index || {}));
+        for (const id of Object.keys(existingIndex)) {
+          if (incomingIds.has(id)) continue;
+          idxS.delete(id); stS.delete(id); retired++;
+        }
+      }
       for (const id of Object.keys(store.index || {})) {
-        idxS.put(store.index[id]);
+        const posting = refreshPosting(store.index[id], existingIndex[id]);
+        idxS.put(posting);
         const incoming = (store.state && store.state[id]) || { status: 'sourced', fitScore: null };
         const prev = existing[id];
-        let merged;
+        let merged = Object.assign({ id }, incoming);
+        const incomingFp = incoming.descriptionFingerprint || posting.descriptionFingerprint || descriptionFingerprint(posting.description);
+        merged.descriptionFingerprint = incomingFp;
+        const keepLlm = prev && prev.scoreKind === 'llm' && prev.descriptionFingerprint && prev.descriptionFingerprint === incomingFp;
+        if (keepLlm) {
+          for (const k of ['fitScore', 'scoreKind', 'matchEvidence', 'gaps', 'conflicts', 'confidence',
+            'evidenceFingerprint', 'candidateFingerprint']) {
+            if (prev[k] != null) merged[k] = prev[k];
+          }
+          preservedEvidence++;
+        }
         if (prev && prev.status && prev.status !== 'sourced') {
-          // keep apply progress; refresh fitScore from the new source run
-          merged = Object.assign({}, prev, { id, fitScore: incoming.fitScore != null ? incoming.fitScore : prev.fitScore });
+          for (const k of ['status', 'attempts', 'reason', 'appliedAt', 'updatedAt', 'lastAttemptAt']) {
+            if (prev[k] != null) merged[k] = prev[k];
+          }
           preserved++;
-        } else {
-          merged = Object.assign({ id }, incoming);
         }
         stS.put(merged);
         n++;
       }
       await txDone(t);
       await setMeta('schemaVersion', SCHEMA_VERSION);
-      return { imported: n, preserved };
+      return { imported: n, preserved, preservedEvidence, retired };
     } finally { db.close(); }
   }
 
@@ -137,7 +271,10 @@
       for (const j of (legacy && legacy[key]) || []) {
         if (!j) continue;
         jobs.push({ id: j.id, title: j.title || j.role, company: j.company || j.companyName,
-          location: j.location, applyUrl: j.applyUrl, ats: j.ats || (key === 'pja_jobs' ? 'pipeline' : 'legacy') });
+          location: j.location, applyUrl: j.applyUrl, ats: j.ats || (key === 'pja_jobs' ? 'pipeline' : 'legacy'),
+          description: j.description, sourcePlatform: j.platform || j.sourcePlatform, sourceJobId: j.jobId,
+          listingUrl: j.listingUrl || j.url, channel: j.channel, isEasyApply: j.isEasyApply,
+          indeedApply: j.indeedApply, descriptionStatus: j.descriptionStatus });
       }
     }
     if (!jobs.length) return 0;
@@ -241,12 +378,18 @@
       const ids = Object.keys(postings);
       const modalities = {}, companies = {}, statusCounts = {};
       const matchThreshold = opts.matchThreshold != null ? opts.matchThreshold : 70;
-      let unscored = 0, matching = 0;
+      let unscored = 0, matching = 0, descriptionReady = 0, evidenceReady = 0;
       for (const id of ids) {
-        modalities[postings[id].modality] = (modalities[postings[id].modality] || 0) + 1;
+        for (const modality of postings[id].modalities || [postings[id].modality || 'unknown']) {
+          modalities[modality] = (modalities[modality] || 0) + 1;
+        }
         const co = (postings[id].company || '?').toLowerCase().trim();
         companies[co] = (companies[co] || 0) + 1;
         const stt = states[id] || {};
+        if (String(postings[id].description || '').trim() && !/^(missing|stale|needs_description)$/i.test(String(postings[id].descriptionStatus || ''))) descriptionReady++;
+        if (stt.scoreKind === 'llm' && Array.isArray(stt.matchEvidence) && stt.matchEvidence.length >= 3 &&
+            (!stt.gaps || stt.gaps.length <= 2) && (!stt.conflicts || !stt.conflicts.length) &&
+            /^(high|medium)$/i.test(String(stt.confidence || ''))) evidenceReady++;
         if (stt.fitScore == null) unscored++;
         const status = stt.status || 'sourced';
         statusCounts[status] = (statusCounts[status] || 0) + 1;
@@ -266,7 +409,8 @@
         count: ids.length, distinctCompanies: Object.keys(companies).length,
         modalities: Object.keys(modalities), modalityCounts: modalities,
         allScored: unscored === 0, maxCompanyShare: ids.length ? +(max / ids.length).toFixed(3) : 0,
-        biggestCompany: maxCo + ' (' + max + ')', statusCounts, matching, top,
+        biggestCompany: maxCo + ' (' + max + ')', statusCounts, matching,
+        descriptionReady, evidenceReady, top,
       };
     } finally { db.close(); }
   }
@@ -276,11 +420,16 @@
     const s = await corpusSummary({ topN: 0 });
     const checks = {
       uniqueIds: s.count, atLeastTarget: s.count >= target,
-      modalities: s.modalities, atLeast2Modalities: s.modalities.length >= 2,
+      modalities: s.modalities,
+      sourceClasses: Array.from(new Set(s.modalities.map(m => /^browser(?:-|$)/.test(m) ? 'browser' : /^discovery(?:-|$)/.test(m) ? 'discovery' : 'direct'))),
       allScored: s.allScored, maxCompanyShare: s.maxCompanyShare, concentrationOk: s.maxCompanyShare <= 0.25,
-      biggestCompany: s.biggestCompany,
+      biggestCompany: s.biggestCompany, descriptionReady: s.descriptionReady, evidenceReady: s.evidenceReady,
     };
-    checks.pass = checks.atLeastTarget && checks.atLeast2Modalities && checks.allScored && checks.concentrationOk;
+    checks.atLeast2Modalities = checks.sourceClasses.length >= 2;
+    checks.hasDirectSource = checks.sourceClasses.includes('direct');
+    checks.descriptionsReady = checks.descriptionReady >= Math.min(target, s.count);
+    checks.pass = checks.atLeastTarget && checks.atLeast2Modalities && checks.hasDirectSource &&
+      checks.allScored && checks.descriptionsReady && checks.concentrationOk;
     return checks;
   }
 
@@ -290,7 +439,8 @@
     finally { db.close(); }
   }
 
-  const API = { DB_NAME, SCHEMA_VERSION, canonicalId, roleKey, openDb, upsertJobs, importNormalized,
+  const API = { DB_NAME, SCHEMA_VERSION, canonicalId, roleKey, mirrorKey, descriptionFingerprint,
+    openDb, upsertJobs, importNormalized,
     migrateFromLegacy, count, getAll, updateState, getJob, setMeta, getMeta, excludeApplied, corpusSummary, gateReport, clearAll };
 
   if (root) root.PJAIdb = API;                                   // service worker: self.PJAIdb

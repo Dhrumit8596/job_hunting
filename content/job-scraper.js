@@ -156,14 +156,39 @@
     return '';
   }
 
+  function linkedInDetailMatches(jobId, title, url, shownTitle) {
+    const n = s => String(s || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+    const wanted = n(title), shown = n(shownTitle);
+    const cleanId = String(jobId || '').replace(/\D/g, '');
+    const visibleId = String(url || '').match(/(?:currentJobId=|\/jobs\/view\/)(\d+)(?:[/?&#]|$)/i)?.[1] || '';
+    const urlMatches = !!(cleanId && visibleId && visibleId === cleanId);
+    const titleMatches = !!(wanted && shown && (shown === wanted || shown.includes(wanted) || wanted.includes(shown)));
+    // When the page exposes a posting id it is authoritative. Same-title requisitions are common,
+    // so a title must never override an explicit id mismatch and attach the previous panel's JD.
+    return visibleId ? (urlMatches && (!wanted || !shown || titleMatches)) : titleMatches;
+  }
+
+  function linkedInPanelAdvanced(jobId, previousUrl, previousText, currentText) {
+    const previousId = String(previousUrl || '').match(/(?:currentJobId=|\/jobs\/view\/)(\d+)(?:[/?&#]|$)/i)?.[1] || '';
+    if (previousId && previousId === String(jobId || '').replace(/\D/g, '')) return true;
+    const clean = s => String(s || '').replace(/\s+/g, ' ').trim();
+    return !clean(previousText) || clean(previousText) !== clean(currentText);
+  }
+
   // Returns a Promise that resolves with description text (may be '')
-  function waitForDetailPanelDescription() {
+  function waitForDetailPanelDescription(expected) {
     return new Promise(resolve => {
       const deadline = Date.now() + DETAIL_POLL_TIMEOUT;
       function poll() {
         const text = getDetailPanelDescription();
-        if (text.length > 100) { resolve(text); return; }
-        if (Date.now() >= deadline) { resolve(text); return; }
+        const hasExpectation = expected && (expected.jobId || expected.title);
+        const identityMatches = linkedInDetailMatches(expected && expected.jobId, expected && expected.title, location.href, getDetailPanelTitle());
+        // Never return the previously-open card's text merely because it was already present.
+        // Identity (URL/title) must move to the requested card; on timeout fail closed with ''.
+        const advanced = !hasExpectation || linkedInPanelAdvanced(expected && expected.jobId,
+          expected && expected.previousUrl, expected && expected.previousDescription, text);
+        if (text.length > 100 && (!hasExpectation || (identityMatches && advanced))) { resolve(text); return; }
+        if (Date.now() >= deadline) { resolve(hasExpectation ? '' : text); return; }
         setTimeout(poll, DETAIL_POLL_INTERVAL);
       }
       poll();
@@ -431,9 +456,12 @@
           let title = meta.title, company = meta.company;
           if (!FAST) {
             // Click the card to load its description into the detail panel (better fit scoring).
+            const previousUrl = location.href;
+            const previousDescription = getDetailPanelDescription();
             const link = card.querySelector('a[href*="/jobs/view/"]') || card.querySelector('a');
             if (link) link.click();
-            description = await waitForDetailPanelDescription();
+            description = await waitForDetailPanelDescription({ jobId: meta.jobId, title: meta.title,
+              previousUrl, previousDescription });
             // Free pre-filter: need at least one keyword in title/company/desc.
             if (keywordScore(meta.title + ' ' + meta.company) + keywordScore(description) === 0 && description.length < 50) continue;
             // Capture the real offsite ATS apply URL for external jobs (decoded from LinkedIn's
@@ -446,12 +474,18 @@
             if (keywordScore(meta.title + ' ' + meta.company) === 0) continue;
           }
           jobsToScore.push({
-            id: meta.jobId, url: meta.applyUrl,
+            id: meta.jobId, jobId: meta.jobId, sourceJobId: meta.jobId,
+            sourcePlatform: 'linkedin', platform: 'linkedin', url: meta.applyUrl,
+            listingUrl: meta.applyUrl,
             title, company,
             location: meta.location, isEasyApply: meta.isEasyApply,
+            channel: meta.isEasyApply ? 'linkedin_easy_apply' : 'external',
             applyUrl: externalApplyUrl || meta.applyUrl, externalApplyUrl: externalApplyUrl || null,
             needsAtsResolution: FAST && !meta.isEasyApply, // external job whose ATS URL isn't decoded yet
-            description: description.slice(0, 3000), scrapedAt: Date.now(), status: 'scoring'
+            description: description.slice(0, 20000),
+            descriptionStatus: description ? (description.length > 20000 ? 'partial' : 'full') : 'missing',
+            query: new URLSearchParams(location.search).get('keywords') || '',
+            discoveredAt: Date.now(), scrapedAt: Date.now(), status: 'scoring'
           });
           scoredCount++;
           if (jobsToScore.length >= 10) { await sendBatchToBackground(jobsToScore.splice(0, 10), FAST); }
@@ -493,7 +527,7 @@
     const reported = pjaReadResultCount();
     const params = new URLSearchParams(location.search);
     const coverage = {
-      query: params.get('keywords') || '', location: params.get('location') || '',
+      source: 'linkedin', query: params.get('keywords') || '', location: params.get('location') || '',
       collected: total, reported,
       coverage: (reported && reported > 0) ? Math.round((total / reported) * 100) : null,
       easyApply: easyCount, external: total - easyCount, ts: Date.now(),
@@ -547,6 +581,9 @@
     window.pjaExtractCardMeta = extractCardMeta;
     window.pjaAccumulateRenderedCards = accumulateRenderedCards;
     window.pjaDecodeApplyUrl = pjaDecodeApplyUrl;
+    window.pjaWaitForLinkedInDescription = waitForDetailPanelDescription;
+    window.pjaLinkedInDetailMatches = linkedInDetailMatches;
+    window.pjaLinkedInPanelAdvanced = linkedInPanelAdvanced;
     window.__pjaStartScan = startScan; // backend-triggerable (dev-server /start-scan → WS)
     window.__pjaResolveVoyager = pjaResolveVoyagerBatch; // backend-triggerable (/resolve-ats)
   }

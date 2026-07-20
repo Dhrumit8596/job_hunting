@@ -19,6 +19,7 @@ function normalize(raw) {
     applyUrl,
     ats: ATS,
     postedAt: raw.publication_date || '',
+    description: raw.description || '',
   });
   job.detectedAts = detectAts(applyUrl); // where the actual application lives, if recognizable
   return job;

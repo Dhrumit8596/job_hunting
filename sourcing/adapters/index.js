@@ -7,12 +7,17 @@ const workday = require('./workday');
 const linkedin = require('./linkedin');
 const ashby = require('./ashby');
 const smartrecruiters = require('./smartrecruiters');
+const eightfold = require('./eightfold');
+const successfactors = require('./successfactors');
 // Discovery adapters (keyword search across employers, keyless) — the second modality.
 const remotive = require('./remotive');
 const jobicy = require('./jobicy');
 // Phase 2 (registry ATS): icims, jobvite, etc.
 
-const ADAPTERS = { greenhouse, lever, workday, linkedin, ashby, smartrecruiters, remotive, jobicy };
+const ADAPTERS = {
+  greenhouse, lever, workday, linkedin, ashby, smartrecruiters, eightfold, successfactors,
+  remotive, jobicy,
+};
 // Discovery adapters are driven by keyword, not by a slug registry entry.
 const DISCOVERY = { remotive, jobicy };
 

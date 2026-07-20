@@ -18,6 +18,7 @@ function normalize(raw) {
     applyUrl,
     ats: ATS,
     postedAt: raw.pubDate || '',
+    description: raw.jobDescription || raw.jobExcerpt || '',
   });
   job.detectedAts = detectAts(applyUrl);
   return job;
