@@ -14,14 +14,9 @@ const PJA_EA_ASSISTED = true;            // (legacy) keep assisted fallback avai
 const PJA_EA_ASSIST_TIMEOUT_MS = 300000; // how long to wait for the user to open the modal (5 min)
 const PJA_EA_DRY_RUN = false;            // TEST MODE: stop right after modal opens (no fill)
 // AUTO mode + auto-submit: required for backend/autonomous triggering (no human to click Easy
-// Apply or Submit). Works now that the extension's own CDP is free (no claude-in-chrome driving
-// the tab). For manual SEMI use, set PJA_EA_AUTO_OPEN=false.
-const PJA_EA_AUTO_OPEN = false;          // SEMI (only working path): user clicks "Easy Apply", extension
-                                         // fills+submits+advances. AUTO-open is impossible on current
-                                         // LinkedIn — proven 2026-07-12 that trusted CDP mouse-click AND
-                                         // trusted keyboard-Enter on the focused button both no-op the
-                                         // modal (anti-automation). pjaTrustedClickEl keeps both attempts
-                                         // for any future LinkedIn change, but they don't open it today.
+// Apply or Submit). Keep assisted fallback enabled so a user can still click the Easy Apply
+// button if LinkedIn rejects the automatic open action on a specific page/account state.
+const PJA_EA_AUTO_OPEN = true;
 const PJA_EA_STOP_BEFORE_SUBMIT = false; // false = fill, step, AND submit (auto-submit authorized)
 
 // Search URL: Easy Apply · past month · quality roles
