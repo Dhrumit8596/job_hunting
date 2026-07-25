@@ -6,7 +6,7 @@
     "test": "test"
   },
   "scripts": {
-    "test": "node test/check-syntax.js && node test/unit/run.js",
+    "test": "node test/check-syntax.js && node test/privacy-scan.js && node test/unit/run.js",
     "start": "node dev-server.js",
     "start:codex": "node dev-server.js --engine codex",
     "check:profile": "node test/merged_profile.js"

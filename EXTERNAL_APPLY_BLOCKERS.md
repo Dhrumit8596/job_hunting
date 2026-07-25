@@ -86,21 +86,15 @@ everything now auto-answered (profile map + deterministic yes/no rules + EEO + A
 honest gap-skill answers). Most logged questions now auto-answer; these four buckets don't yet.
 Ordered by whether they're safe to close.
 
-### GAP 1 — Multi-select / "select all that apply" checklists — ⬜ TODO (fixable)
-The filler handles single-select and yes/no, but not multi-value pickers.
-- Examples: "Which of the following have you used professionally? (Select all that apply)",
-  project-count buckets ("1–3 / 4–10 / 10+ projects").
-- Fix: a `pjaFillMultiSelect()` that ticks each checkbox / multi-option that truthfully matches
-  the profile/skill list, leaves the rest unchecked. Must obey never-fabricate (only check what's
-  genuinely true). Route unmatched ones to `needs_manual`, don't guess.
+### GAP 1 — Multi-select / "select all that apply" checklists — ✅ RESOLVED
+`pjaCheckMatchingBoxes()` now supports comma/semicolon/pipe/"and" separated answers and
+preserves every truthful checkbox match. Questions without a matching option remain visible to
+the manual-review path; the extension does not invent skills.
 
-### GAP 2 — Date-picker fields (education / work history) — ⬜ TODO (fixable, needs data)
-`end date month*`, `end date year*`, start dates, and the education `discipline*` field are logged
-as unfilled.
-- Fix: pull structured dates from the résumé/`pja_resume` into the profile, and add a date-component
-  filler (month/year selects + typed date inputs). `DATE_COMPONENT_RE` currently *skips* these.
-- Note: `discipline*` also overlaps GAP 4 (it's a Greenhouse remix react-select that won't commit),
-  so filling the *value* isn't enough for those tenants until the commit blocker is solved.
+### GAP 2 — Date-picker fields (education / work history) — ✅ RESOLVED FOR USER-PROVIDED DATA
+The Settings profile now accepts education start/end month and year fields. The existing field
+classifier routes those components through the React-aware select/text fillers. Resume extraction
+can still require manual confirmation when a date is ambiguous; ambiguous dates are not guessed.
 
 ### GAP 3 — Experiential / knowledge gates for skills she genuinely lacks — ✅ WORKING AS INTENDED (do NOT "fix")
 Questions like "hands-on experience authoring GxP validation docs?", "automated tests with

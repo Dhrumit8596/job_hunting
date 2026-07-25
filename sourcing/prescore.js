@@ -11,8 +11,8 @@ const { MEDICAL_RE, CORE_DOMAIN_RE } = require('./filter');
 const QUALITY_MFG_RE = /\b(quality|manufactur|process|equipment|reliability|metrolog|inspection|yield|failure analysis|test engineer|validation|calibration)\b/i;
 const SENIOR_STRETCH_RE = /\b(principal|distinguished|fellow|staff)\b/i;
 
-// Returns an integer 0-100. Base 50, adjusted by domain relevance to the candidate's
-// wafer/metrology/quality-at-a-medical-device background.
+// Returns an integer 0-100. Base 50, adjusted by domain relevance to the configured
+// target background.
 function prescore(job) {
   const title = String(job && job.title || '');
   const text = [job && job.title, job && job.company, job && job.location].filter(Boolean).join(' ');
@@ -22,7 +22,7 @@ function prescore(job) {
   const isCore = CORE_DOMAIN_RE.test(title + ' ' + String(job && job.description || ''));
   const isQualMfg = QUALITY_MFG_RE.test(title);
 
-  if (isCore) s += 22;              // wafer/metrology/inspection/process — her core
+  if (isCore) s += 22;              // wafer/metrology/inspection/process target domain
   else if (isQualMfg) s += 12;      // quality/manufacturing/equipment — adjacent
   if (isMedical && isCore) s += 12; // medical-device + core = most relevant
   else if (isMedical && isQualMfg) s += 7;

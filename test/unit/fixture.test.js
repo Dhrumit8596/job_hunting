@@ -64,4 +64,13 @@ module.exports = (t) => {
   t.eq(checked.length, 1, 'checkboxgroup: exactly one option checked');
   t.eq(checked[0].id, 'yq_d', 'checkboxgroup: checks the "5+" option matched via label[for]');
   t.eq(w.pjaFindRequiredCheckboxGroups(doc).length, 0, 'checkboxgroup: satisfied group no longer reported');
+
+  // Multi-select answers retain every truthful match instead of clearing siblings.
+  const multi = doc.createElement('div');
+  multi.innerHTML = '<label><input type="checkbox" name="skills[]_a" value="SPC"></label>' +
+    '<label><input type="checkbox" name="skills[]_b" value="GMP"></label>';
+  doc.body.appendChild(multi);
+  const multiMembers = Array.from(multi.querySelectorAll('input'));
+  t.eq(w.pjaCheckMatchingBoxes(multiMembers, 'SPC, GMP'), 2, 'checkboxgroup: multi-select matches both options');
+  t.eq(multiMembers.filter(m => m.checked).length, 2, 'checkboxgroup: multi-select preserves both checks');
 };

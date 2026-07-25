@@ -3,6 +3,7 @@
 // external-apply.js. SYNTHETIC data only — no real PII. These lock in the branch
 // ORDERING bugs found during the live run (OPT-before-eligible, years-before-basic).
 const path = require('path');
+const fs = require('fs');
 const { loadContentScript } = require('./load.js');
 const w = loadContentScript(path.resolve(__dirname, '../../content/external-apply.js'));
 
@@ -17,9 +18,119 @@ const P = {
   ethnicity: '',
   veteran: 'I am not a protected veteran',
   disability: 'No, I do not have a disability',
+  referralSource: 'LinkedIn',
+  phoneCountryCode: 'United States of America (+1)',
 };
 
 module.exports = (t) => {
+  const externalSource = fs.readFileSync(path.resolve(__dirname, '../../content/external-apply.js'), 'utf8');
+  t.ok(externalSource.includes('google\\.com$/i.test(location.hostname)') &&
+    externalSource.includes('Gmail is used by the verification helper'),
+  'external apply: never runs on Google/Gmail tabs used by email verification');
+  t.ok(externalSource.includes('[email-code] cdp submit after code timed out; using DOM click fallback') &&
+    externalSource.includes('[email-code] submit after code did not confirm'),
+  'external apply: post-email-code submit click is bounded and records non-confirmation');
+  t.ok(externalSource.includes('capturePostClickDiagnostic') &&
+    externalSource.includes('CAPTURE_APPLY_DIAGNOSTIC') &&
+    externalSource.includes('pja_last_post_click_diagnostic_pending') &&
+    externalSource.includes('email_code_submit_unconfirmed') &&
+    externalSource.includes("branch: 'post_submit_code_gate'") &&
+    externalSource.includes('if (result.diagnostic) skipped.diagnostic = result.diagnostic') &&
+    externalSource.includes('diagnostic: collectPostClickPageSnapshot()'),
+  'external apply: email-code submit failures persist post-click URL/DOM diagnostics before deferral');
+  t.ok(externalSource.includes('committedReactSelectValue') &&
+    externalSource.includes('[class*="single-value"],[class*="singleValue"],[class*="multi-value"],[class*="multiValue"]') &&
+    externalSource.includes("role === 'combobox' ? committedReactSelectValue(el) : ''"),
+  'external-apply: asterisk-required scan skips already-committed React-select comboboxes');
+  t.ok(externalSource.includes('wd-phone-code-postfill') &&
+    externalSource.includes('input[data-uxi-widget-type="selectinput"], input[role="combobox"], input[required], input[aria-required="true"]') &&
+    externalSource.includes('wd-phone-code-prompts') &&
+    externalSource.includes('const wdSelectedText = root =>'),
+  'external-apply: Workday phone-code fallback runs after AI postfill and scans non-selectinput required controls');
+  t.ok(externalSource.includes('wdSelectedText = root =>') &&
+    externalSource.includes('[data-automation-id="selectedItemList"], [data-automation-id="selectedItem"], [data-automation-id="promptOption"]') &&
+    externalSource.includes('const selected = wdSelectedText(ms)'),
+  'external-apply: Workday selected-value checks accept selectedItem/promptOption-only DOMs');
+  t.ok(externalSource.includes('United States of America (+1)') &&
+    externalSource.includes('\\d+\\s*item selected') &&
+    externalSource.includes('phone.{0,30}(country|territory).{0,30}code|dial'),
+  'external-apply: Workday missing-required treats selected phone-code field text as filled');
+  t.ok(externalSource.includes('post-prompt step text refill done') &&
+    externalSource.includes('post-prompt text refill done') &&
+    externalSource.includes('Country/state prompt commits can trigger Workday to re-render and clear downstream address'),
+  'external-apply: Workday re-fills text fields after country/state prompt commits');
+  t.ok(externalSource.includes("const isPhoneById = /^(phone|phoneNumber)$/i") &&
+    externalSource.includes("el.name || ''"),
+  'external-apply: Workday retry phone fill recognizes name/id=phoneNumber even when surrounding label mentions phone code');
+  t.ok(externalSource.includes('recoverSmartRecruitersEmptyStep') &&
+    externalSource.includes('[SR] empty SPA step after advance; waiting for hydrated form') &&
+    externalSource.includes("reason: 'no_submit_after_spa', fields: ['smartrecruiters_empty_step']") &&
+    externalSource.includes("missingLabels.length === 1 && missingLabels[0] === '*'"),
+  'external-apply: SmartRecruiters empty SPA step is retried/classified, not reported as missing_required:*');
+  t.ok(externalSource.includes("if (isSmartRecruitersHost && missingLabels.length === 1 && missingLabels[0] === '*')") &&
+    externalSource.includes("fields: ['smartrecruiters_required_sentinel_no_controls']"),
+  'external-apply: SmartRecruiters required sentinel * is never reported as missing_required');
+  t.ok(externalSource.includes('observed: a lone "🔬" button') &&
+    externalSource.includes("if (/^[\\s🔬]+$/.test(txt)) return false") &&
+    externalSource.includes("! /next|continue|submit|apply|save|review|upload|attach|manual|done|finish/i.test(txt)".replace('! ', '!')),
+  'external-apply: SmartRecruiters decorative buttons do not count as hydrated application controls');
+  t.ok(externalSource.includes('recoverEmailVerificationCode') &&
+    externalSource.includes("type: 'OPEN_GMAIL_CODE_TAB'") &&
+    externalSource.includes('retrying submit after gmail code') &&
+    externalSource.includes("recordResult:email_verification_required:"),
+  'external-apply: Greenhouse/Ashby email security-code gates attempt Gmail recovery before deferral');
+  t.ok(externalSource.includes('const visibleValidationErrors = () =>') &&
+    externalSource.includes('explicitMissingErrors') &&
+    externalSource.includes('if (captchaWidgetVisible && !explicitMissingErrors)'),
+  'external-apply: explicit post-submit required-field errors win over generic captcha text');
+  t.ok(externalSource.includes("authResult === 'needs_navigation'") &&
+    externalSource.includes('auth requested navigation; waiting for reloaded apply page'),
+  'external-apply: Workday auth direct-navigation recovery waits for reload instead of recording auth failure');
+  t.ok(externalSource.includes('const isWorkdayHost = /workday\\.com|myworkdayjobs\\.com/i.test(location.hostname)') &&
+    externalSource.includes("const terminalHelpReason = reactSelectError && isWorkdayHost ? 'wd_selectinput_blocked' : 'submit_unclear'"),
+  'external-apply: non-Workday React-select submit errors are not mislabeled wd_selectinput_blocked');
+  t.ok(externalSource.includes('before auth starts') &&
+    externalSource.includes('pja_wd_pending_apply') &&
+    externalSource.includes('stale') &&
+    externalSource.indexOf('pja_wd_pending_apply') < externalSource.indexOf('const authResult = await window.pjaWorkdayAuth.run'),
+  'external-apply: Workday pending-apply context is written before Gmail verification starts');
+  t.ok(externalSource.includes('description entry → applyManually nav attempt=') &&
+    externalSource.includes("cleanUrl + '/apply/applyManually'") &&
+    externalSource.includes("pja_wd_desc_manual_nav_") &&
+    externalSource.includes('navs < 6') &&
+    externalSource.includes('location.replace(retryUrl)'),
+  'external-apply: Workday job-description pages with Apply controls navigate to applyManually before no_submit');
+  t.ok(externalSource.includes('const workdayComboKeyFor = f =>') &&
+    externalSource.includes("return 'phoneCountryCode'") &&
+    externalSource.includes("return 'referralSource'") &&
+    externalSource.includes('ai combobox skip phone code already US') &&
+    externalSource.includes('pjaFillCombobox(f.el, ans, key || undefined)'),
+  'external-apply: AI required-field combobox fills preserve Workday phone-code/referral keys');
+  t.ok(externalSource.includes('Greenhouse Remix react-select fields can show the selected text while Formik still has an') &&
+    externalSource.includes('const isGreenhouseReactSelect = /greenhouse\\.io/i.test(location.hostname)') &&
+    externalSource.includes('pjaForceReactSelectCommit(f.el, ans, { force: true })') &&
+    externalSource.includes('await applyComboboxAnswer(f, ans)') &&
+    externalSource.includes("await pjaForceReactSelectCommit(f.el, ans, { force: /greenhouse\\.io/i.test(location.hostname) })"),
+  'external-apply: AI-answered Greenhouse react-select custom questions use forced trusted commit and retry');
+  t.ok(externalSource.includes("chrome.storage.local.get(['pja_ext_current', 'pja_answers', 'pja_ext_queue', 'pja_ranked_apply']") &&
+    externalSource.includes('Many Greenhouse jobs share the same hostname') &&
+    externalSource.includes('urlKey(rankedJob.applyUrl) === urlKey(location.href)') &&
+    externalSource.includes('repaired stale ranked current from URL match') &&
+    externalSource.includes('pja_ext_queue: repairedQueue'),
+  'external-apply: ranked same-host ATS pages repair stale pja_ext_current by exact apply URL');
+  t.ok(externalSource.includes('const collectApplyDomSummary = () =>') &&
+    externalSource.includes('domSummary: collectApplyDomSummary()') &&
+    externalSource.includes('executeRecoveryActions(help, contextReason)') &&
+    externalSource.includes("retry_fill_phone','retry_fill_country','retry_fill_phone_country_code") &&
+    externalSource.includes("retry_greenhouse_react_selects','retry_smartrecruiters_custom_fields','retry_answer_required") &&
+    externalSource.includes('retrying submit once after LLM recovery'),
+  'external-apply: LLM recovery mode sends DOM context and executes only whitelisted bounded recovery actions');
+  t.ok(externalSource.includes("const recoveryKey = 'pja_recovery_missing_'") &&
+    externalSource.includes('missing_required cleared; re-entering submit path') &&
+    externalSource.includes("const recoveryKey = 'pja_recovery_submit_'") &&
+    externalSource.includes('postRetrySuccess'),
+  'external-apply: LLM recovery is single-shot per job for missing-required and submit-unclear paths');
+
   const a = (label) => w.pjaWorkdayAnswerForLabel(label.toLowerCase(), P);
 
   // --- ORDERING BUG #1: OPT/CPT must be checked before workAuth /eligible/ ---
@@ -43,6 +154,7 @@ module.exports = (t) => {
   // --- misc ---
   t.eq(a('Are you 18 years of age or older?'), 'Yes', '18+ -> Yes');
   t.eq(a('Are you currently or have you within the last 12 months worked at the company?'), 'No', 'worked-here -> No');
+  t.eq(a('How did you hear about us?'), 'LinkedIn', 'Workday source question -> referral source');
   t.eq(a('What is your favorite color?'), null, 'unknown question -> null');
 
   // --- sponsorship flips to Yes if profile requires it (synthetic) ---
@@ -103,6 +215,9 @@ module.exports = (t) => {
   t.eq(w.pjaDeterministicAnswer('Are you at least 18 years of age?'), 'Yes', 'det: 18+ -> Yes');
   t.eq(w.pjaProfileFieldForLabel('If yes, please enter visa type', { visaStatus: 'TN Visa' }), 'TN Visa', 'profile map: conditional visa type -> stored visa status');
   t.eq(w.pjaProfileFieldForLabel('How would you describe your gender identity?', { gender: 'Female' }), 'Female', 'profile map: gender identity -> stored gender');
+  t.eq(w.pjaProfileFieldForLabel('Country phone code*', P), 'United States of America (+1)', 'profile map: Workday country phone code -> stored phoneCountryCode');
+  t.eq(w.pjaProfileFieldForLabel('Country / Territory Phone Code', P), 'United States of America (+1)', 'profile map: Workday country/territory phone code -> stored phoneCountryCode');
+  t.eq(w.pjaProfileFieldForLabel('Were you referred by an internal employee?', P), null, 'profile map: internal referral is not referralSource');
   t.eq(w.pjaDeterministicAnswer('Are you able and willing to be on site 5 days per week?'), 'Yes', 'det: able and willing onsite -> Yes');
   t.eq(w.pjaDeterministicAnswer('Do you have any immediate family that works for HeartFlow?'), 'No', 'det: immediate family employed by company -> No');
   t.eq(w.pjaDeterministicAnswer('Have you ever been or are you currently debarred?'), 'No', 'det: debarment -> No');
@@ -126,8 +241,8 @@ module.exports = (t) => {
   t.eq(w.pjaDeterministicAnswer('I certify that the information provided is accurate.'), 'Yes', 'det: certify -> Yes');
   t.eq(w.pjaDeterministicAnswer('Please describe how many years of experience you have.'), null, 'det: open-ended not mis-caught as ack -> null');
 
-  // --- experience screening: honest Yes for her domains, No for documented gaps, null otherwise ---
-  t.eq(w.pjaDeterministicAnswer('Do you have hands-on experience with cleanroom environments?'), 'Yes', 'det: cleanroom experience -> Yes (her domain)');
+  // --- experience screening: honest Yes for configured domains, No for documented gaps, null otherwise ---
+  t.eq(w.pjaDeterministicAnswer('Do you have hands-on experience with cleanroom environments?'), 'Yes', 'det: cleanroom experience -> Yes (configured domain)');
   t.eq(w.pjaDeterministicAnswer('Do you have experience with wafer inspection and metrology?'), 'Yes', 'det: wafer/metrology -> Yes');
   t.eq(w.pjaDeterministicAnswer('Are you familiar with SPC and root cause analysis?'), 'Yes', 'det: SPC -> Yes');
   t.eq(w.pjaDeterministicAnswer('Do you have experience with FMEA?'), 'No', 'det: FMEA (gap) -> No');

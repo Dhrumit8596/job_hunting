@@ -510,38 +510,22 @@ select.pcw-input{cursor:pointer}
   let _autoJobs = [];
   let _extJobs  = [];
 
-  // TN-visa-aware targeting: the candidate (Canadian, TN) can only hold PROFESSIONAL roles
-  // (Engineer/Scientist + degree). Technician/operator/associate/supervisor/manager
-  // titles are NOT TN-eligible, so queries target "Engineer" roles aligned to her real
-  // strengths: wafer inspection, metrology, yield, process, defect — semiconductor, Bay Area.
-  // (Derived from pja_resume.targetTitles; keep in sync if that changes.)
+  // Generic starter searches. Users should tune these from Settings/shortlist sourcing for their
+  // own profile; these are intentionally not tied to any one person's work authorization/location.
   const PJA_SEARCH_QUERIES = [
-    'wafer inspection engineer Bay Area',
-    'metrology engineer semiconductor Bay Area',
-    'yield engineer semiconductor Bay Area',
-    'process engineer semiconductor Santa Clara',
-    'process integration engineer Bay Area',
-    'defect engineer semiconductor Bay Area',
-    'failure analysis engineer semiconductor Bay Area',
-    'thin film engineer Bay Area',
-    'photolithography engineer Bay Area',
-    'process engineer wafer fab San Jose',
-    'metrology engineer Fremont California',
-    'yield enhancement engineer Milpitas',
-    'quality engineer semiconductor Bay Area',
-    'process quality engineer semiconductor Bay Area',
-    'semiconductor manufacturing engineer Bay Area',
-    'reliability engineer semiconductor Bay Area',
-    'process engineer Sunnyvale California',
-    'CMP engineer semiconductor Bay Area',
-    'etch process engineer Bay Area',
-    'inspection engineer semiconductor Bay Area',
+    'quality engineer',
+    'manufacturing engineer',
+    'process engineer',
+    'test engineer',
+    'reliability engineer',
+    'supplier quality engineer',
+    'field service engineer',
   ];
 
   function buildSearchURL(query) {
     return 'https://www.linkedin.com/jobs/search/?keywords=' +
       encodeURIComponent(query) +
-      '&f_AL=true&location=San%20Francisco%20Bay%20Area&geoId=90000084&f_TPR=r2592000';
+      '&f_AL=true&f_TPR=r2592000';
   }
 
   function collectEasyApplyJobsFromPage(seenIds, appliedIds) {
@@ -1726,7 +1710,7 @@ select.pcw-input{cursor:pointer}
 
   <div class="pja-scroll">
     <!-- Always visible -->
-    <div class="pja-tn-banner">✓ Canadian Citizen · TN Visa · No Sponsorship Needed</div>
+    <div class="pja-tn-banner">Profile-based answers · Verify legal/work-authorization facts in Settings</div>
     <!-- Learning active indicator — persists across page navigation -->
     <div id="pja-learn-banner" class="pja-learn-banner" style="display:none">
       <span class="pja-learn-dot"></span> Learning active — keep filling forms normally
@@ -1842,7 +1826,7 @@ select.pcw-input{cursor:pointer}
       <!-- Auto-Apply section -->
       <div class="pja-section pja-auto-section">
         <div class="pja-section-label">🚀 Auto-Apply</div>
-        <div class="pja-auto-hint">Scans 7 searches · Bay Area · Easy Apply · collects all jobs then applies one by one</div>
+        <div class="pja-auto-hint">Scans saved searches · collects jobs · review before applying</div>
 
         <div id="pja-auto-idle">
           <button id="pja-auto-scan-btn" class="btn btn-outline btn-sm pja-auto-scan-btn">🔍 Scan All Searches</button>
@@ -1905,7 +1889,7 @@ select.pcw-input{cursor:pointer}
       <div id="pja-tmpl-body">
         <div id="pja-tmpl-list"><div class="pja-tmpl-empty">No templates yet. Save a message above or add one.</div></div>
         <div id="pja-tmpl-form" class="pja-tmpl-form" style="display:none">
-          <input id="pja-tmpl-name" class="pja-tmpl-input" placeholder="Template name (e.g. TN Visa intro)">
+          <input id="pja-tmpl-name" class="pja-tmpl-input" placeholder="Template name (e.g. recruiter intro)">
           <textarea id="pja-tmpl-text" class="pja-tmpl-textarea" rows="5" placeholder="Paste or type your message…"></textarea>
           <div style="display:flex;gap:6px;margin-top:6px;flex-wrap:wrap">
             <button id="pja-tmpl-capture" class="btn btn-outline btn-sm">📋 Paste selection</button>

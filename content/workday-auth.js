@@ -71,6 +71,15 @@ function dbg(msg) {
   });
 }
 
+function pjaWorkdayTenantEmail(email, hostname) {
+  const raw = String(email || '').trim();
+  const m = raw.match(/^([^@+]+)(?:\+[^@]*)?@(gmail\.com|googlemail\.com)$/i);
+  if (!m) return raw;
+  const host = String(hostname || '').toLowerCase().split('.')[0] || 'workday';
+  const slug = host.replace(/[^a-z0-9]+/g, '').replace(/wd\d+$/, '').slice(0, 24) || 'workday';
+  return `${m[1]}+wd-${slug}@${m[2].toLowerCase()}`;
+}
+
 // ── Screen detection ──────────────────────────────────────────────────────
 
 // Finds the "Sign in with email" / "Continue with email" button that some Workday
@@ -80,10 +89,12 @@ function findEmailSignInButton() {
   return Array.from(document.querySelectorAll('a,button,[role=button],[data-automation-id]')).find(el => {
     const aid = el.getAttribute('data-automation-id') || '';
     if (/signInWithEmail|emailSignIn/i.test(aid)) return true;
+    if (/^(utilityButtonSignIn|signInLink)$/i.test(aid)) return true;
     const t = (el.textContent || '').trim();
     if (!t || t.length > 40) return false;
     if (/apple|google|linkedin|facebook|microsoft/i.test(t)) return false;
-    return /sign.?in with email|continue with email|use email|sign.?in with your email/i.test(t);
+    return /^sign.?in$/i.test(t) ||
+      /sign.?in with email|continue with email|use email|sign.?in with your email/i.test(t);
   });
 }
 
@@ -91,13 +102,22 @@ function detectScreen() {
   const pwFields = document.querySelectorAll('input[type=password]');
   const emailField = document.querySelector('input[data-automation-id="email"], input[type=email]');
 
-  if (document.querySelector('[data-automation-id="legalNameSection_firstName"], [data-automation-id="bottomNavigationSubmit"]')) {
+  const bodyText = document.body?.innerText || '';
+  const authAction = document.querySelector(
+    '[data-automation-id="signInLink"], [data-automation-id="utilityButtonSignIn"], [data-automation-id="createAccountLink"]'
+  ) || findEmailSignInButton();
+  const socialAuthText = /sign.?in with (apple|google|linkedin|facebook|microsoft)|continue with (apple|google|linkedin|facebook|microsoft)/i.test(bodyText);
+  if (document.querySelector('[data-automation-id="legalNameSection_firstName"], [data-automation-id="bottomNavigationSubmit"]') ||
+      (pwFields.length === 0 && !document.querySelector('[data-automation-id="createAccountLink"]') &&
+       /current step\s+\d+\s+of\s+\d+/i.test(bodyText) && /back to job posting/i.test(bodyText) &&
+       !authAction && !socialAuthText &&
+       !/apply manually|autofill\s+with\s+resume/i.test(bodyText))) {
     return 'application_form';
   }
 
   if (
     document.querySelector('[data-automation-id="verifyEmailPage"], [data-automation-id="checkYourEmail"]') ||
-    /check your email|verification email sent|verify your email|verify your account|before you (can )?sign in|request a verification email|account is not.*verified|please verify/i.test(document.body?.innerText || '')
+    /check your email|verification email sent|verify your email|verify your account|before you (can )?sign in|request a verification email|account is not.*verified|please verify/i.test(bodyText)
   ) {
     return 'verify_pending';
   }
@@ -114,8 +134,8 @@ function detectScreen() {
     pwFields.length === 0 &&
     !document.querySelector('[data-automation-id="createAccountLink"]') &&
     !findEmailSignInButton() &&
-    document.body?.innerText &&
-    /sign.?in with google|continue with google/i.test(document.body.innerText)
+    bodyText &&
+    /sign.?in with google|continue with google/i.test(bodyText)
   ) {
     return 'sso_only';
   }
@@ -124,25 +144,12 @@ function detectScreen() {
   if (pwFields.length === 1) return 'signin';
   if (emailField && pwFields.length === 0) return 'signin_email_step';
 
-  // User is logged in — Workday auto-signed in after account creation, or already had a session.
-  // Candidate Home nav item only appears when authenticated.
-  // NOTE: some tenants use utilityButtonSignIn instead of signInLink — treat both as "not logged in".
-  const hasSignInBtn = document.querySelector(
-    '[data-automation-id="signInLink"], [data-automation-id="utilityButtonSignIn"], [data-automation-id="createAccountLink"]'
-  );
-  if (
-    document.querySelector('[data-automation-id="navigationItem-Candidate Home"]') ||
-    (document.querySelector('[data-automation-id="utilityMenuButton"]') && !hasSignInBtn)
-  ) {
-    return 'logged_in_home';
-  }
-
   // "Start Your Application" intermediary — Workday shows this before login when navigating
   // directly to an /apply URL. Must click "Apply Manually" to reach the actual auth form.
   if (document.querySelector('[data-automation-id="applyManually"]') ||
       (document.querySelector('[data-automation-id="autofillWithResume"]')) ||
-      (/apply\s+manually/i.test(document.body?.innerText || '') &&
-       /autofill\s+with\s+resume/i.test(document.body?.innerText || ''))) {
+      (/apply\s+manually/i.test(bodyText) &&
+       /autofill\s+with\s+resume/i.test(bodyText))) {
     return 'start_application';
   }
 
@@ -153,6 +160,21 @@ function detectScreen() {
       || Array.from(document.querySelectorAll('a[role=button], button, a')).some(el =>
            /^apply(\s|$)/i.test((el.textContent || '').trim()) && el.offsetParent !== null)) {
     return 'job_apply_start';
+  }
+
+  // User is logged in — Workday auto-signed in after account creation, or already had a session.
+  // Candidate Home nav item only appears when authenticated.
+  // NOTE: some tenants use utilityButtonSignIn instead of signInLink — treat both as "not logged in".
+  // Keep this AFTER job_apply_start: signed-in job postings also show Candidate Home, but they
+  // still need the primary Apply button clicked to enter /apply/applyManually.
+  const hasSignInBtn = document.querySelector(
+    '[data-automation-id="signInLink"], [data-automation-id="utilityButtonSignIn"], [data-automation-id="createAccountLink"]'
+  );
+  if (
+    document.querySelector('[data-automation-id="navigationItem-Candidate Home"]') ||
+    (document.querySelector('[data-automation-id="utilityMenuButton"]') && !hasSignInBtn)
+  ) {
+    return 'logged_in_home';
   }
 
   return 'unknown';
@@ -373,7 +395,7 @@ async function runCreateAccount(profile, password) {
     return 'error';
   }
 
-  if (screen === 'signin' || screen === 'signin_email_step') {
+  if (screen === 'signin' || screen === 'signin_email_step' || screen === 'email_button_step') {
     dbg('account created, now on signin screen — signing in');
     return await runSignIn(profile, password);
   }
@@ -401,7 +423,7 @@ async function runCreateAccount(profile, password) {
       await setAccount(hostname, { status: 'verification_failed' });
       return 'error';
     }
-    if (s2 === 'signin' || s2 === 'signin_email_step') {
+    if (s2 === 'signin' || s2 === 'signin_email_step' || s2 === 'email_button_step') {
       dbg('delayed signin screen — signing in');
       return await runSignIn(profile, password);
     }
@@ -471,7 +493,7 @@ async function runSignIn(profile, password) {
     return 'locked';
   }
 
-  await setAccount(hostname, { notes: poll.error });
+  await setAccount(hostname, { status: 'sign_in_error', notes: poll.error });
   return 'sign_in_error';
 }
 
@@ -509,7 +531,7 @@ async function runForgotPassword(profile, password) {
   await new Promise(r =>
     chrome.runtime.sendMessage({
       type: 'WORKDAY_TRUSTED_CLICK',
-      sel: '[data-automation-id="resetPasswordSubmitButton"], button[type=submit]'
+      selector: '[data-automation-id="resetPasswordSubmitButton"], button[type=submit]'
     }, r)
   );
 
@@ -534,8 +556,43 @@ async function runForgotPassword(profile, password) {
 
 // ── Main entry point ──────────────────────────────────────────────────────
 
+async function trustedWorkdayClick(el, label) {
+  if (!el) return false;
+  const priorId = el.id;
+  const tempId = priorId || ('__pja_wd_auth_click_' + Date.now() + '_' + Math.random().toString(36).slice(2, 7));
+  if (!priorId) el.id = tempId;
+  try {
+    el.scrollIntoView({ block: 'center', behavior: 'instant' });
+    const selector = '#' + ((window.CSS && CSS.escape) ? CSS.escape(tempId) : tempId);
+    const resp = await new Promise(resolve => {
+      try {
+        chrome.runtime.sendMessage({ type: 'WORKDAY_TRUSTED_CLICK', selector, single: true }, r =>
+          resolve(chrome.runtime.lastError ? { ok: false, error: chrome.runtime.lastError.message } : (r || {})));
+      } catch (e) {
+        resolve({ ok: false, error: e.message });
+      }
+    });
+    dbg('trusted click ' + (label || '') + ' ok=' + !!resp.ok + (resp.error ? ' err=' + String(resp.error).slice(0, 60) : ''));
+    return !!resp.ok;
+  } finally {
+    if (!priorId && el.id === tempId) el.removeAttribute('id');
+  }
+}
+
+function manualApplyUrlFromCurrent() {
+  const cleanUrl = String(location.href || '').replace(/[?#].*$/, '').replace(/\/+$/, '');
+  if (/\/apply(?:\/|$)/i.test(cleanUrl)) return cleanUrl;
+  return cleanUrl + '/apply/applyManually';
+}
+
 async function run(profile, password) {
   const hostname = location.hostname;
+  profile = profile || {};
+  const tenantEmail = pjaWorkdayTenantEmail(profile.email, hostname);
+  if (tenantEmail && tenantEmail !== profile.email) {
+    dbg('using tenant-specific email alias ' + tenantEmail + ' for ' + hostname);
+    profile = { ...profile, email: tenantEmail };
+  }
 
   await migrateOldCreds(hostname);
 
@@ -570,7 +627,7 @@ async function run(profile, password) {
       dbg('email_button_step: .click() no change, trying trusted click');
       await new Promise(r => chrome.runtime.sendMessage({
         type: 'WORKDAY_TRUSTED_CLICK',
-        sel: '[data-automation-id="signInWithEmail"], [data-automation-id*="emailSignIn"]'
+        selector: '[data-automation-id="signInWithEmail"], [data-automation-id*="emailSignIn"]'
       }, r));
       waited = 0;
       while (waited < 6000) {
@@ -589,7 +646,7 @@ async function run(profile, password) {
       || Array.from(document.querySelectorAll('a,button')).find(el => /apply\s+manually/i.test(el.textContent.trim()));
     if (applyManuallyBtn) {
       dbg('start_application: clicking applyManually');
-      applyManuallyBtn.click();
+      if (!await trustedWorkdayClick(applyManuallyBtn, 'applyManually')) applyManuallyBtn.click();
       // Poll for screen to change (up to 10s)
       let waited = 0;
       while (waited < 10000) {
@@ -604,6 +661,12 @@ async function run(profile, password) {
       }
       dbg('start_application: screen did not change after 10s');
     }
+    const nextUrl = manualApplyUrlFromCurrent();
+    if (location.href !== nextUrl) {
+      dbg('start_application: direct nav fallback to applyManually');
+      location.assign(nextUrl);
+      return 'needs_navigation';
+    }
     return 'unknown_screen';
   }
 
@@ -616,14 +679,23 @@ async function run(profile, password) {
       || Array.from(document.querySelectorAll('a[role=button], button, a')).find(el => /^apply(\s|$)/i.test((el.textContent || '').trim()) && el.offsetParent !== null);
     if (applyBtn) {
       dbg('job_apply_start: clicking Apply');
-      applyBtn.click();
+      if (!await trustedWorkdayClick(applyBtn, 'jobApplyStart')) applyBtn.click();
       let waited = 0;
-      while (waited < 12000) {
+      while (waited < 1600) {
         await sleep(400); waited += 400;
         const s2 = detectScreen();
         if (s2 !== 'job_apply_start') { dbg('job_apply_start → ' + s2 + ' after ' + waited + 'ms'); return run(profile, password); }
       }
       dbg('job_apply_start: no change after Apply click');
+    }
+    const directKey = 'pja_wd_auth_direct_apply_' + hostname + '_' + location.pathname.replace(/[^\w-]+/g, '_').slice(-80);
+    const directCount = parseInt(sessionStorage.getItem(directKey) || '0', 10);
+    if (directCount < 3) {
+      sessionStorage.setItem(directKey, String(directCount + 1));
+      const nextUrl = manualApplyUrlFromCurrent();
+      dbg('job_apply_start: direct nav fallback attempt ' + (directCount + 1) + ' to ' + nextUrl.slice(-80));
+      location.assign(nextUrl);
+      return 'needs_navigation';
     }
     return 'unknown_screen';
   }
@@ -658,7 +730,7 @@ async function run(profile, password) {
   // Stale/failed account — clear it and start fresh
   // pending_creation older than 3 min = something went wrong mid-create
   const pendingCreationStale = existing?.status === 'pending_creation' && Date.now() - existing.createdAt > 180000;
-  if (existing && (['creation_failed', 'reset_failed', 'verification_failed'].includes(existing.status) || pendingCreationStale)) {
+  if (existing && (['creation_failed', 'reset_failed', 'verification_failed', 'sign_in_error', 'reset_limit'].includes(existing.status) || pendingCreationStale)) {
     dbg('clearing stale account status=' + existing.status);
     await deleteAccount(hostname);
     // fall through to create-account path below
@@ -670,19 +742,48 @@ async function run(profile, password) {
       await setAccount(hostname, { status: 'verified', verifiedAt: Date.now(), lastSignInAt: Date.now() });
       return 'account_created_verified';
     }
+    if (s === 'email_button_step' || s === 'signin' || s === 'signin_email_step') {
+      const signInResult = await runSignIn(profile, password);
+      if (signInResult === 'sign_in_error') {
+        dbg('pending_creation sign-in failed — attempting Gmail verification before failing');
+        await setAccount(hostname, { email: profile.email, password, status: 'pending_verification',
+          createdAt: existing.createdAt || Date.now() });
+        const verified = await runGmailVerify(profile.email, 'verify', hostname);
+        if (verified) {
+          await setAccount(hostname, { status: 'verified', verifiedAt: Date.now(), failedAttempts: 0 });
+          return 'needs_gmail_verify';
+        }
+      }
+      return signInResult;
+    }
     // Unknown/transitional — let it proceed to create or sign in
     await deleteAccount(hostname);
   } else if (existing && ['verified', 'exists_try_signin', 'needs_signin'].includes(existing.status)) {
-    // Prefer the STORED account email whenever one exists — the record is a known-good
-    // account for THIS tenant. A queue may carry a different (e.g. plus-addressed) email;
-    // signing in with it against a tenant that already has a bare-email account fails with
-    // "wrong email address or password" → sign_in_error (the KLA/Hyve/Lyten skip bug).
-    const effectiveProfile = (existing.email && existing.email !== profile.email)
-      ? { ...profile, email: existing.email } : profile;
+    // E2E mode requires a tenant-specific Workday account. Older runs may have stored the base
+    // Gmail address for this tenant; do not let that stale record override the current alias.
     if (existing.email && existing.email !== profile.email) {
-      dbg('using stored account email ' + existing.email + ' over queue email ' + (profile.email || 'none'));
+      dbg('stored account email ' + existing.email + ' does not match tenant alias ' + (profile.email || 'none') + ' — clearing and retrying create path');
+      await deleteAccount(hostname);
+      if (sessionStorage.getItem('pja_wd_auth_alias_retry_' + hostname) !== '1') {
+        sessionStorage.setItem('pja_wd_auth_alias_retry_' + hostname, '1');
+        return await run(profile, password);
+      }
     }
-    return await runSignIn(effectiveProfile, existing.password || password);
+    const effectiveProfile = profile;
+    if (existing.email && existing.email !== profile.email) {
+      dbg('continuing with tenant alias after stale stored-account cleanup');
+    }
+    const signInResult = await runSignIn(effectiveProfile, existing.password || password);
+    if (signInResult === 'sign_in_error') {
+      dbg('stored account sign-in failed — clearing account and retrying create path once');
+      await deleteAccount(hostname);
+      if (sessionStorage.getItem('pja_wd_auth_create_retry_' + hostname) !== '1') {
+        sessionStorage.setItem('pja_wd_auth_create_retry_' + hostname, '1');
+        return await run(profile, password);
+      }
+      return 'error';
+    }
+    return signInResult;
   } else if (existing && existing.status === 'pending_verification') {
     dbg('pending verification — resuming Gmail flow');
     const verified = await runGmailVerify(profile.email, 'verify', hostname);
@@ -723,6 +824,6 @@ async function run(profile, password) {
   return await runCreateAccount(profile, password);
 }
 
-window.pjaWorkdayAuth = { run };
+window.pjaWorkdayAuth = { run, pjaWorkdayTenantEmail, _detectScreen: detectScreen };
 console.log('PJA: workday-auth.js loaded on', location.hostname);
 })();

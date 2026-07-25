@@ -3,7 +3,7 @@
 const path = require('path');
 require(path.resolve(__dirname, '../../sourcing/detect-ats'));
 const { buildApplySet, resultToState, poolStatus, roleKey, greenhouseEmbedFallback, exceededBudget,
-  watchdogDecision, queueJobKey } = require(path.resolve(__dirname, '../../sourcing/apply-select'));
+  watchdogDecision, queueJobKey, unsupportedAutonomousApplyReason } = require(path.resolve(__dirname, '../../sourcing/apply-select'));
 
 function corpus(entries) {
   const index = {}, state = {};
@@ -113,14 +113,37 @@ module.exports = (t) => {
   t.ok(allow.length >= 1, 'atsAllow still returns greenhouse jobs');
   t.eq(buildApplySet(c, { threshold: 70, atsAllow: ['workday'] }).some(j => j.strategy !== 'workday'), false, 'atsAllow=[workday] excludes all non-workday');
 
+  // Known non-application routes observed in live E2E are filtered before autonomous launch.
+  t.eq(unsupportedAutonomousApplyReason('https://ro.careers.tsmc.com/talentcommunity/apply/1213393266/?locale=en_US', 'successfactors'),
+    'unsupported_successfactors_talentcommunity', 'unsupported: SuccessFactors Talent Community lead-capture route');
+  t.eq(unsupportedAutonomousApplyReason('https://jobicy.com/jobs/146657-associate-application-engineer', 'jobicy'),
+    'unsupported_jobicy_no_inline_form', 'unsupported: Jobicy hash-popup/no-inline-form route');
+  t.eq(unsupportedAutonomousApplyReason('https://careers.gf.com/careers/apply?pid=563980769981826', 'eightfold'),
+    'unsupported_eightfold_portal_auth', 'unsupported: Eightfold/GF auth portal route');
+  const unsupportedCorpus = corpus([
+    { id: 'sf:bad', company: 'TSMC', title: 'Engineer', applyUrl: 'https://ro.careers.tsmc.com/talentcommunity/apply/1213393266/?locale=en_US', fit: 90, ats: 'successfactors' },
+    { id: 'jobicy:bad', company: 'Spirax', title: 'Engineer', applyUrl: 'https://jobicy.com/jobs/146657-associate-application-engineer', fit: 90, ats: 'jobicy' },
+    { id: 'gf:bad', company: 'GlobalFoundries', title: 'Engineer', applyUrl: 'https://careers.gf.com/careers/apply?pid=563980769981826', fit: 90, ats: 'eightfold' },
+    { id: 'lever:ok', company: 'Cellares', title: 'Engineer', applyUrl: 'https://jobs.lever.co/cellares/abc/apply', fit: 90, ats: 'lever' },
+  ]);
+  t.eq(buildApplySet(unsupportedCorpus, { threshold: 70, dailyCap: 10, perCompanyCap: 0 }).map(j => j.id), ['lever:ok'],
+    'buildApplySet excludes unsupported autonomous apply routes but keeps valid ATS jobs');
+
   // --- resultToState ---
   t.eq(resultToState('applied', 0).status, 'applied', 'applied → applied');
+  t.eq(resultToState('already_applied', 0).status, 'applied', 'already_applied → applied');
   t.eq(resultToState('posting_not_found', 0).status, 'dead', 'posting_not_found → dead');
   t.eq(resultToState('needs_login', 0).status, 'needs_login', 'needs_login → needs_login');
   t.eq(resultToState('workday_captcha', 0).status, 'needs_manual', 'captcha → needs_manual (never solved)');
   t.eq(resultToState('stuck_budget', 0).status, 'needs_manual', 'stuck_budget → needs_manual (unbounded stall deferred)');
+  t.eq(resultToState('no_submit_btn', 0).status, 'needs_manual', 'no submit button → immediate manual deferral');
+  t.eq(resultToState('no_apply_btn_on_description', 0).status, 'needs_manual', 'no apply path → immediate manual deferral');
+  t.eq(resultToState('no_apply_path', 0).status, 'needs_manual', 'invalid/stale apply path → immediate manual deferral');
+  t.eq(resultToState('wd_selectinput_blocked', 0).status, 'needs_manual', 'Workday selectinput blocker → manual deferral');
+  t.eq(resultToState('workday_auth_sign_in_error', 0).status, 'needs_manual', 'Workday auth error → manual deferral');
   t.eq(resultToState('missing_required', 0).status, 'sourced', 'transient first fail → stays sourced (retry)');
   t.eq(resultToState('missing_required', 0).retry, true, 'transient marks retry');
+  t.eq(resultToState('missing_required', 0, 1).status, 'needs_manual', 'E2E-safe maxAttempts=1 defers transient first fail');
   t.eq(resultToState('missing_required', 2, 3).status, 'needs_manual', 'transient at maxAttempts → needs_manual');
   t.eq(resultToState('submit_unclear', 1, 3).attempts, 2, 'attempts increments');
 

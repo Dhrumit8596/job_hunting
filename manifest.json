@@ -1,9 +1,17 @@
 {
   "manifest_version": 3,
   "name": "Job Application Assistant",
-  "version": "1.0.0",
+  "version": "1.0.6",
   "description": "AI-powered job search assistant for semiconductor/medtech roles",
-  "permissions": ["storage", "alarms", "scripting", "activeTab", "tabs", "debugger", "notifications"],
+  "permissions": [
+    "storage",
+    "alarms",
+    "scripting",
+    "activeTab",
+    "tabs",
+    "debugger",
+    "notifications"
+  ],
   "host_permissions": [
     "*://*.linkedin.com/*",
     "*://*.linkedin.com/in/*",
@@ -55,6 +63,7 @@
         "*://*.smashfly.com/*",
         "*://*/careers/*",
         "*://*/careers*",
+        "*://*/talentcommunity/*",
         "*://*/jobs/*",
         "*://*/job-details/*",
         "*://*/job/*",
@@ -86,8 +95,17 @@
       "all_frames": false
     },
     {
-      "matches": ["<all_urls>"],
-      "js": ["sourcing/detect-ats.js", "sourcing/apply-select.js", "content/apply-router.js", "content/apply-account.js", "content/external-apply.js", "content/indeed-apply.js"],
+      "matches": [
+        "<all_urls>"
+      ],
+      "js": [
+        "sourcing/detect-ats.js",
+        "sourcing/apply-select.js",
+        "content/apply-router.js",
+        "content/apply-account.js",
+        "content/external-apply.js",
+        "content/indeed-apply.js"
+      ],
       "run_at": "document_idle",
       "all_frames": false,
       "exclude_matches": [
@@ -101,8 +119,12 @@
       ]
     },
     {
-      "matches": ["<all_urls>"],
-      "js": ["content/fiber-main.js"],
+      "matches": [
+        "<all_urls>"
+      ],
+      "js": [
+        "content/fiber-main.js"
+      ],
       "world": "MAIN",
       "run_at": "document_start",
       "all_frames": false,
@@ -125,7 +147,8 @@
         "*://*.workday.com/*",
         "*://*.jobvite.com/*",
         "*://*.smartrecruiters.com/*",
-        "*://*.bamboohr.com/*"
+        "*://*.bamboohr.com/*",
+        "*://*/talentcommunity/*"
       ],
       "js": [
         "sourcing/detect-ats.js",
@@ -149,7 +172,9 @@
         "*://*.icims.com/*",
         "*://*.myworkdayjobs.com/*"
       ],
-      "js": ["content/fiber-main.js"],
+      "js": [
+        "content/fiber-main.js"
+      ],
       "world": "MAIN",
       "run_at": "document_start",
       "all_frames": true
@@ -172,8 +197,14 @@
   },
   "web_accessible_resources": [
     {
-      "resources": ["icons/*.png", "test/*.html", "shortlist/shortlist.html"],
-      "matches": ["<all_urls>"]
+      "resources": [
+        "icons/*.png",
+        "test/*.html",
+        "shortlist/shortlist.html"
+      ],
+      "matches": [
+        "<all_urls>"
+      ]
     }
   ]
 }

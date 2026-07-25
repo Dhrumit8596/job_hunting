@@ -5,8 +5,10 @@ const modeToggle = document.getElementById('app-mode-toggle');
 const modeStatus = document.getElementById('app-mode-status');
 
 chrome.storage.local.get('appMode', r => {
-  modeToggle.checked = !!r.appMode;
-  updateModeStatus(!!r.appMode);
+  const enabled = r.appMode !== false;
+  modeToggle.checked = enabled;
+  updateModeStatus(enabled);
+  if (r.appMode === undefined) chrome.storage.local.set({ appMode: true });
 });
 
 modeToggle.addEventListener('change', () => {
@@ -23,16 +25,14 @@ function updateModeStatus(on) {
 
 // ── Application Profile ───────────────────────────────────────────────────────
 const PROFILE_DEFAULTS = {
-  salutation: 'Mrs', firstName: 'the candidate', middleName: '',
-  lastName: '', fullName: 'the candidate',
+  salutation: '', firstName: '', middleName: '',
+  lastName: '', fullName: '',
   email: '', phone: '', linkedin: '', website: '',
   address: '', address2: '',
-  city: 'Santa Clara', state: 'CA', zip: '', country: 'United States',
-  currentTitle: 'Senior Inspection Metrology Technician',
-  currentCompany: 'a medical-device employer',
-  yearsExperience: '6', university: '', degree: '', major: '', graduationYear: '',
-  salaryExpectation: '', workAuth: 'Yes', requireSponsorship: 'No',
-  visaStatus: 'TN Visa', willingToRelocate: 'Yes', referralSource: 'LinkedIn',
+  city: '', state: '', zip: '', country: 'United States',
+  currentTitle: '', currentCompany: '', yearsExperience: '', university: '', degree: '', major: '', graduationYear: '',
+  salaryExpectation: '', workAuth: '', requireSponsorship: '',
+  visaStatus: '', willingToRelocate: '', referralSource: '',
   gender: '', ethnicity: '', veteran: '', disability: ''
 };
 
@@ -40,7 +40,7 @@ const PROFILE_FIELDS = [
   'salutation','firstName','middleName','lastName','email','phone','linkedin','website',
   'address','address2','city','state','zip','country',
   'currentTitle','currentCompany','yearsExperience','salaryExpectation',
-  'university','degree','major','graduationYear',
+  'university','degree','major','graduationYear','educationStartMonth','educationStartYear','educationEndMonth','educationEndYear',
   'workAuth','requireSponsorship','visaStatus','willingToRelocate','referralSource'
 ];
 
@@ -52,7 +52,22 @@ chrome.storage.local.get('pja_profile', r => {
     if (el && profile[key] != null) el.value = profile[key];
   });
   showMissingProfileWarning(profile);
+  renderAnalysisProfile(profile);
 });
+
+function renderAnalysisProfile(profile) {
+  const el = document.getElementById('analysis-profile-summary');
+  if (!el) return;
+  const esc = value => String(value || '').replace(/[&<>"']/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));
+  const rows = [
+    ['Name', profile.fullName || [profile.firstName, profile.lastName].filter(Boolean).join(' ')],
+    ['Current role', [profile.currentTitle, profile.currentCompany].filter(Boolean).join(' at ')],
+    ['Location', [profile.city, profile.state, profile.country].filter(Boolean).join(', ')],
+    ['Education', [profile.degree, profile.major, profile.university].filter(Boolean).join(' — ')],
+    ['Work authorization', profile.workAuth ? `${profile.workAuth}${profile.requireSponsorship ? `; sponsorship: ${profile.requireSponsorship}` : ''}` : 'Not configured']
+  ];
+  el.innerHTML = rows.map(([label, value]) => `<div class="profile-item"><div class="profile-key">${esc(label)}</div><div class="profile-val">${esc(value || 'Not configured')}</div></div>`).join('');
+}
 
 function showMissingProfileWarning(profile) {
   const missing = [];

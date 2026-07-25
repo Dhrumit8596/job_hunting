@@ -47,6 +47,74 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
 module.exports = async (t) => {
   const w = load();
   t.ok(typeof w.pjaFillCombobox === 'function', 'combobox: pjaFillCombobox exported');
+  const autofillSource = fs.readFileSync(path.resolve(ROOT, 'content/autofill.js'), 'utf8');
+  const fiberSource = fs.readFileSync(path.resolve(ROOT, 'content/fiber-main.js'), 'utf8');
+  t.ok(autofillSource.includes("eduKind === 'school'") &&
+    autofillSource.includes("pjaForceReactSelectCommit(inp, 'Other'") &&
+    autofillSource.includes('school fallback committed Other'),
+  'combobox: Greenhouse required school fields fall back to Other when profile university is absent from options');
+  t.ok(fiberSource.includes('Single-option acknowledgements') &&
+    fiberSource.includes('if (opts.length === 1) return opts[0]'),
+  'combobox: fiber react-select bridge maps I-agree answers to one-option acknowledgements');
+  t.ok(autofillSource.includes("pjaQueryAll('spl-select[required], spl-select.ng-invalid, spl-select')") &&
+    autofillSource.includes("country/region'") &&
+    autofillSource.includes("root.querySelectorAll('spl-select-option, [role=\"option\""),
+  'combobox: SmartRecruiters fills country/region spl-selects and scans shadow spl-select-option city choices');
+  t.ok(autofillSource.includes("host.setAttribute('value', selectedText)") &&
+    autofillSource.includes("new CustomEvent('selectionChange'") &&
+    autofillSource.includes("detail: { value: selectedText, label: selectedText }"),
+  'combobox: SmartRecruiters spl-select falls back to host value/selectionChange after trusted click');
+  t.ok(autofillSource.includes('phoneCountryCode already committed US; skip reopen') &&
+    autofillSource.includes("const shouldPressEnter = key === 'referralSource'") &&
+    autofillSource.includes('observed: Albania +355'),
+  'combobox: Workday phone-code does not press Enter after scheduling the exact US option click');
+  t.ok(autofillSource.includes("const filterValue = key === 'phoneCountryCode' ? 'United States'") &&
+    autofillSource.includes("if (key === 'phoneCountryCode' || key === 'referralSource') return workdaySelectionCommitted()"),
+  'combobox: Workday phone-code requires verified United States +1 commit, not just a scheduled click');
+  t.ok(autofillSource.includes('phoneCountryCode selected chip US; skip reopen') &&
+    autofillSource.includes('[data-automation-id="selectedItemList"], [data-automation-id="selectedItem"], [data-automation-id="promptOption"]'),
+  'combobox: Workday phone-code is not reopened once the selected chip shows United States +1');
+  t.ok(autofillSource.includes("closest('[data-automation-id^=\"formField-\"]')") &&
+    autofillSource.includes('country\\s*\\/\\s*territory phone code') &&
+    autofillSource.includes('pjaFillForm skip phone code selected chip already US') &&
+    autofillSource.includes("if (isPhoneCodeField) wdForcedKey = 'phoneCountryCode'") &&
+    autofillSource.includes('const key = wdForcedKey || pjaClassify(rawLabel)'),
+  'combobox: Workday formField labels preserve phone-code identity and pjaFillForm force-routes phone-code fields');
+  t.ok(autofillSource.includes('Do not also handle it through prompt buttons') &&
+    autofillSource.includes('can commit the first row (Albania)'),
+  'combobox: Workday prompt-button fallback does not reopen phone-code and commit first-row Albania');
+  t.ok(autofillSource.includes('[data-automation-id="selectedItemList"], [data-automation-id="selectedItem"], [data-automation-id="promptOption"]'),
+  'combobox: Workday phone-code committed detection accepts selectedItem/promptOption-only DOMs');
+  t.ok(autofillSource.includes("selectedList?.matches?.('[data-automation-id=\"selectedItem\"") &&
+    autofillSource.includes("key: 'Backspace', code: 'Backspace'"),
+  'combobox: Workday phone-code clears selectedItem-only wrong country-code chips before retrying');
+  t.ok(autofillSource.includes('[role="option"], [data-automation-id="promptOption"], [data-automation-id="selectedItem"]'),
+  'combobox: Workday prompt option discovery includes promptOption/selectedItem nodes without ARIA roles');
+  t.ok(autofillSource.includes("list.querySelectorAll('[role=\"option\"], [data-automation-id=\"promptOption\"]')"),
+  'combobox: Workday prompt-button filler scans promptOption rows without ARIA role');
+  t.ok(autofillSource.includes('country: 1, state: 2') &&
+    autofillSource.includes('country must precede state') &&
+    autofillSource.includes('[WD] prompt no commit key='),
+  'combobox: Workday prompt-button filler commits country before state and verifies selected button text');
+  t.ok(autofillSource.includes("key === 'phoneCountryCode' || key === 'referralSource'") &&
+    autofillSource.includes('selected chip before resolving'),
+  'combobox: Workday referral-source requires a committed selected chip, not just a scheduled click');
+  t.ok(autofillSource.includes("key === 'referralSource' && /workday-fail|synthetic|fail/i") &&
+    autofillSource.includes("'+cdp-' + fallback"),
+  'combobox: Workday referral-source falls back to CDP option click after trusted click failure');
+  t.ok(autofillSource.includes("key === 'country'") &&
+    autofillSource.includes("t === 'united states of america' || t === 'united states'") &&
+    autofillSource.includes("key !== 'country' && lv.length > 3"),
+  'combobox: country selection uses exact United States matching, not substring matching');
+  t.ok(autofillSource.includes('phone device type|phone type|phone extension') &&
+    autofillSource.includes('^phoneNumber$') &&
+    autofillSource.includes("inp.getAttribute('data-uxi-widget-type') === 'selectinput'") &&
+    autofillSource.includes("inp.getAttribute('role') === 'combobox'"),
+  'combobox: forced phone-number typing excludes Workday phone-code/type combobox controls');
+  t.ok(autofillSource.includes('Even when DOM digits are visible, React/Greenhouse can keep the validated field state empty') &&
+    autofillSource.includes("pjaFillTextViaFiber(inp, digits, true)") &&
+    autofillSource.includes("new InputEvent('beforeinput'"),
+  'combobox: Greenhouse phone force-fill updates React/native state even when digits are visible');
 
   // sponsorship = No -> selects the will-NOT-require option (not the require one)
   const c1 = makeCombobox(w, 'spons', ['Yes, I will require sponsorship', 'No, I will not require sponsorship']);

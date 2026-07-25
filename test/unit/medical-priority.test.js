@@ -1,11 +1,11 @@
 'use strict';
-// medicalWaferBoost: ranks the candidate's core domain (wafer/metrology/inspection/quality/process)
+// medicalWaferBoost: ranks a configured core domain (wafer/metrology/inspection/quality/process)
 // at MEDICAL-DEVICE companies highest (medical-device domain relevance), without touching off-domain
 // or non-medical scores. SYNTHETIC data only.
 const { medicalWaferBoost } = require('../../sourcing/filter');
 
 module.exports = (t) => {
-  // medical-device + her CORE domain → +12
+  // medical-device + configured CORE domain → +12
   t.eq(medicalWaferBoost('Wafer Inspection Engineer', 'Medtronic', 'medical device metrology + defect detection', 80), 92,
     'medical: wafer-inspection at a medical-device co gets the full +12');
   t.eq(medicalWaferBoost('Metrology Engineer', 'BioPoint Diagnostics', 'in-vitro diagnostics, cleanroom', 78), 90,

@@ -211,6 +211,31 @@ function mergeLedgers(...ledgers) {
   return merged;
 }
 
+function compactLedger(ledger, options = {}) {
+  const source = ledger && ledger.events && typeof ledger.events === 'object' ? ledger : emptyLedger();
+  const activeRunId = options.runId == null ? null : String(options.runId);
+  const maxRunEvents = Math.max(0, Number.isFinite(Number(options.maxRunEvents)) ? Number(options.maxRunEvents) : 160);
+  const maxOtherEvents = Math.max(0, Number.isFinite(Number(options.maxOtherEvents)) ? Number(options.maxOtherEvents) : 80);
+  const events = Object.values(source.events).map(normalizeEvent).filter(Boolean);
+  const keep = new Map();
+  const put = event => { keep.set(event.eventId, event); };
+  for (const event of events) {
+    if (confirmationKinds(event).length) put(event);
+  }
+  const byRecent = events.slice().sort((a, b) => (b.occurredAt || 0) - (a.occurredAt || 0) || b.eventId.localeCompare(a.eventId));
+  let runKept = 0, otherKept = 0;
+  for (const event of byRecent) {
+    if (activeRunId && event.runId === activeRunId) {
+      if (runKept < maxRunEvents) { put(event); runKept++; }
+    } else if (otherKept < maxOtherEvents) {
+      put(event); otherKept++;
+    }
+  }
+  return { schemaVersion: SCHEMA_VERSION, events: Object.fromEntries(Array.from(keep.values())
+    .sort((a, b) => (a.occurredAt || 0) - (b.occurredAt || 0) || a.eventId.localeCompare(b.eventId))
+    .map(event => [event.eventId, event])) };
+}
+
 function dayKey(timestamp, timeZone) {
   const date = new Date(timestamp);
   if (!Number.isFinite(date.getTime())) return '';
@@ -504,6 +529,7 @@ const PJA_APPLICATION_LEDGER_API = {
   normalizeEvent,
   reduceLedger,
   mergeLedgers,
+  compactLedger,
   auditLedger,
   reconcileEmails,
   isConfirmationEmail,

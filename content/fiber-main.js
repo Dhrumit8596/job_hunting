@@ -104,6 +104,7 @@
     var lv = String(optionLabel).toLowerCase().trim();
     var key = String(detail.key || '');
     function lbl(o) { return String(o.label !== undefined ? o.label : (o.value !== undefined ? o.value : '')).toLowerCase().trim(); }
+    function compact(s) { return String(s || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim(); }
     function pickOpt(opts) {
       // 1. exact label / value
       var o = opts.find(function(o) { return lbl(o) === lv; });
@@ -116,9 +117,69 @@
       // 3. honest-policy keys
       if (key === 'requireSponsorship' && /^no\b/.test(lv)) { o = opts.find(function(o){ return /not required|will not require|^no\b/.test(lbl(o)); }); if (o) return o; }
       if (key === 'workAuth' && /^yes\b/.test(lv)) { o = opts.find(function(o){ return /authorized/.test(lbl(o)) && !/not authorized/.test(lbl(o)); }); if (o) return o; }
+      if (key === 'visaStatus') {
+        var visaPats = [/^tn$/, /^tn visa$/, /^other$/, /^not applicable$/, /^n\/a$/];
+        for (var vi = 0; vi < visaPats.length; vi++) {
+          o = opts.find(function(o){ return visaPats[vi].test(lbl(o)); });
+          if (o) return o;
+        }
+      }
+      if (key === 'major') {
+        var majorPats = [/^environmental engineering$/, /^engineering$/, /^engineering,? general$/, /^general engineering$/, /^other engineering$/, /^other$/];
+        for (var mi = 0; mi < majorPats.length; mi++) {
+          o = opts.find(function(o){ return majorPats[mi].test(lbl(o)); });
+          if (o) return o;
+        }
+      }
+      if (key === 'salaryExpectation') {
+        var money = lv.match(/\$?\s*(\d{2,3})(?:[,\s]*(\d{3}))?/);
+        var wantSalary = money ? parseInt(money[1] + (money[2] || '000'), 10) : 0;
+        if (wantSalary) {
+          o = opts.find(function(o) {
+            var txt = lbl(o);
+            var nums = (txt.match(/\$?\s*\d{2,3}(?:[,\s]*\d{3})?/g) || []).map(function(x) {
+              var m = x.match(/(\d{2,3})(?:[,\s]*(\d{3}))?/);
+              return m ? parseInt(m[1] + (m[2] || '000'), 10) : 0;
+            }).filter(Boolean);
+            if (!nums.length) return false;
+            if (/\+|more than|over|above|or more/.test(txt)) return wantSalary >= nums[0];
+            if (nums.length >= 2) return wantSalary >= Math.min(nums[0], nums[1]) && wantSalary <= Math.max(nums[0], nums[1]);
+            return Math.abs(wantSalary - nums[0]) <= 10000;
+          });
+          if (o) return o;
+        }
+      }
+      if (key === 'usPersonExportControl' || /not\s+a\s+u\.?\s*s\.?|not\s+a\s+us\s+person|not\s+a\s+united states/i.test(lv)) {
+        var clv = compact(lv);
+        o = opts.find(function(o) {
+          var t = compact(lbl(o));
+          return /alien authorized to work/.test(t);
+        });
+        if (o) return o;
+        o = opts.find(function(o) {
+          var t = compact(lbl(o));
+          return /not.*(u s|us|united states).*person/.test(t) ||
+            (clv.indexOf('not a u s') !== -1 && /not.*u s/.test(t));
+        });
+        if (o) return o;
+      }
+      if (/^no\b/.test(lv)) {
+        o = opts.find(function(o) {
+          var t = compact(lbl(o));
+          return /never.*employ|not.*previous.*employ|not.*former.*employ|not.*employ/.test(t);
+        });
+        if (o) return o;
+      }
       // 4. self-ID decline (banked "I decline to self-identify" ↔ option "Decline To Self Identify")
       if (/decline|prefer not|wish not|not to answer|do not wish|don'?t wish|rather not/.test(lv)) {
         o = opts.find(function(o){ return /decline|prefer not|wish not|not to answer|do not wish|don'?t wish|rather not/.test(lbl(o)); }); if (o) return o;
+      }
+      // Single-option acknowledgements frequently render as "Acknowledge/Confirm" while the
+      // deterministic/profile answer is "I agree". Treat that as the same consent action.
+      if (/agree|acknowledge|confirm|certify|consent|accept/i.test(lv)) {
+        o = opts.find(function(o){ return /agree|acknowledge|confirm|certify|consent|accept/i.test(lbl(o)); });
+        if (o) return o;
+        if (opts.length === 1) return opts[0];
       }
       // 5. Affirmative / negative PROSE → binary yes/no option. The AI answerer may reply to a
       // Yes/No question with a full sentence ("I have supported manufacturing operations…" = yes;
@@ -135,6 +196,10 @@
       // 6. leading-token / substring
       o = opts.find(function(o) { return lbl(o).indexOf(lv) === 0; });
       if (!o && lv.length > 2) o = opts.find(function(o) { return lbl(o).indexOf(lv) !== -1; });
+      if (!o && lv.length > 2) {
+        var clv2 = compact(lv);
+        o = opts.find(function(o) { return compact(lbl(o)).indexOf(clv2) !== -1 || clv2.indexOf(compact(lbl(o))) !== -1; });
+      }
       return o;
     }
 

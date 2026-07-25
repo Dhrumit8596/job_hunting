@@ -70,6 +70,27 @@
     } catch (_) { return ''; }
   }
 
+  function unsupportedAutonomousApplyReason(applyUrl, strategy) {
+    let u;
+    try { u = new URL(String(applyUrl || '')); } catch (_) { return 'invalid_apply_url'; }
+    const host = u.hostname.toLowerCase();
+    const path = u.pathname.toLowerCase();
+    // SAP SuccessFactors Talent Community URLs are lead-capture/signup shells in the observed
+    // corpus, not requisition application forms. They render only search/cookie/talent controls.
+    if (/successfactors|careers\.tsmc\.com/i.test(host + path) && /\/talentcommunity\/apply\//i.test(path)) {
+      return 'unsupported_successfactors_talentcommunity';
+    }
+    // Jobicy apply buttons open hash popups/outbound lead capture, not inline forms under our
+    // current autonomous external-apply path.
+    if (/(^|\.)jobicy\.com$/i.test(host)) return 'unsupported_jobicy_no_inline_form';
+    // Eightfold/GF career portals require account-auth portal navigation before a real form; keep
+    // them out of autonomous batches until that auth path is implemented.
+    if (/careers\.gf\.com$/i.test(host) || String(strategy || '').toLowerCase() === 'eightfold') {
+      return 'unsupported_eightfold_portal_auth';
+    }
+    return '';
+  }
+
   // Build the ordered apply set from the corpus.
   //   corpus: { index:{id:posting}, state:{id:{fitScore,status,attempts}} }
   //   opts: { threshold=70, appliedRoleKeys=[], dailyCap=30, maxAttempts=3, retryDeferred=true }
@@ -126,6 +147,8 @@
       if (!deferred && status !== 'sourced') continue;               // in-flight/unknown → skip
       if (!p.applyUrl) continue;                                     // nothing to open
       const strategy = detectAts(p.applyUrl) || p.detectedAts || p.ats || '';
+      const unsupportedReason = unsupportedAutonomousApplyReason(p.applyUrl, strategy);
+      if (unsupportedReason) continue;
       let channel = p.channel || '';
       if (!channel && (p.isEasyApply || (p.ats === 'linkedin' && p.sourcePlatform === 'linkedin'))) channel = p.isEasyApply ? 'linkedin_easy_apply' : '';
       if (!channel && p.indeedApply) channel = 'indeed_apply';
@@ -206,16 +229,19 @@
   }
 
   // Result reason (from external-apply.js recordResult) → next corpus state.
-  const APPLIED = new Set(['applied']);
+  const APPLIED = new Set(['applied', 'already_applied']);
   const DEAD = new Set(['posting_not_found']);
   const NEEDS_LOGIN = new Set(['needs_login', 'google_sso_only', 'workday_account_locked']);
   // Blocked by something a human must clear (never auto-solved) — defer immediately, don't retry-spin.
   // stuck_budget = exceeded the cross-reload wall-clock/load budget (unbounded stall) → defer.
-  const NEEDS_MANUAL = new Set(['workday_captcha', 'captcha', 'captcha_after_submit',
+  const NEEDS_MANUAL = new Set(['workday_captcha', 'captcha', 'captcha_after_submit', 'email_verification_required',
     'linkedin_checkpoint', 'daily_limit', 'linkedin_daily_limit', 'chatbot_apply_manual',
-    'ready_to_submit_review', 'stuck_budget']);
+    'ready_to_submit_review', 'stuck_budget',
+    // These are stable ATS/UI blockers observed in live runs. Retrying them three times only
+    // burns the batch budget; defer for manual review and let the queue advance immediately.
+    'no_apply_btn_on_description', 'no_apply_path', 'no_submit_btn', 'wd_selectinput_blocked', 'workday_auth_sign_in_error']);
 
-  // Everything else (missing_required, submit_unclear, no_submit_btn, apply_btn_no_form,
+  // Everything else (missing_required, submit_unclear, apply_btn_no_form,
   // watchdog_timeout, no_apply_btn_on_description, no_submit_after_spa, workday_auth_*) is TRANSIENT:
   // retry until maxAttempts, then defer to needs_manual.
   function resultToState(reason, attempts, maxAttempts = 3) {
@@ -251,7 +277,7 @@
 
   const API = { buildApplySet, resultToState, poolStatus, roleKey, applyUrlKey, stableRecordId,
     recordIdentityIds, appliedIdentity, greenhouseEmbedFallback, exceededBudget, queueJobKey,
-    watchdogDecision };
+    watchdogDecision, unsupportedAutonomousApplyReason };
   if (root) root.PJAApplySelect = API;
   if (typeof module !== 'undefined' && module.exports) module.exports = API;
 })(typeof self !== 'undefined' ? self : (typeof globalThis !== 'undefined' ? globalThis : this));

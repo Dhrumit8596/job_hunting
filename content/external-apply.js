@@ -6,8 +6,9 @@
   if (window.__pjaExtApplyLoaded) return;
   window.__pjaExtApplyLoaded = true;
 
-  // Never run on Google auth pages — they appear during OAuth redirect flows
-  if (/accounts\.google\.com|google\.com\/o\/oauth2/i.test(location.hostname)) return;
+  // Never run on Google/Gmail pages — Gmail is used by the verification helper, and external
+  // apply queue recovery must not treat that tab as an ATS page or navigate it back to LinkedIn.
+  if (/(^|\.)google\.com$/i.test(location.hostname)) return;
 
   function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
@@ -52,7 +53,7 @@
   } catch(_) {}
 
   try {
-    chrome.storage.local.get(['pja_ext_current', 'pja_answers', 'pja_ext_queue'], async data => {
+    chrome.storage.local.get(['pja_ext_current', 'pja_answers', 'pja_ext_queue', 'pja_ranked_apply'], async data => {
       // Never run on LinkedIn/Indeed/Glassdoor (those are handled by content.js)
       if (/linkedin\.com|indeed\.com|glassdoor\.com/i.test(location.hostname)) return;
 
@@ -67,11 +68,50 @@
         if (atsFrame) { console.log('PJA ext-apply: top frame embeds an ATS iframe — deferring to the iframe'); return; }
       }
 
-      const job = data.pja_ext_current;
+      let job = data.pja_ext_current;
+      let queue = data.pja_ext_queue;
+      const urlKey = u => {
+        try {
+          const x = new URL(u, location.href);
+          return (x.hostname + x.pathname).replace(/\/+$/, '').toLowerCase();
+        } catch (_) {
+          return String(u || '').replace(/[?#].*$/, '').replace(/\/+$/, '').toLowerCase();
+        }
+      };
+      // Ranked apply opens one ATS tab per reserve. Many Greenhouse jobs share the same hostname,
+      // so a host-only guard can let a stale pja_ext_current process the wrong job URL. If the
+      // current page exactly matches the ranked master's current job, repair the one-job queue and
+      // pja_ext_current before any fill/submit work starts.
+      const ranked = data.pja_ranked_apply || null;
+      const rankedJob = ranked && ranked.status === 'applying' && Array.isArray(ranked.jobs)
+        ? ranked.jobs[ranked.currentIndex] : null;
+      if (rankedJob && ranked.runId && urlKey(rankedJob.applyUrl) === urlKey(location.href) &&
+          (!job || job.runId !== ranked.runId || !pjaSameQueuedJob(job, rankedJob))) {
+        const repaired = Object.assign({}, rankedJob, {
+          returnUrl: 'https://www.linkedin.com/jobs/',
+          runId: ranked.runId,
+          rankedRun: true,
+          applicationAt: rankedJob.applicationAt || ranked.inFlightAt || Date.now(),
+        });
+        const repairedQueue = {
+          status: 'applying',
+          jobs: [repaired],
+          currentIndex: 0,
+          results: { applied: [], skipped: [] },
+          runId: ranked.runId,
+          startedAt: queue?.startedAt || ranked.inFlightAt || Date.now(),
+        };
+        await new Promise(r => chrome.storage.local.set({
+          pja_ext_current: repaired,
+          pja_ext_queue: repairedQueue,
+        }, r));
+        job = repaired;
+        queue = repairedQueue;
+        console.log('PJA ext-apply: repaired stale ranked current from URL match', repaired.company, repaired.title);
+      }
       if (!job) { console.log('PJA ext-apply: no pja_ext_current, skipping'); return; }
       console.log('PJA ext-apply: job read v2, _handled=', job._handled, 'company=', job.company);
 
-      const queue = data.pja_ext_queue;
       // Only treat per-job lifecycle flags as valid for the queue run that created them.
       const sameRun = queue && job.runId && job.runId === queue.runId;
 
@@ -215,6 +255,375 @@
     // anything else on a confirmation page means the application predates this run.
     const pjaPrevAction = sessionStorage.getItem('pja_last_action') || '';
     sessionStorage.setItem('pja_last_action', 'runExternalApply:' + job.company);
+    const writeLocal = (obj) => new Promise(r => chrome.storage.local.set(obj, r));
+    const readRecentDbg = () => new Promise(r => chrome.storage.local.get('pja_dbg', d => r((d.pja_dbg || []).slice(-12))));
+    const addDbg = msg => new Promise(r => chrome.storage.local.get('pja_dbg', d => {
+      const arr = (d.pja_dbg || []).slice(-19); arr.push(msg); chrome.storage.local.set({ pja_dbg: arr }, r);
+    }));
+    const collectApplyDomSummary = () => {
+      try {
+        const controls = pjaQueryAllExt('button, input, select, textarea, [role="button"], [role="combobox"], spl-select, spl-autocomplete')
+          .filter(el => { try { const r = el.getBoundingClientRect(); return r.width > 0 && r.height > 0; } catch (_) { return false; } })
+          .slice(0, 40)
+          .map(el => ({
+            tag: el.tagName,
+            type: el.type || '',
+            role: el.getAttribute('role') || '',
+            id: (el.id || '').slice(0, 80),
+            name: (el.name || '').slice(0, 80),
+            text: ((el.textContent || el.value || el.getAttribute('aria-label') || '')).trim().replace(/\s+/g, ' ').slice(0, 120),
+            required: !!(el.required || el.getAttribute('aria-required') === 'true'),
+            invalid: el.getAttribute('aria-invalid') || '',
+          }));
+        const errors = pjaQueryAllExt('[aria-invalid="true"], [role="alert"], [class*="error"], [class*="invalid"]')
+          .filter(el => { try { const r = el.getBoundingClientRect(); return r.width > 0 && r.height > 0; } catch (_) { return false; } })
+          .slice(0, 20)
+          .map(el => ((el.textContent || el.getAttribute('aria-label') || el.id || el.className || '')).trim().replace(/\s+/g, ' ').slice(0, 160))
+          .filter(Boolean);
+        return {
+          url: location.href,
+          title: document.title,
+          controls,
+          errors,
+          required: findMissingRequired().slice(0, 20).map(m => ({ label: m.label, type: m.type, options: (m.options || []).slice(0, 10) })),
+          textTail: (document.body?.innerText || '').replace(/\s+/g, ' ').slice(-1500),
+        };
+      } catch (e) {
+        return { error: e.message, url: location.href, title: document.title };
+      }
+    };
+    const redactVisibleText = text => String(text || '')
+      .replace(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi, '[email]')
+      .replace(/(?:\+?1[\s.-]?)?(?:\(?\d{3}\)?[\s.-]?)\d{3}[\s.-]?\d{4}/g, '[phone]');
+    const collectPostClickPageSnapshot = () => {
+      try {
+        const visible = el => {
+          try {
+            const r = el.getBoundingClientRect();
+            return r.width > 0 && r.height > 0;
+          } catch (_) {
+            return false;
+          }
+        };
+        const textOf = el => {
+          const tag = (el.tagName || '').toLowerCase();
+          const type = (el.type || '').toLowerCase();
+          // Do not persist typed profile answers. Button/submit values are labels, not applicant data.
+          const val = (tag === 'button' || type === 'button' || type === 'submit') ? (el.value || '') : '';
+          return redactVisibleText((el.textContent || val || el.getAttribute('aria-label') || el.placeholder || '').trim().replace(/\s+/g, ' ')).slice(0, 180);
+        };
+        const controls = pjaQueryAllExt('button, input, select, textarea, [role="button"], [role="combobox"], [role="textbox"]')
+          .filter(visible)
+          .slice(0, 60)
+          .map(el => ({
+            tag: el.tagName,
+            type: el.type || '',
+            role: el.getAttribute('role') || '',
+            name: (el.name || '').slice(0, 80),
+            id: (el.id || '').slice(0, 80),
+            label: textOf(el),
+            required: !!(el.required || el.getAttribute('aria-required') === 'true'),
+            invalid: el.getAttribute('aria-invalid') || '',
+            disabled: !!el.disabled,
+          }));
+        const errors = pjaQueryAllExt('[aria-invalid="true"], [role="alert"], [class*="error"], [class*="invalid"]')
+          .filter(visible)
+          .slice(0, 30)
+          .map(el => redactVisibleText((el.textContent || el.getAttribute('aria-label') || el.id || el.className || '').trim().replace(/\s+/g, ' ')).slice(0, 240))
+          .filter(Boolean);
+        return {
+          url: location.href,
+          title: document.title,
+          readyState: document.readyState,
+          activeElement: document.activeElement ? {
+            tag: document.activeElement.tagName,
+            type: document.activeElement.type || '',
+            role: document.activeElement.getAttribute?.('role') || '',
+            label: textOf(document.activeElement),
+          } : null,
+          controls,
+          errors,
+          successDetected: pjaIsSubmitSuccess({
+            text: document.body?.innerText || '',
+            title: document.title,
+            url: location.href,
+            preSubmitUrl: job._preSubmitUrl || job.applyUrl || '',
+            hasSubmitButton: !!findButton(/submit/i),
+            hasFormFields: !!pjaQueryAllExt('form input, form select, form textarea').length,
+            iterations: 0,
+          }),
+          textTail: redactVisibleText(document.body?.innerText || '').replace(/\s+/g, ' ').slice(-1800),
+          ts: Date.now(),
+        };
+      } catch (e) {
+        return { error: e.message, url: location.href, title: document.title, ts: Date.now() };
+      }
+    };
+    async function capturePostClickDiagnostic(reason, extra = {}) {
+      const snapshot = {
+        reason,
+        company: job.company,
+        title: job.title,
+        applyUrl: job.applyUrl || location.href,
+        runId: job.runId || '',
+        phase: sessionStorage.getItem('pja_last_action') || '',
+        stepLog: await readRecentDbg(),
+        page: collectPostClickPageSnapshot(),
+        extra,
+      };
+      await writeLocal({ pja_last_post_click_diagnostic_pending: { ...snapshot, ts: Date.now() } });
+      const resp = await new Promise(resolve => {
+        try {
+          chrome.runtime.sendMessage({ type: 'CAPTURE_APPLY_DIAGNOSTIC', snapshot }, r => {
+            if (chrome.runtime.lastError) resolve({ ok: false, error: chrome.runtime.lastError.message });
+            else resolve(r || { ok: false, error: 'no-response' });
+          });
+        } catch (e) {
+          resolve({ ok: false, error: e.message });
+        }
+      });
+      await addDbg('[diag] post-click ' + reason + ' => ' + (resp.ok ? 'captured' : ('failed:' + String(resp.error || 'unknown').slice(0, 60))));
+      return resp;
+    }
+    const applyHelpReasons = new Set([
+      'captcha', 'workday_captcha', 'submit_unclear', 'watchdog_timeout', 'stuck_budget',
+      'no_submit_btn', 'no_apply_btn_on_description', 'no_submit_after_spa',
+      'wd_selectinput_blocked', 'workday_auth_sign_in_error', 'needs_login',
+      'apply_btn_no_form', 'posting_not_found', 'missing_required', 'email_verification_required', 'chatbot_apply_manual'
+    ]);
+    const isSmartRecruitersHost = /smartrecruiters\.com/i.test(location.hostname);
+    const visibleApplicationControls = () => pjaQueryAllExt(
+      'input:not([type=hidden]), textarea, select, spl-select, [role="combobox"], [role="textbox"], ' +
+      'button, input[type=submit], [role=button]'
+    ).filter(el => {
+      try {
+        const txt = (el.textContent || el.value || el.getAttribute('aria-label') || '').trim();
+        if (/^cookie settings$/i.test(txt)) return false;
+        // SmartRecruiters can leave decorative/floating controls (observed: a lone "🔬" button)
+        // on an otherwise empty SPA step. Those are not application controls and must not suppress
+        // the empty-step retry/no_submit_after_spa path.
+        if (/^[\s🔬]+$/.test(txt)) return false;
+        const tag = (el.tagName || '').toLowerCase();
+        const role = (el.getAttribute('role') || '').toLowerCase();
+        if ((tag === 'button' || role === 'button' || el.type === 'submit') &&
+            !/next|continue|submit|apply|save|review|upload|attach|manual|done|finish/i.test(txt)) return false;
+        const r = el.getBoundingClientRect();
+        return r.width > 0 && r.height > 0;
+      } catch (_) {
+        return false;
+      }
+    });
+    async function recoverSmartRecruitersEmptyStep(phase) {
+      if (!isSmartRecruitersHost) return false;
+      if (visibleApplicationControls().length) return false;
+      const key = 'pja_sr_empty_step_retry_' + (job.id || job.jobId || job.applyUrl || '') + '_' + phase;
+      if (sessionStorage.getItem(key) === '1') {
+        await addDbg('[SR] empty SPA step persisted phase=' + phase + ' url=' + location.pathname.slice(-60));
+        return 'empty';
+      }
+      sessionStorage.setItem(key, '1');
+      await addDbg('[SR] empty SPA step after advance; waiting for hydrated form phase=' + phase);
+      for (let i = 0; i < 30; i++) {
+        await sleep(500);
+        if (visibleApplicationControls().length) {
+          await addDbg('[SR] hydrated controls appeared after empty step phase=' + phase + ' n=' + visibleApplicationControls().length);
+          return 'rerun';
+        }
+      }
+      await addDbg('[SR] empty SPA step timeout phase=' + phase + ' url=' + location.pathname.slice(-80));
+      return 'empty';
+    }
+    async function maybeRequestApplyHelp(reason, extra = {}) {
+      if (!applyHelpReasons.has(String(reason || ''))) return null;
+      try {
+        const snapshot = {
+          reason,
+          company: job.company,
+          title: job.title,
+          ats: job.ats || '',
+          applyUrl: job.applyUrl || location.href,
+          hostname: location.hostname,
+          phase: sessionStorage.getItem('pja_last_action') || '',
+          stuckForMs: extra.stuckForMs || 0,
+          missingRequired: Array.isArray(extra.missingRequired) ? extra.missingRequired : [],
+          visibleErrors: Array.isArray(extra.visibleErrors) ? extra.visibleErrors : [],
+          formSummary: extra.formSummary || '',
+          stepLog: await readRecentDbg(),
+          domSummary: collectApplyDomSummary(),
+        };
+        await writeLocal({ pja_last_apply_failure: { ...snapshot, ts: Date.now() } });
+        const data = await new Promise(resolve => {
+          try {
+            chrome.runtime.sendMessage({ type: 'REQUEST_APPLY_HELP', snapshot }, resp => {
+              if (chrome.runtime.lastError) resolve({ success: false, error: chrome.runtime.lastError.message });
+              else resolve(resp || { success: false, error: 'no-response' });
+            });
+          } catch (err) {
+            resolve({ success: false, error: err.message });
+          }
+        });
+        await addDbg('[help] ' + reason + ' => ' + (data.likelyCause || data.error || 'no-response'));
+        if (Array.isArray(data.recommendedActions) && data.recommendedActions.length) {
+          await addDbg('[recover] proposed ' + data.recommendedActions.map(a => a.type).join(',').slice(0, 120));
+        }
+        await writeLocal({ pja_last_apply_help: { ts: Date.now(), reason, response: data } });
+        return data;
+      } catch (e) {
+        await addDbg('[help] ' + reason + ' request failed: ' + e.message);
+        return null;
+      }
+    }
+
+    async function executeRecoveryActions(help, contextReason) {
+      const actions = help && Array.isArray(help.recommendedActions) ? help.recommendedActions : [];
+      if (!actions.length) return { executed: 0, retrySubmit: false };
+      const allowed = new Set(['retry_fill_phone','retry_fill_country','retry_fill_phone_country_code','retry_greenhouse_react_selects','retry_smartrecruiters_custom_fields','retry_answer_required','wait_for_hydration','retry_submit_once','check_gmail_confirmation','record_captcha_and_advance','record_needs_manual']);
+      let executed = 0, retrySubmit = !!help.shouldRetrySubmit, advanceReason = '';
+      for (const action of actions.slice(0, 4)) {
+        const type = String(action && action.type || '');
+        if (!allowed.has(type)) continue;
+        try {
+          await addDbg('[recover] exec ' + type + ' reason=' + String(contextReason || '').slice(0, 24));
+          if (type === 'retry_fill_phone') {
+            if (typeof pjaForcePhoneField === 'function') await pjaForcePhoneField(profile.phone || job.profile?.phone || '');
+            retryPhoneFill(profile);
+          } else if (type === 'retry_fill_country') {
+            if (typeof pjaForceCountryField === 'function') await pjaForceCountryField((job.profile && job.profile.country) || profile.country || 'United States');
+          } else if (type === 'retry_fill_phone_country_code') {
+            if (/workday\.com|myworkdayjobs\.com/i.test(location.hostname) && typeof forceWorkdayPhoneCountryCode === 'function') await forceWorkdayPhoneCountryCode();
+            if (typeof pjaForceCountryField === 'function') await pjaForceCountryField('United States');
+          } else if (type === 'retry_greenhouse_react_selects') {
+            if (/greenhouse\.io/i.test(location.hostname) && typeof pjaFillGreenhouseEducation === 'function') await withTimeout(pjaFillGreenhouseEducation(profile), 45000, 'recover-gh-edu');
+            if (typeof pjaForceAllPolicyReactSelects === 'function') await withTimeout(pjaForceAllPolicyReactSelects(job.profile || profile), 12000, 'recover-policy-rs');
+          } else if (type === 'retry_smartrecruiters_custom_fields') {
+            if (/smartrecruiters\.com/i.test(location.hostname) && typeof pjaFillSmartRecruitersCustomFields === 'function') await withTimeout(pjaFillSmartRecruitersCustomFields(profile), 25000, 'recover-sr-fields');
+          } else if (type === 'retry_answer_required') {
+            if (typeof pjaAnswerRequiredViaAI === 'function') await withTimeout(pjaAnswerRequiredViaAI(job), 120000, 'recover-ai-required');
+          } else if (type === 'wait_for_hydration') {
+            await sleep(4000);
+          } else if (type === 'retry_submit_once') {
+            retrySubmit = true;
+          } else if (type === 'check_gmail_confirmation') {
+            const emailRecovery = await recoverEmailVerificationCode(contextReason);
+            if (emailRecovery.filled) retrySubmit = true;
+          } else if (type === 'record_captcha_and_advance') {
+            advanceReason = 'captcha';
+          } else if (type === 'record_needs_manual') {
+            advanceReason = 'needs_manual';
+          }
+          executed++;
+          await sleep(500);
+        } catch (e) {
+          await addDbg('[recover] ' + type + ' failed: ' + e.message.slice(0, 80));
+        }
+      }
+      return { executed, retrySubmit, advanceReason };
+    }
+
+    function emailCodeSearchQuery() {
+      const company = String(job.company || '').replace(/["()]/g, ' ').trim();
+      const host = location.hostname || '';
+      const vendor = /greenhouse\.io/i.test(host) ? 'greenhouse' : /ashbyhq\.com/i.test(host) ? 'ashby' : host.split('.').slice(-2).join('.');
+      const quotedCompany = company ? `"${company.replace(/"/g, '')}"` : '';
+      return [
+        'in:anywhere',
+        'newer_than:30m',
+        '("security code" OR "verification code" OR "confirm your email" OR "confirm you are human" OR "8-character code" OR "one-time code")',
+        `(${vendor} OR ${quotedCompany || vendor})`
+      ].join(' ');
+    }
+
+    function findEmailCodeField() {
+      const candidates = pjaQueryAllExt('input:not([type=hidden]):not([type=file]), textarea')
+        .filter(el => {
+          try {
+            const r = el.getBoundingClientRect();
+            if (!(r.width > 0 && r.height > 0)) return false;
+            const text = [
+              el.id || '',
+              el.name || '',
+              el.placeholder || '',
+              el.getAttribute('aria-label') || '',
+              typeof pjaGetLabel === 'function' ? pjaGetLabel(el) : '',
+              el.closest?.('label, div, fieldset, section')?.textContent || ''
+            ].join(' ').replace(/\s+/g, ' ');
+            return /security code|verification code|email code|confirm.*human|8[- ]?character code|one[- ]?time code|otp/i.test(text);
+          } catch (_) {
+            return false;
+          }
+        });
+      return candidates[0] || null;
+    }
+
+    async function recoverEmailVerificationCode(contextReason) {
+      const codeField = findEmailCodeField();
+      if (!codeField) {
+        await addDbg('[email-code] no visible code field reason=' + String(contextReason || '').slice(0, 30));
+        return { filled: false, reason: 'no_code_field' };
+      }
+      const recoveryKey = 'pja_email_code_recovery_' + (job.id || job.jobId || job.applyUrl || '');
+      if (sessionStorage.getItem(recoveryKey) === '1') {
+        await addDbg('[email-code] already attempted for job');
+        return { filled: false, reason: 'already_attempted' };
+      }
+      sessionStorage.setItem(recoveryKey, '1');
+      const searchQuery = emailCodeSearchQuery();
+      await addDbg('[email-code] opening gmail search for verification code');
+      const openResp = await new Promise(resolve => {
+        try {
+          chrome.runtime.sendMessage({
+            type: 'OPEN_GMAIL_CODE_TAB',
+            searchQuery,
+            hostname: location.hostname,
+            company: job.company || '',
+            title: job.title || '',
+            expectedLength: 8
+          }, resp => {
+            if (chrome.runtime.lastError) resolve({ ok: false, reason: chrome.runtime.lastError.message });
+            else resolve(resp || { ok: false, reason: 'no_response' });
+          });
+        } catch (e) {
+          resolve({ ok: false, reason: e.message });
+        }
+      });
+      if (!openResp.ok) {
+        await addDbg('[email-code] gmail open failed: ' + String(openResp.reason || 'unknown').slice(0, 60));
+        return { filled: false, reason: openResp.reason || 'open_failed' };
+      }
+      let result = null;
+      const started = Date.now();
+      while (Date.now() - started < 90000) {
+        await sleep(1000);
+        const data = await new Promise(r => chrome.storage.local.get('pja_email_code_result', r));
+        const r = data.pja_email_code_result;
+        if (r && r.ts >= started - 1000) { result = r; break; }
+      }
+      await new Promise(r => chrome.storage.local.remove('pja_email_code_result', r));
+      if (!result || !result.success || !result.code) {
+        if (!result) {
+          try {
+            chrome.runtime.sendMessage({ type: 'CANCEL_EMAIL_CODE_SESSION', reason: 'timeout' }, () => {});
+          } catch (_) {}
+        }
+        await addDbg('[email-code] code not found: ' + String(result?.reason || 'timeout').slice(0, 60));
+        return { filled: false, reason: result?.reason || 'timeout' };
+      }
+      try {
+        if (typeof pjaSetNative === 'function') pjaSetNative(codeField, result.code);
+        else {
+          const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set;
+          if (setter && codeField instanceof HTMLInputElement) setter.call(codeField, result.code);
+          else codeField.value = result.code;
+          codeField.dispatchEvent(new InputEvent('input', { bubbles: true, composed: true, data: result.code, inputType: 'insertText' }));
+          codeField.dispatchEvent(new Event('change', { bubbles: true, composed: true }));
+        }
+        await addDbg('[email-code] filled verification code len=' + String(result.codeLength || result.code.length));
+        return { filled: true };
+      } catch (e) {
+        await addDbg('[email-code] fill failed: ' + e.message.slice(0, 60));
+        return { filled: false, reason: 'fill_failed' };
+      }
+    }
     // Stall watchdog: if this job neither submits nor skips within the window, force-advance the
     // queue so one hung page can't block an unattended batch. On normal completion navigateBack
     // navigates away and this timer dies with the page. Raised 4min→7min: forms with many
@@ -222,6 +631,10 @@
     // legitimately need longer than 4min, and were being force-skipped mid-fill (watchdog_timeout).
     setTimeout(() => {
       try { sessionStorage.setItem('pja_last_action', 'watchdog_timeout:' + job.company); } catch (_) {}
+      void maybeRequestApplyHelp('watchdog_timeout', {
+        formSummary: 'watchdog timer fired before submit or skip',
+        stuckForMs: 7 * 60 * 1000,
+      });
       // A hung form (filled but never submits) is the dominant degraded-CDP signal — report it so
       // the self-heal ladder can escalate. If a react-select-commit control is still erroring, flag it.
       try {
@@ -255,6 +668,11 @@
         try { chrome.runtime.sendMessage({ type: 'PJA_APPLY_OUTCOME', outcome: { filled: true, submitted: false, reactSelectError: true }, applyUrl: job.applyUrl }); } catch (_) {}
         const detail = entry.loads > 4 ? entry.loads + ' loads' : Math.round((now - entry.firstSeen) / 1000) + 's';
         console.log('PJA ext-apply: stuck_budget exceeded (' + detail + ') — deferring', job.company);
+        await maybeRequestApplyHelp('stuck_budget', {
+          formSummary: 'cross-reload budget exceeded',
+          stuckForMs: now - entry.firstSeen,
+          visibleErrors: [detail],
+        });
         await recordResult(job, { success: false, reason: 'stuck_budget', fields: ['budget:' + detail] });
         navigateBack(job);
         return;
@@ -281,6 +699,8 @@
     // Merge stored profile on top of defaults so new profile keys always have fallback values.
     const defaultProfile = (typeof window.PJA_DEFAULT_PROFILE !== 'undefined') ? window.PJA_DEFAULT_PROFILE : {};
     profile = Object.assign({}, defaultProfile, profile);
+    if (!String(profile.phoneCountryCode || '').trim()) profile.phoneCountryCode = defaultProfile.phoneCountryCode || 'United States of America (+1)';
+    if (!String(profile.referralSource || '').trim()) profile.referralSource = defaultProfile.referralSource || 'LinkedIn';
     // Write the merged profile back onto the job so downstream helpers that read job.profile —
     // notably pjaAnswerRequiredViaAI's deterministic pre-pass (LinkedIn/website/location) — get the
     // real data. The queue seeds jobs with profile:{}, so without this the deterministic answerer
@@ -290,10 +710,48 @@
 
     console.log('PJA ext-apply:', job.company, '|', job.ats, '| profile.firstName:', profile.firstName || 'MISSING', '| descClicks:', descClicks);
 
+    // EARLY generic post-submit detection. This must run BEFORE the description-page/no-apply
+    // branch below: Lever and similar ATSes can navigate from /apply to a sparse post-submit
+    // landing page with no form. If we already clicked Submit for THIS job in THIS tab/run, a
+    // verified confirmation page should be recorded instead of being misclassified as
+    // no_apply_btn_on_description.
+    {
+      const earlyHasSubmitButton = pjaQueryAllExt('button[type=submit], input[type=submit]')
+        .some(b => /submit/i.test((b.textContent || '') + (b.value || '')));
+      const earlyHasFormFields = pjaQueryAllExt('form input, form select, form textarea')
+        .some(el => { try { const r = el.getBoundingClientRect(); return el.type !== 'hidden' && r.width > 0 && r.height > 0; } catch (_) { return el.type !== 'hidden'; } });
+      const earlyPriorSubmit = pjaPrevAction === 'submit_clicked:' + String(job.company || '') || !!job._submitPending;
+      if (pjaIsSubmitSuccess({
+        text: document.body?.innerText || '', title: document.title, url: location.href,
+        preSubmitUrl: job._preSubmitUrl || '', hasSubmitButton: earlyHasSubmitButton,
+        hasFormFields: earlyHasFormFields, priorSubmit: earlyPriorSubmit,
+      })) {
+        delete job._submitPending;
+        delete job._preSubmitUrl;
+        delete job._submitStartedAt;
+        try { await new Promise(r => chrome.storage.local.set({ pja_ext_current: job }, r)); } catch (_) {}
+        await addDbg('[ext] early generic confirmation → applied: ' + job.company);
+        sessionStorage.setItem('pja_last_action', 'recordResult:applied:' + job.company);
+        await recordResult(job, { success: true, reason: 'applied' });
+        navigateBack(job);
+        return;
+      }
+    }
+
     // --- Check if this is a job description page (no form inputs yet) ---
     const formInputSel = 'form input:not([type=hidden]):not([type=file]), form select, form textarea,' +
-      'input[required]:not([type=hidden]):not([type=file]), select[required], textarea[required]';
-    let hasFormInputs = !!document.querySelector(formInputSel);
+      'input[required]:not([type=hidden]):not([type=file]), input[aria-required="true"]:not([type=hidden]):not([type=file]), select[required], textarea[required],' +
+      'spl-input[required], spl-autocomplete[required], spl-phone-field[required], oc-input.ng-invalid, oc-location-autocomplete.ng-invalid';
+    const hasFormishInputs = (sel = formInputSel) => {
+      try {
+        if (document.querySelector(sel)) return true;
+        return pjaQueryAllExt(sel).some(el => {
+          const r = el.getBoundingClientRect();
+          return r.width > 0 && r.height > 0;
+        });
+      } catch (_) { return false; }
+    };
+    let hasFormInputs = hasFormishInputs();
     // Some ATS apply forms are SPAs that render fields progressively AFTER a bare initial page
     // (e.g. SmartRecruiters "one-click" /oneclick-ui, which first shows only a resume file input).
     // If the URL is already an application form, POLL a few seconds so we fill it instead of
@@ -308,8 +766,8 @@
       try { await tryInjectResume(profile, answers); } catch (_) {}
       // After the resume parses, SmartRecruiters reveals fields OUTSIDE a <form> and unmarked,
       // so the strict formInputSel misses them — also accept standalone text/email inputs.
-      const anyFieldSel = formInputSel + ', input[type=text], input[type=email], input:not([type]):not([type=file])';
-      for (let _i = 0; _i < 25 && !hasFormInputs; _i++) { await sleep(600); hasFormInputs = !!document.querySelector(anyFieldSel); }
+      const anyFieldSel = formInputSel + ', input[type=text], input[type=email], input:not([type]):not([type=file]), spl-input, spl-autocomplete, spl-phone-field';
+      for (let _i = 0; _i < 25 && !hasFormInputs; _i++) { await sleep(600); hasFormInputs = hasFormishInputs(anyFieldSel); }
       // DIAGNOSTIC: if the form still didn't appear, dump where it might be (iframe? same-origin?
       // buttons to advance?) so we can see the real post-upload structure without claude-in-chrome.
       if (!hasFormInputs) {
@@ -320,19 +778,52 @@
             return host + ':' + inner;
           });
           const btns = Array.from(document.querySelectorAll('button,a[role=button],[class*=btn]')).filter(b => b.offsetParent).map(b => (b.textContent || '').trim().slice(0, 18)).filter(Boolean).slice(0, 8);
-          const allInputs = document.querySelectorAll('input:not([type=hidden])').length;
+          const allInputs = pjaQueryAllExt('input:not([type=hidden]), spl-input, spl-autocomplete, spl-phone-field').length;
           const line = '[sr-diag] frames=[' + frames.join(' ') + '] inputs=' + allInputs + ' btns=[' + btns.join('|') + ']';
           await new Promise(r => chrome.storage.local.get('pja_dbg', d => { const a = (d.pja_dbg || []).slice(-40); a.push(line); chrome.storage.local.set({ pja_dbg: a }, r); }));
         } catch (_) {}
       }
     }
     if (!hasFormInputs && looksLikeFormUrl) {
-      for (let _i = 0; _i < 12 && !hasFormInputs; _i++) { await sleep(500); hasFormInputs = !!document.querySelector(formInputSel); }
+      for (let _i = 0; _i < 12 && !hasFormInputs; _i++) { await sleep(500); hasFormInputs = hasFormishInputs(); }
     }
     // Workday SPA uses React without <form>/required attributes and handles auth state
     // internally — bypass the description-page check entirely for Workday sites.
     const isWorkdaySite = /workday\.com|myworkdayjobs\.com/i.test(location.hostname);
     console.log('PJA ext-apply hasFormInputs:', hasFormInputs, 'isWorkday:', isWorkdaySite, 'url:', location.href.slice(0,60));
+
+    // Workday job-description pages often render a plain <a role="button">Apply</a> with zero
+    // form inputs. The generic description-page launcher is intentionally skipped for Workday so
+    // auth/account creation can run through pjaWorkdayAuth, but signed-out and tenant-specific
+    // posting pages still need a deterministic entry route. Navigate directly to Workday's stable
+    // manual-apply URL instead of letting the run fall through to no_submit_btn.
+    if (!hasFormInputs && isWorkdaySite && !/\/apply(?:\/|$)/i.test(location.pathname)) {
+      const pageControls = Array.from(document.querySelectorAll('a,button,[role=button]'))
+        .filter(el => el.offsetParent !== null)
+        .map(el => (el.textContent || el.getAttribute('aria-label') || '').trim())
+        .filter(Boolean);
+      const hasApplyEntry = pageControls.some(txt => /^apply$/i.test(txt) || /apply now|start application|sign in/i.test(txt));
+      if (hasApplyEntry) {
+        const sourceUrl = String(job.applyUrl || location.href || '').trim();
+        const cleanUrl = sourceUrl.replace(/[?#].*$/, '').replace(/\/+$/, '');
+        const manualUrl = /\/apply(?:\/|$)/i.test(cleanUrl) ? sourceUrl : cleanUrl + '/apply/applyManually';
+        const navKey = 'pja_wd_desc_manual_nav_' + (job.id || job.jobId || '') + '_' +
+          String(job.applyUrl || location.pathname || '').replace(/[^\w-]+/g, '_').slice(-80);
+        let navs = 0;
+        try { navs = parseInt(sessionStorage.getItem(navKey) || '0', 10); } catch (_) {}
+        if (manualUrl && manualUrl !== location.href && navs < 6) {
+          try { sessionStorage.setItem(navKey, String(navs + 1)); } catch (_) {}
+          const retryUrl = manualUrl + (manualUrl.includes('?') ? '&' : '?') + 'pja_wd_entry_retry=' + (navs + 1);
+          await new Promise(r => chrome.storage.local.get('pja_dbg', d => {
+            const a = (d.pja_dbg || []).slice(-40);
+            a.push('[WD] description entry → applyManually nav attempt=' + (navs + 1) + ' controls=[' + pageControls.slice(0, 8).join('|') + ']');
+            chrome.storage.local.set({ pja_dbg: a }, r);
+          }));
+          location.replace(retryUrl);
+          return;
+        }
+      }
+    }
 
     // ISSUE-4 — chatbot / conversational apply (e.g. "Chat to Apply", Paradox/Olivia,
     // text-to-apply). These can't be form-filled. Detect them up front and skip fast
@@ -358,7 +849,7 @@
       // POLL for it: many ATS pages redirect (e.g. icims.com → careers.<co>.com) and/or render
       // the Apply button via JS a few seconds after load. A one-shot check evaluates the
       // intermediate/unrendered page and wrongly reports "no apply button". Retry for ~12s.
-      const APPLY_RE = /^apply$|apply now|apply for this|apply for job|apply for position|apply today|apply here|apply online|apply to this|start application|i'?m interested|apply to job/i;
+      const APPLY_RE = /^apply$|apply now|apply for this|apply for job|apply for position|apply today|apply here|apply online|apply to this|apply with indeed|apply with seek|start application|i'?m interested|apply to job/i;
       const findApply = () => findButton(APPLY_RE)
         || Array.from(document.querySelectorAll('a[href]')).find(a => /\bapply\b/i.test(a.textContent.trim()) && !/sign.?in|log.?in|already applied/i.test(a.textContent))
         || Array.from(document.querySelectorAll('[role=button],[data-test*="apply" i],[class*="apply" i]')).find(b => b.offsetParent !== null && APPLY_RE.test((b.textContent || b.getAttribute('aria-label') || '').trim()));
@@ -395,14 +886,14 @@
         // Wait up to 12s for form to appear (SPA or full page nav)
         // Do NOT return early on URL change: Greenhouse/Lever use SPA pushState,
         // meaning URL changes but the same document continues — we need to keep waiting.
-        const FORM_SEL = 'form input:not([type=hidden]):not([type=file]), form select, form textarea, input[required]:not([type=hidden]):not([type=file]), select[required], textarea[required]';
+        const FORM_SEL = 'form input:not([type=hidden]):not([type=file]), form select, form textarea, input[required]:not([type=hidden]):not([type=file]), input[aria-required="true"]:not([type=hidden]):not([type=file]), select[required], textarea[required], spl-input[required], spl-autocomplete[required], spl-phone-field[required], oc-input.ng-invalid, oc-location-autocomplete.ng-invalid';
         for (let i = 0; i < 24; i++) {
           await sleep(500);
           // Full page navigation (e.g. Workday) invalidates the extension context.
           // When that happens, chrome.runtime.id becomes undefined — bail silently
           // so the new page's content script handles the job from scratch.
           try { if (!chrome.runtime?.id) return; } catch(_) { return; }
-          dbgLog([`loop i=${i} url=${location.href.slice(0,80)} formSel=${!!document.querySelector(FORM_SEL)}`]);
+          dbgLog([`loop i=${i} url=${location.href.slice(0,80)} formSel=${hasFormishInputs(FORM_SEL)}`]);
           console.log('PJA ext-apply: wait-loop i=' + i + ' url=' + location.href.slice(0, 70));
           // Workday "Start Your Application" intermediary page — click "Apply Manually"
           const applyManuallyBtn = document.querySelector('[data-automation-id="applyManually"]')
@@ -413,7 +904,7 @@
             i = 0; // reset counter and keep waiting for the login/form to appear
             continue;
           }
-          if (document.querySelector(FORM_SEL)) {
+          if (hasFormishInputs(FORM_SEL)) {
             // SPA rendered the form — fill it directly
             await sleep(800);
             if (typeof pjaFillForm === 'function') {
@@ -481,6 +972,7 @@
         } catch(_) {}
         console.log('PJA ext-apply: apply_btn_no_form, calling recordResult');
         sessionStorage.setItem('pja_last_action', 'recordResult:apply_btn_no_form:' + job.company);
+        await maybeRequestApplyHelp('apply_btn_no_form', { formSummary: 'apply button found but no form' });
         await recordResult(job, { success: false, reason: 'apply_btn_no_form' });
         navigateBack(job);
         return;
@@ -494,6 +986,7 @@
         await new Promise(r => chrome.storage.local.get('pja_dbg', d => { const a=(d.pja_dbg||[]).slice(-40); a.push(new Date().toISOString().slice(11,19)+' [EXT] posting_not_found host='+location.hostname+' url='+location.pathname.slice(-40)); chrome.storage.local.set({pja_dbg:a}, r); }));
         console.log('PJA ext-apply: posting_not_found (404/closed) — skipping.');
         sessionStorage.setItem('pja_last_action', 'recordResult:posting_not_found:' + job.company);
+        await maybeRequestApplyHelp('posting_not_found', { formSummary: 'posting unavailable or closed' });
         await recordResult(job, { success: false, reason: 'posting_not_found' });
         navigateBack(job);
         return;
@@ -506,6 +999,7 @@
       await new Promise(r => chrome.storage.local.get('pja_dbg', d => { const a=(d.pja_dbg||[]).slice(-40); a.push(new Date().toISOString().slice(11,19)+' [EXT] no_apply_btn host='+location.hostname+' cand=['+cand.join(' | ')+']'); chrome.storage.local.set({pja_dbg:a}, r); }));
       console.log('PJA ext-apply: no_apply_btn_on_description. Buttons:', cand.join('|'));
       sessionStorage.setItem('pja_last_action', 'recordResult:no_apply_btn:' + job.company);
+      await maybeRequestApplyHelp('no_apply_btn_on_description', { visibleErrors: cand, formSummary: 'description page without apply button' });
       await recordResult(job, { success: false, reason: 'no_apply_btn_on_description' });
       navigateBack(job);
       return;
@@ -541,6 +1035,19 @@
         chrome.storage.local.get('pja_job_password', r)
       );
       const jobPassword = _storedPw || 'ChangeMe#2025!';
+
+      // Gmail verification is completed asynchronously by background.js while pjaWorkdayAuth.run()
+      // is still waiting. Background needs the CURRENT job context at that time to navigate the
+      // apply tab back after the verification link succeeds. Do this before auth starts so stale
+      // pending records from prior Workday tenants cannot hijack the resume.
+      await new Promise(r => chrome.storage.local.set({
+        pja_wd_pending_apply: {
+          applyUrl: job.applyUrl,
+          jobId: job.id || job.jobId,
+          hostname: location.hostname,
+          ts: Date.now()
+        }
+      }, r));
 
       const authResult = await window.pjaWorkdayAuth.run(profile, jobPassword);
       console.log('PJA ext-apply: pjaWorkdayAuth result:', authResult);
@@ -614,16 +1121,23 @@
           }
         }, r));
         return; // Background will reload this tab when verification completes
+      } else if (authResult === 'needs_navigation') {
+        await addDbg('[WD] auth requested navigation; waiting for reloaded apply page');
+        return;
       } else if (authResult === 'sso_only') {
+        await maybeRequestApplyHelp('google_sso_only', { formSummary: 'workday sign-in requires Google SSO' });
         await recordResult(job, { success: false, reason: 'google_sso_only' });
         navigateBack(job); return;
       } else if (authResult === 'locked') {
+        await maybeRequestApplyHelp('workday_auth_sign_in_error', { formSummary: 'workday sign-in locked', visibleErrors: [authResult] });
         await recordResult(job, { success: false, reason: 'workday_account_locked' });
         navigateBack(job); return;
       } else if (authResult === 'captcha_blocked') {
+        await maybeRequestApplyHelp('workday_captcha', { formSummary: 'workday auth captcha', visibleErrors: [authResult] });
         await recordResult(job, { success: false, reason: 'workday_captcha' });
         navigateBack(job); return;
       } else {
+        await maybeRequestApplyHelp(`workday_auth_${authResult}`, { formSummary: 'workday auth failure', visibleErrors: [authResult] });
         await recordResult(job, { success: false, reason: `workday_auth_${authResult}` });
         navigateBack(job); return;
       }
@@ -779,9 +1293,233 @@
     await withTimeout(pjaFillWorkdayWorkExperience(profile), 45000, 'wd-workexp');
 
     // --- Fallback fills ---
-    const addDbg = msg => new Promise(r => chrome.storage.local.get('pja_dbg', d => {
-      const arr = (d.pja_dbg || []).slice(-19); arr.push(msg); chrome.storage.local.set({ pja_dbg: arr }, r);
-    }));
+    const forceWorkdayPhoneCountryCode = async () => {
+      if (!/workday\.com|myworkdayjobs\.com/i.test(location.hostname)) return 0;
+      if (typeof pjaFillCombobox !== 'function') return 0;
+      const wdSelectedText = root => (root?.querySelector('[data-automation-id="selectedItemList"], [data-automation-id="selectedItem"], [data-automation-id="promptOption"]')?.textContent || '').trim();
+      const targets = pjaQueryAllExt(
+        'input[data-uxi-widget-type="selectinput"], input[role="combobox"], input[required], input[aria-required="true"]'
+      ).filter(el => {
+        const label = [
+          (typeof getLabelFor === 'function' ? getLabelFor(el) : ''),
+          el.getAttribute('aria-label') || '',
+          el.getAttribute('aria-labelledby') || '',
+          el.id || '',
+          el.closest('[data-automation-id^="formField"], fieldset, [data-uxi-widget-type="multiselect"], div')?.textContent || '',
+        ].join(' ').replace(/\s+/g, ' ');
+        if (!/(country|territory).{0,60}phone.{0,30}code|phone.{0,30}(country|territory).{0,30}code|country\s*\/\s*territory\s*phone\s*code|dial(?:ing|ling) code/i.test(label)) return false;
+        const ms = el.closest('[data-uxi-widget-type="multiselect"]');
+        const selected = wdSelectedText(ms);
+        return !/united states/i.test(selected) || !/\+?1\b/.test(selected);
+      });
+      for (const el of targets) pjaFillCombobox(el, profile.phoneCountryCode || 'United States of America (+1)', 'phoneCountryCode');
+      if (targets.length && window._pjaComboChain && typeof window._pjaComboChain.then === 'function') {
+        await Promise.race([window._pjaComboChain.catch(() => {}), sleep(10000)]);
+      }
+      if (typeof pjaFillWorkdayPromptButtons === 'function') {
+        try { await withTimeout(pjaFillWorkdayPromptButtons(profile), 12000, 'wd-phone-code-prompts'); } catch (_) {}
+      }
+      if (targets.length) await addDbg('[WD] forced phoneCountryCode n=' + targets.length);
+      return targets.length;
+    };
+    const trustedWorkdayClick = async (el, label) => {
+      if (!el || !/workday\.com|myworkdayjobs\.com/i.test(location.hostname)) return false;
+      const priorId = el.id;
+      const tempId = priorId || ('__pja_wd_click_' + Date.now() + '_' + Math.random().toString(36).slice(2, 7));
+      if (!priorId) el.id = tempId;
+      try {
+        el.scrollIntoView({ block: 'center', behavior: 'instant' });
+        const resp = await new Promise(resolve => {
+          chrome.runtime.sendMessage({ type: 'WORKDAY_TRUSTED_CLICK', selector: '#' + CSS.escape(tempId), single: true }, r => {
+            resolve(chrome.runtime.lastError ? { error: chrome.runtime.lastError.message } : (r || {}));
+          });
+        });
+        await addDbg('[WD] trusted click ' + (label || '') + ' ok=' + !!resp.ok + (resp.error ? ' err=' + String(resp.error).slice(0, 60) : ''));
+        return !!resp.ok;
+      } catch (e) {
+        await addDbg('[WD] trusted click ' + (label || '') + ' threw=' + String(e && e.message || e).slice(0, 60));
+        return false;
+      } finally {
+        if (!priorId && el.id === tempId) el.removeAttribute('id');
+      }
+    };
+    const forceWorkdayReferralSource = async () => {
+      if (!/workday\.com|myworkdayjobs\.com/i.test(location.hostname)) return 0;
+      const buttons = pjaQueryAllExt('button, [role="button"]').filter(btn => {
+        const id = btn.id || btn.getAttribute('data-automation-id') || '';
+        const label = (typeof getLabelFor === 'function' ? getLabelFor(btn) : '') || btn.getAttribute('aria-label') || id || btn.textContent || '';
+        if (!/source--source/i.test(id) && !/how did you hear|referral source|source/i.test(label)) return false;
+        const selected = (btn.textContent || btn.getAttribute('aria-label') || '').trim();
+        return btn.getAttribute('aria-invalid') === 'true' || !selected || /select one|select\.\.\.|required/i.test(selected);
+      });
+      let filled = 0;
+      const ownText = opt => {
+        const clone = opt.cloneNode(true);
+        clone.querySelectorAll('[role="option"]').forEach(child => child.remove());
+        return (clone.textContent || '').trim().replace(/\s+/g, ' ');
+      };
+      const fallbacks = ['LinkedIn', 'LinkedIn Connection', 'Job Board or Social Media', 'Social Media', 'Job Board', 'Online Job Board', 'Internet', 'Online', 'Career Site'];
+      for (const btn of buttons) {
+        document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+        await sleep(150);
+        if (!await trustedWorkdayClick(btn, 'referralSource')) btn.click();
+        try {
+          const r = btn.getBoundingClientRect();
+          await new Promise(resolve => {
+            let done = false;
+            const timer = setTimeout(() => { if (!done) { done = true; resolve(); } }, 5000);
+            chrome.runtime.sendMessage({ type: 'CDP_TYPE_AT', x: r.left + r.width / 2,
+              y: r.top + r.height / 2, text: profile.referralSource || 'LinkedIn' }, resp => {
+              clearTimeout(timer);
+              if (!done) { done = true; resolve(resp); }
+            });
+          });
+        } catch (_) {}
+        let option = null;
+        for (let w = 0; w < 18 && !option; w++) {
+          await sleep(150);
+          const listbox = document.querySelector('[data-automation-id="activeListContainer"], [role="listbox"]:not([hidden])');
+          const opts = listbox ? Array.from(listbox.querySelectorAll('[role="option"]')) : [];
+          for (const fb of fallbacks) {
+            option = opts.find(o => ownText(o).toLowerCase().includes(fb.toLowerCase()));
+            if (option) break;
+          }
+        }
+        if (option) {
+          const target = option.querySelector('[data-automation-id="promptLeafNode"]') || option;
+          if (!await trustedWorkdayClick(target, 'referralOption')) target.click();
+          filled++;
+          await sleep(350);
+        } else {
+          await addDbg('[WD] forced referralSource no option for ' + (btn.id || btn.getAttribute('aria-label') || '').slice(0, 40));
+        }
+      }
+      if (filled) await addDbg('[WD] forced referralSource n=' + filled);
+      return filled;
+    };
+    const summarizeWorkdayCriticalSelects = async (label) => {
+      if (!/workday\.com|myworkdayjobs\.com/i.test(location.hostname)) return;
+      try {
+        const rows = pjaQueryAllExt('input[data-uxi-widget-type="selectinput"], button, [role="button"]')
+          .map(el => {
+            const id = el.id || el.getAttribute('data-automation-id') || '';
+            const rawLabel = (typeof getLabelFor === 'function' ? getLabelFor(el) : '') ||
+              el.getAttribute('aria-label') || id || '';
+            const text = (el.textContent || el.getAttribute('aria-label') || '').trim().replace(/\s+/g, ' ');
+            const root = el.closest('[data-automation-id^="formField"], [data-uxi-widget-type="multiselect"], fieldset, div') || el.parentElement;
+            const selected = (root?.querySelector('[data-automation-id="selectedItemList"], [data-automation-id="selectedItem"], [data-automation-id="promptOption"]')?.textContent || '').trim().replace(/\s+/g, ' ');
+            return { id, rawLabel, text, selected, invalid: el.getAttribute('aria-invalid') === 'true', valuePresent: 'value' in el ? !!String(el.value || '').trim() : undefined };
+          })
+          .filter(row => /source--source|how did you hear|referral source|country|territory|phone.{0,20}code|dial(?:ing|ling) code/i.test(
+            [row.id, row.rawLabel, row.text, row.selected].join(' ')
+          ))
+          .slice(0, 8)
+          .map(row => {
+            const name = (row.rawLabel || row.id || row.text || 'field').slice(0, 55);
+            const state = row.selected ? 'selected=' + row.selected.slice(0, 55)
+              : row.valuePresent ? 'valuePresent'
+              : row.text ? 'text=' + row.text.slice(0, 55)
+              : 'empty';
+            return name + ' {' + state + (row.invalid ? ',invalid' : '') + '}';
+          });
+        await addDbg('[WD-DIAG] ' + label + ': ' + (rows.join(' | ') || 'none'));
+      } catch (e) {
+        await addDbg('[WD-DIAG] ' + label + ' error=' + String(e && e.message || e).slice(0, 80));
+      }
+    };
+    const retryWorkdayBlockedAdvance = async (reasonHint) => {
+      if (!/workday\.com|myworkdayjobs\.com/i.test(location.hostname)) return { advanced: false };
+      const stepBefore = document.body.innerText.match(/current step (\d+)/i)?.[1] || '';
+      const retryKey = 'pja_wd_block_retry_' + (job.id || job.jobId || job.applyUrl || '') + '_' + (stepBefore || 'nostep') + '_' + location.pathname.slice(-32);
+      if (sessionStorage.getItem(retryKey) === '1') {
+        await addDbg('[WD] blocked advance retry already used step=' + (stepBefore || '?'));
+        return { advanced: false };
+      }
+      sessionStorage.setItem(retryKey, '1');
+      await summarizeWorkdayCriticalSelects('before-retry ' + (reasonHint || 'blocked'));
+      await addDbg('[WD] blocked advance retry start reason=' + (reasonHint || 'blocked') + ' step=' + (stepBefore || '?'));
+      try {
+        if (typeof pjaFillWorkdayPromptButtons === 'function') {
+          await withTimeout(pjaFillWorkdayPromptButtons(profile), 20000, 'wd-prompts-blocked-retry');
+          await sleep(250);
+        }
+        if (typeof pjaFillForm === 'function') pjaFillForm(profile, answers);
+        if (window._pjaComboChain && typeof window._pjaComboChain.then === 'function') {
+          await Promise.race([window._pjaComboChain.catch(() => {}), sleep(20000)]);
+        }
+        await withTimeout(forceWorkdayPhoneCountryCode(), 15000, 'wd-phone-code-blocked-retry');
+        await withTimeout(forceWorkdayReferralSource(), 15000, 'wd-referral-source-blocked-retry');
+        // Workday can clear dependent text fields (address/city/postal/phone) after country/state
+        // prompt commits. Re-fill text inputs after those prompt/selectinput recovery passes.
+        if (typeof pjaFillForm === 'function') {
+          pjaFillForm(profile, answers);
+          if (window._pjaComboChain && typeof window._pjaComboChain.then === 'function') {
+            await Promise.race([window._pjaComboChain.catch(() => {}), sleep(15000)]);
+          }
+          await addDbg('[WD] post-prompt text refill done');
+        }
+        if (typeof pjaForcePhoneField === 'function') {
+          const pf = await pjaForcePhoneField(profile.phone || job.profile?.phone || '');
+          if (pf) await addDbg('[phone] wd-blocked forced via trusted typing n=' + pf);
+        }
+        if (typeof pjaFillRequiredComboboxFallback === 'function') pjaFillRequiredComboboxFallback(profile, answers);
+        if (typeof pjaFillRequiredSelectFallback === 'function') pjaFillRequiredSelectFallback();
+        if (typeof pjaFillRequiredRadioFallback === 'function') pjaFillRequiredRadioFallback();
+        await sleep(700);
+        await summarizeWorkdayCriticalSelects('after-refill ' + (reasonHint || 'blocked'));
+        const reNext = Array.from(document.querySelectorAll('[data-automation-id="click_filter"]'))
+          .find(el => /^next$|^continue$|save.*continue/i.test(el.getAttribute('aria-label') || ''))
+          || document.querySelector('[data-automation-id="bottomNavigationNext"]')
+          || document.querySelector('[data-automation-id="pageFooterNextButton"]')
+          || findButton(/^next$|^continue$|^next step$|^save and continue$|^save & continue$|^proceed$|^proceed to next/i);
+        if (!reNext) {
+          await addDbg('[WD] blocked advance retry no next button');
+          return { advanced: false };
+        }
+        const urlBefore = location.href;
+        const label = reNext.getAttribute('data-automation-id') || (reNext.textContent || reNext.getAttribute('aria-label') || '').trim().slice(0, 30);
+        if (!(await trustedWorkdayClick(reNext, 'blocked-retry-' + label))) {
+          ['pointerdown','mousedown','pointerup','mouseup','click'].forEach(evtType => {
+            reNext.dispatchEvent(new MouseEvent(evtType, { bubbles: true, cancelable: true, view: window }));
+          });
+        }
+        await new Promise(resolve => {
+          let waited = 0;
+          const poll = setInterval(() => {
+            waited += 250;
+            const stepNow = document.body.innerText.match(/current step (\d+)/i)?.[1] || '';
+            const submitNow = !!document.querySelector('[data-automation-id="bottomNavigationSubmit"]') ||
+              Array.from(document.querySelectorAll('[data-automation-id="click_filter"]'))
+                .some(el => /submit.*application|apply now|^submit$/i.test(el.getAttribute('aria-label') || ''));
+            const doneNow = /\/completed\/|\/confirmation/i.test(location.pathname) ||
+              /view my applications|your application (has been|was) submitted|thank you for applying|application received/i.test(document.body?.innerText || '');
+            if ((stepBefore && stepNow !== stepBefore) || location.href !== urlBefore || submitNow || doneNow || waited >= 10000) {
+              clearInterval(poll);
+              resolve();
+            }
+          }, 250);
+        });
+        const stepAfter = document.body.innerText.match(/current step (\d+)/i)?.[1] || '';
+        const submitFound = !!document.querySelector('[data-automation-id="bottomNavigationSubmit"]') ||
+          Array.from(document.querySelectorAll('[data-automation-id="click_filter"]'))
+            .some(el => /submit.*application|apply now|^submit$/i.test(el.getAttribute('aria-label') || '')) ||
+          !!findButton(/submit.*application|submit.*app|apply now|send application|complete application|^submit$|^submit application$/i);
+        const completed = /\/completed\/|\/confirmation/i.test(location.pathname) ||
+          /view my applications|your application (has been|was) submitted|thank you for applying|application received/i.test(document.body?.innerText || '');
+        const advanced = completed || submitFound || location.href !== urlBefore || (stepBefore && stepAfter !== stepBefore);
+        await addDbg('[WD] blocked advance retry result advanced=' + !!advanced + ' submit=' + !!submitFound + ' completed=' + !!completed + ' step=' + (stepBefore || '?') + '→' + (stepAfter || '?'));
+        return { advanced, submitFound, completed };
+      } catch (e) {
+        await addDbg('[WD] blocked advance retry error=' + String(e && e.message || e).slice(0, 100));
+        return { advanced: false, error: String(e && e.message || e) };
+      }
+    };
+    await withTimeout(forceWorkdayPhoneCountryCode(), 15000, 'wd-phone-code');
+    await withTimeout(forceWorkdayReferralSource(), 15000, 'wd-referral-source');
+    if (typeof pjaForcePhoneField === 'function') {
+      const pf0 = await pjaForcePhoneField(profile.phone || job.profile?.phone || '');
+      if (pf0) { await addDbg('[phone] pre-step forced via trusted typing n=' + pf0); await sleep(300); }
+    }
     // These helpers are best-effort and shared with Easy Apply. A site-specific DOM edge case in
     // any one of them must not abort the entire external-apply coroutine (previously that left the
     // queue stuck until the five-minute SW watchdog advanced it). Isolate each helper and retain a
@@ -797,6 +1535,10 @@
     // Combobox fallback: required comboboxes still empty after all above — fill Yes/No by pattern.
     await safeFallback('combobox-fallback', typeof pjaFillRequiredComboboxFallback === 'function'
       ? () => pjaFillRequiredComboboxFallback(profile, answers) : null);
+    if (typeof pjaFillSmartRecruitersCustomFields === 'function') {
+      await withTimeout(pjaFillSmartRecruitersCustomFields(profile), 20000, 'sr-custom-fields');
+      await sleep(250);
+    }
 
     await sleep(500);
     // Workday's State / Country / Phone Device Type prompts render as BUTTONS after the regular
@@ -805,6 +1547,12 @@
     if (typeof pjaFillWorkdayPromptButtons === 'function') {
       await withTimeout(pjaFillWorkdayPromptButtons(profile), 20000, 'wd-prompts');
       await sleep(300);
+    }
+    await withTimeout(forceWorkdayPhoneCountryCode(), 15000, 'wd-phone-code-post');
+    await withTimeout(forceWorkdayReferralSource(), 15000, 'wd-referral-source-post');
+    if (typeof pjaForcePhoneField === 'function') {
+      const pf1 = await pjaForcePhoneField(profile.phone || job.profile?.phone || '');
+      if (pf1) { await addDbg('[phone] wd-post forced via trusted typing n=' + pf1); await sleep(250); }
     }
 
     // --- Multi-step: handle Next button if needed ---
@@ -832,6 +1580,33 @@
           await sleep(800);
           continue;
         }
+        // Workday can occasionally land on a shell route after account auth: it says
+        // "current step 1", exposes top navigation + "Back to Job Posting", but no form inputs
+        // and no Next/Submit footer. Recover once by going back to the posting and restarting the
+        // apply flow instead of classifying the application as no_submit_btn.
+        const isWorkdayDeadEnd = /workday\.com|myworkdayjobs\.com/i.test(location.hostname)
+          && /current step \d+/i.test(document.body.innerText || '')
+          && pjaQueryAllExt('input, textarea, select').filter(el => {
+            const r = el.getBoundingClientRect();
+            return r.width > 0 && r.height > 0;
+          }).length === 0;
+        if (isWorkdayDeadEnd) {
+          const deadEndRetryKey = 'pja_wd_deadend_retry_' + (job.id || job.jobId || job.applyUrl || '');
+          if (sessionStorage.getItem(deadEndRetryKey) !== '1') {
+            sessionStorage.setItem(deadEndRetryKey, '1');
+            const backBtn = findButton(/^back to job posting$/i);
+            await addDbg('[WD] empty step-1 dead-end; restarting from job posting backBtn=' + !!backBtn);
+            if (backBtn) {
+              if (!(await trustedWorkdayClick(backBtn, 'back-to-job-posting'))) backBtn.click();
+              await sleep(4000);
+            } else if (job.applyUrl) {
+              location.assign(job.applyUrl);
+              await sleep(4000);
+            }
+            return runExternalApply(job, rawAnswers);
+          }
+          await addDbg('[WD] empty step-1 dead-end already retried once');
+        }
         const diagBtns = Array.from(document.querySelectorAll('button')).map(b => (b.textContent||b.getAttribute('aria-label')||'').trim().slice(0,20)).filter(Boolean).slice(0,8);
         const diagCFs = Array.from(document.querySelectorAll('[data-automation-id="click_filter"]')).map(cf => cf.getAttribute('aria-label')||'noLabel').slice(0,5);
         const diagBotNext = !!document.querySelector('[data-automation-id="bottomNavigationNext"]');
@@ -847,6 +1622,15 @@
       if (typeof pjaFillWorkdayPromptButtons === 'function') {
         await withTimeout(pjaFillWorkdayPromptButtons(profile), 20000, 'wd-prompts-step');
         await sleep(200);
+      }
+      // Country/state prompt commits can trigger Workday to re-render and clear downstream address
+      // and phone fields. Restore normal text inputs before computing missing-required fields.
+      if (typeof pjaFillForm === 'function') {
+        pjaFillForm(profile, answers);
+        if (window._pjaComboChain && typeof window._pjaComboChain.then === 'function') {
+          await Promise.race([window._pjaComboChain.catch(() => {}), sleep(15000)]);
+        }
+        await addDbg('[WD] post-prompt step text refill done');
       }
       const missing = findMissingRequired();
       // Workday selectinput fields can't be opened via JS — try Next anyway and let Workday validate.
@@ -865,6 +1649,12 @@
         if (typeof pjaFillWorkdayPromptButtons === 'function') {
           await withTimeout(pjaFillWorkdayPromptButtons(profile), 20000, 'wd-prompts-refill');
           await sleep(200);
+        }
+        await withTimeout(forceWorkdayPhoneCountryCode(), 15000, 'wd-phone-code-refill');
+        await withTimeout(forceWorkdayReferralSource(), 15000, 'wd-referral-source-refill');
+        if (typeof pjaForcePhoneField === 'function') {
+          const pf2 = await pjaForcePhoneField(profile.phone || job.profile?.phone || '');
+          if (pf2) { await addDbg('[phone] wd-refill forced via trusted typing n=' + pf2); await sleep(250); }
         }
         pjaFillRequiredComboboxFallback(profile, answers);
         await sleep(400);
@@ -901,15 +1691,17 @@
         try { await new Promise(r => chrome.storage.local.set({ ['pja_wd_submitclick_' + (job.id || job.jobId || '')]: Date.now() }, r)); } catch (_) {}
       }
       const preClickUrl = location.href;
-      if (isWorkdaySidStep && nextBtnAid) {
-        // SID form React handlers check isTrusted — synthetic events are ignored.
-        // Other Workday steps work fine with synthetic events (CDP double-fires and breaks them).
-        await new Promise(resolve => {
-          chrome.runtime.sendMessage({
-            type: 'WORKDAY_TRUSTED_CLICK',
-            selector: '[data-automation-id="' + nextBtnAid + '"]'
-          }, () => resolve());
-        });
+      const preClickBodyMarker = !isWorkdayHost && !stepTextBefore
+        ? String(document.body?.innerText || '').replace(/\s+/g, ' ').slice(0, 4000)
+        : '';
+      if (isWorkdayHost) {
+        const clicked = await trustedWorkdayClick(nextBtn, nextBtnAid || nextBtnText || 'next');
+        if (!clicked) {
+          ['pointerdown','mousedown','pointerup','mouseup','click'].forEach(evtType => {
+            const evt = new MouseEvent(evtType, { bubbles: true, cancelable: true, view: window });
+            nextBtn.dispatchEvent(evt);
+          });
+        }
       } else {
         ['pointerdown','mousedown','pointerup','mouseup','click'].forEach(evtType => {
           const evt = new MouseEvent(evtType, { bubbles: true, cancelable: true, view: window });
@@ -929,6 +1721,15 @@
           if (errFound || advanced || urlChanged || waited >= 20000) { clearInterval(poll); resolve(); }
         }, 250);
       });
+      if (!isWorkdayHost && !stepTextBefore && location.href === preClickUrl) {
+        const postClickBodyMarker = String(document.body?.innerText || '').replace(/\s+/g, ' ').slice(0, 4000);
+        const submitNow = !!findButton(/submit.*application|submit.*app|apply now|send application|complete application|^submit$|^submit application$/i);
+        if (postClickBodyMarker === preClickBodyMarker && !submitNow) {
+          await addDbg('[ext] step ' + steps + ' no observable advance after Next; breaking to terminal handling');
+          stuckOnWdSelectinput = isSmartRecruitersHost ? 'smartrecruiters' : true;
+          break;
+        }
+      }
       // Detect Workday validation errors after clicking Next:
       const wdValidationError = isWorkdayHost &&
         Array.from(document.querySelectorAll('button')).some(b => /^errors found$/i.test(b.textContent.trim()));
@@ -1000,6 +1801,12 @@
           await sleep(250);
         }
         await pjaFillWorkdayAppQuestions(profile);
+        await withTimeout(forceWorkdayPhoneCountryCode(), 15000, 'wd-phone-code-error-recovery');
+        await withTimeout(forceWorkdayReferralSource(), 15000, 'wd-referral-source-error-recovery');
+        if (typeof pjaForcePhoneField === 'function') {
+          const pf3 = await pjaForcePhoneField(profile.phone || job.profile?.phone || '');
+          if (pf3) { await addDbg('[phone] wd-error forced via trusted typing n=' + pf3); await sleep(250); }
+        }
         pjaFillRequiredComboboxFallback(profile, answers);
         if (typeof pjaFillRequiredRadioFallback === 'function') pjaFillRequiredRadioFallback();
         await sleep(700);
@@ -1089,6 +1896,18 @@
           const stuckBtns = Array.from(document.querySelectorAll('button,[data-automation-id="click_filter"]'))
             .map(b => (b.textContent || b.getAttribute('aria-label') || '').trim().slice(0,25)).filter(Boolean).slice(0,6);
           await addDbg('[ext] step ' + steps + ' stuck: stepText=' + stepTextBefore + ' url=' + location.href.slice(-40) + ' btns=' + stuckBtns.join('|'));
+          const recovered = await retryWorkdayBlockedAdvance('same_step');
+          if (recovered.completed) {
+            await addDbg('[ext] same-step retry reached confirmation');
+            sessionStorage.setItem('pja_last_action', 'recordResult:applied:' + job.company);
+            await recordResult(job, { success: true, reason: 'applied' });
+            navigateBack(job);
+            return;
+          }
+          if (recovered.advanced) {
+            await addDbg('[ext] same-step retry advanced; re-entering fill path');
+            return runExternalApply(job, rawAnswers);
+          }
           stuckOnWdSelectinput = true;
           break;
         }
@@ -1201,6 +2020,40 @@
       const pf = await pjaForcePhoneField(profile.phone || job.profile?.phone || '');
       if (pf) { await addDbg('[phone] forced via trusted typing n=' + pf); await sleep(300); }
     }
+    if (/greenhouse\.io/i.test(location.hostname) && typeof pjaFillGreenhouseEducation === 'function') {
+      await addDbg('[gh-edu] pre-check pass');
+      await withTimeout(pjaFillGreenhouseEducation(profile), 45000, 'gh-edu-precheck');
+      await sleep(300);
+    }
+    if (/smartrecruiters\.com/i.test(location.hostname) && typeof pjaFillSmartRecruitersCustomFields === 'function') {
+      await withTimeout(pjaFillSmartRecruitersCustomFields(profile), 20000, 'sr-custom-precheck');
+      await sleep(250);
+    }
+    const srEmptyPrecheck = await recoverSmartRecruitersEmptyStep('precheck');
+    if (srEmptyPrecheck === 'rerun') return runExternalApply(job, rawAnswers);
+    if (srEmptyPrecheck === 'empty') {
+      const help = await maybeRequestApplyHelp('no_submit_after_spa', {
+        visibleErrors: [],
+        missingRequired: ['smartrecruiters_empty_step'],
+        formSummary: 'SmartRecruiters advanced but no application controls hydrated',
+      });
+      const recoveryKey = 'pja_recovery_sr_empty_' + (job.id || job.jobId || job.applyUrl || '') + '_precheck';
+      if (!sessionStorage.getItem(recoveryKey)) {
+        sessionStorage.setItem(recoveryKey, '1');
+        const recovery = await executeRecoveryActions(help, 'no_submit_after_spa');
+        if (recovery.executed) {
+          await sleep(1200);
+          if (visibleApplicationControls().length) {
+            await addDbg('[recover] sr empty SPA recovered controls; re-entering submit path');
+            return runExternalApply(job, rawAnswers);
+          }
+        }
+      }
+      sessionStorage.setItem('pja_last_action', 'recordResult:no_submit_after_spa:' + job.company);
+      await recordResult(job, { success: false, reason: 'no_submit_after_spa', fields: ['smartrecruiters_empty_step'] });
+      navigateBack(job);
+      return;
+    }
     // Force-commit all required policy react-selects (sponsorship/work-auth/onsite/ack) via the
     // proven fiber bridge — the collect→answer flow intermittently missed them, failing submit.
     if (typeof pjaForceAllPolicyReactSelects === 'function') {
@@ -1224,6 +2077,9 @@
       if (typeof pjaForcePhoneField === 'function') {
         try { await withTimeout(pjaForcePhoneField(profile.phone || job.profile?.phone || ''), 8000, 'phone-postfill'); } catch (_) {}
       }
+      if (/workday\.com|myworkdayjobs\.com/i.test(location.hostname)) {
+        try { await withTimeout(forceWorkdayPhoneCountryCode(), 15000, 'wd-phone-code-postfill'); } catch (_) {}
+      }
       if (typeof pjaForceAllPolicyReactSelects === 'function') {
         try { const pn = await withTimeout(pjaForceAllPolicyReactSelects(job.profile), 8000, 'policy-postfill'); if (pn) await addDbg('[policy-rs] post-AI committed n=' + pn); } catch (_) {}
       }
@@ -1231,10 +2087,122 @@
       hardMissing = missing.filter(m => m.type !== 'wd_selectinput');
     }
     if (hardMissing.length) {
+      const missingLabels = hardMissing.map(m => m.label);
+      if (isSmartRecruitersHost && missingLabels.length === 1 && missingLabels[0] === '*') {
+        const srEmptyMissing = await recoverSmartRecruitersEmptyStep('missing-required-sentinel');
+        if (srEmptyMissing === 'rerun') return runExternalApply(job, rawAnswers);
+        const help = await maybeRequestApplyHelp('no_submit_after_spa', {
+          visibleErrors: [],
+          missingRequired: ['smartrecruiters_required_sentinel_no_controls'],
+          formSummary: 'SmartRecruiters required-field sentinel appeared with zero visible application controls',
+        });
+        const recoveryKey = 'pja_recovery_sr_empty_' + (job.id || job.jobId || job.applyUrl || '') + '_sentinel';
+        if (!sessionStorage.getItem(recoveryKey)) {
+          sessionStorage.setItem(recoveryKey, '1');
+          const recovery = await executeRecoveryActions(help, 'no_submit_after_spa');
+          if (recovery.executed) {
+            await sleep(1200);
+            if (visibleApplicationControls().length) {
+              await addDbg('[recover] sr sentinel recovered controls; re-entering submit path');
+              return runExternalApply(job, rawAnswers);
+            }
+          }
+        }
+        sessionStorage.setItem('pja_last_action', 'recordResult:no_submit_after_spa:' + job.company);
+        await recordResult(job, { success: false, reason: 'no_submit_after_spa', fields: ['smartrecruiters_required_sentinel_no_controls'] });
+        navigateBack(job);
+        return;
+      }
+      const emailVerification = missingLabels.some(label =>
+        /verification code|code (?:was )?sent|sent to .*@|enter (?:the )?(?:8|six|6)?[- ]?(?:character )?code|email.*verify|verify.*email/i.test(label)
+      ) || /verification code (?:was )?sent|enter (?:the )?(?:8|six|6)?[- ]?(?:character )?code|verify your email/i.test(document.body?.innerText || '');
+      if (emailVerification) {
+        const bodyText = document.body?.innerText || '';
+        const realCaptchaWidget = !!document.querySelector('iframe[src*="recaptcha"], iframe[title*="reCAPTCHA" i], [class*="captcha" i]') ||
+          /protected by\s+reCAPTCHA|verify you are human/i.test(bodyText);
+        const emailCodeGate = /security code|verification code|code (?:was )?sent|sent to .*@|enter (?:the )?(?:8|six|6)?[- ]?(?:character )?code|confirm you'?re a human/i.test(bodyText);
+        if (realCaptchaWidget && !emailCodeGate) {
+          console.log('PJA ext-apply: captcha/human verification, fields:', missingLabels.join('; '));
+          sessionStorage.setItem('pja_last_action', 'recordResult:captcha:' + job.company);
+          await maybeRequestApplyHelp('captcha', {
+            missingRequired: missingLabels,
+            formSummary: 'reCAPTCHA/human challenge blocked submission',
+          });
+          await recordResult(job, { success: false, reason: 'captcha', fields: missingLabels });
+          navigateBack(job);
+          return;
+        }
+        console.log('PJA ext-apply: email_verification_required, fields:', missingLabels.join('; '));
+        sessionStorage.setItem('pja_last_action', 'recoverEmailCode:' + job.company);
+        const help = await maybeRequestApplyHelp('email_verification_required', {
+          missingRequired: missingLabels,
+          formSummary: 'external email security-code verification required before final submission',
+        });
+        const recovery = await recoverEmailVerificationCode('email_verification_required');
+        if (recovery.filled) {
+          const btn = findButton(/submit.*application|submit.*app|apply now|send application|complete application|^submit$|^submit application$/i);
+          if (btn) {
+            await addDbg('[email-code] retrying submit after gmail code');
+            await pjaCdpClickEl(btn);
+            let ok = false;
+            for (let i = 0; i < 20; i++) {
+              await sleep(500);
+              if (pjaIsSubmitSuccess({ text: document.body?.innerText || '', title: document.title,
+                url: location.href, preSubmitUrl: job._preSubmitUrl || job.applyUrl || '', hasSubmitButton: !!findButton(/submit/i),
+                hasFormFields: !!pjaQueryAllExt('form input, form select, form textarea').length, iterations: i })) {
+                ok = true; break;
+              }
+            }
+            if (ok) {
+              sessionStorage.setItem('pja_last_action', 'recordResult:applied:' + job.company);
+              await recordResult(job, { success: true, reason: 'applied' });
+              navigateBack(job);
+              return;
+            }
+            await addDbg('[email-code] submit after code did not confirm');
+            await capturePostClickDiagnostic('email_code_submit_unconfirmed', {
+              branch: 'pre_submit_code_gate',
+              clickedAfterCode: true,
+              missingRequired: missingLabels,
+            });
+          }
+        }
+        if (help && help.shouldAdvance === false) await addDbg('[email-code] dev-server advised not to advance without code');
+        sessionStorage.setItem('pja_last_action', 'recordResult:email_verification_required:' + job.company);
+        await recordResult(job, { success: false, reason: 'email_verification_required', fields: missingLabels,
+          diagnostic: collectPostClickPageSnapshot() });
+        navigateBack(job);
+        return;
+      }
       console.log('PJA ext-apply: missing_required, fields:', hardMissing.map(m => m.label).join('; '));
       sessionStorage.setItem('pja_last_action', 'recordResult:missing_required:' + job.company);
+      const help = await maybeRequestApplyHelp('missing_required', {
+        missingRequired: missingLabels,
+        formSummary: 'required fields still missing after fill',
+      });
+      const recoveryKey = 'pja_recovery_missing_' + (job.id || job.jobId || job.applyUrl || '');
+      if (!sessionStorage.getItem(recoveryKey)) {
+        sessionStorage.setItem(recoveryKey, '1');
+        const recovery = await executeRecoveryActions(help, 'missing_required');
+        if (recovery.advanceReason) {
+          await addDbg('[recover] terminal advance after missing_required: ' + recovery.advanceReason);
+          await saveMissingQuestions(hardMissing, job);
+          await recordResult(job, { success: false, reason: recovery.advanceReason, fields: missingLabels });
+          navigateBack(job);
+          return;
+        }
+        if (recovery.executed) {
+          await sleep(900);
+          const afterRecovery = findMissingRequired().filter(m => m.type !== 'wd_selectinput');
+          if (!afterRecovery.length) {
+            await addDbg('[recover] missing_required cleared; re-entering submit path');
+            return runExternalApply(job, rawAnswers);
+          }
+          await addDbg('[recover] missing_required remains: ' + afterRecovery.map(m => m.label).join('|').slice(0, 100));
+        }
+      }
       await saveMissingQuestions(hardMissing, job);
-      await recordResult(job, { success: false, reason: 'missing_required', fields: hardMissing.map(m => m.label) });
+      await recordResult(job, { success: false, reason: 'missing_required', fields: missingLabels });
       navigateBack(job);
       return;
     }
@@ -1250,12 +2218,35 @@
         await addDbg('[ext] stuck but submit btn found, falling through to submit');
         // fall through to submit section
       } else {
+        const recovered = await retryWorkdayBlockedAdvance(stuckOnWdSelectinput === 'resume' ? 'resume' : 'terminal_selectinput');
+        if (recovered.completed) {
+          await addDbg('[ext] terminal stuck retry reached confirmation');
+          sessionStorage.setItem('pja_last_action', 'recordResult:applied:' + job.company);
+          await recordResult(job, { success: true, reason: 'applied' });
+          navigateBack(job);
+          return;
+        }
+        if (recovered.advanced) {
+          await addDbg('[ext] terminal stuck retry advanced; re-entering fill path');
+          return runExternalApply(job, rawAnswers);
+        }
         const wdFields = missing.map(m => m.label);
         const isResume = stuckOnWdSelectinput === 'resume';
-        const reason = isResume ? 'missing_resume' : 'wd_selectinput_blocked';
-        const fields = isResume ? ['resume_required'] : (wdFields.length ? wdFields : ['unknown_wd_fields']);
+        const reason = isResume ? 'missing_resume'
+          : stuckOnWdSelectinput === 'smartrecruiters' ? 'missing_required'
+          : 'wd_selectinput_blocked';
+        const fields = isResume ? ['resume_required']
+          : wdFields.length ? wdFields
+          : stuckOnWdSelectinput === 'smartrecruiters' ? ['smartrecruiters_blocked_advance']
+          : ['unknown_wd_fields'];
         console.log('PJA ext-apply: WD blocked form advance reason=' + reason, 'fields:', fields.join('; '));
         sessionStorage.setItem('pja_last_action', 'recordResult:' + reason + ':' + job.company);
+        await maybeRequestApplyHelp(reason, {
+          missingRequired: fields,
+          formSummary: stuckOnWdSelectinput === 'smartrecruiters'
+            ? 'SmartRecruiters required controls blocked step advance'
+            : 'workday selectinput or resume gate blocked advance',
+        });
         if (missing.length) await saveMissingQuestions(missing, job);
         await recordResult(job, { success: false, reason, fields });
         navigateBack(job);
@@ -1287,9 +2278,86 @@
       || findButton(/submit.*application|submit.*app|apply now|send application|complete application|^submit$|^submit application$/i);
     if (!submitBtn) {
       // Capture button list and URL to persistent storage for debugging
-      const allBtns = pjaQueryAllExt('button, input[type=submit]').map(b => (b.textContent || b.value || '').trim().slice(0,40)).filter(Boolean);
+      const allBtns = pjaQueryAllExt('button, input[type=submit], [role=button], [data-automation-id="click_filter"]')
+        .map(b => (b.textContent || b.value || b.getAttribute('aria-label') || '').trim().slice(0,40))
+        .filter(Boolean);
+      const isSuccessFactors = /successfactors\.com|talentcommunity/i.test(location.hostname + location.pathname + location.href);
+      const sfRetryKey = 'pja_sf_start_' + (job.id || job.jobId || job.applyUrl || '');
+      if (isSuccessFactors && sessionStorage.getItem(sfRetryKey) !== '1') {
+        sessionStorage.setItem(sfRetryKey, '1');
+        const sfResp = await new Promise(resolve => {
+          try {
+            chrome.runtime.sendMessage({ type: 'SUCCESSFACTORS_START' }, r => resolve(chrome.runtime.lastError ? { ok: false, error: chrome.runtime.lastError.message } : (r || {})));
+          } catch (e) { resolve({ ok: false, error: e.message }); }
+        });
+        await addDbg('[SF] start handler ok=' + !!sfResp.ok + (sfResp.error ? ' err=' + String(sfResp.error).slice(0, 60) : ''));
+        await sleep(5000);
+        return runExternalApply(job, rawAnswers);
+      }
+      const sfLandingWithoutForm = isSuccessFactors && (
+        /\/(?:search|talentcommunity)(?:\/|$)|\/$/i.test(location.pathname || '/') ||
+        /talent community|search by keyword|job search|candidate profile/i.test(document.body?.innerText || '')
+      ) && !pjaQueryAllExt('input[required], textarea[required], select[required], [aria-required="true"]').length;
+      if (sfLandingWithoutForm) {
+        await addDbg('[SF] no application form after start handler; classifying no_apply_path url=' + location.pathname.slice(0, 60));
+        await maybeRequestApplyHelp('no_apply_btn_on_description', {
+          visibleErrors: allBtns,
+          formSummary: 'successfactors/talentcommunity landing page without application form',
+        });
+        sessionStorage.setItem('pja_last_action', 'recordResult:no_apply_path:' + job.company);
+        await recordResult(job, { success: false, reason: 'no_apply_path' });
+        navigateBack(job);
+        return;
+      }
+      const isWorkdayNoSubmit = /workday\.com|myworkdayjobs\.com/i.test(location.hostname);
+      const wdVisibleInputCount = isWorkdayNoSubmit ? pjaQueryAllExt('input, textarea, select').filter(el => {
+        const r = el.getBoundingClientRect();
+        return r.width > 0 && r.height > 0;
+      }).length : 0;
+      const wdAuthGateVisible = isWorkdayNoSubmit && (
+        !!document.querySelector('[data-automation-id="createAccountLink"], [data-automation-id="signInLink"], [data-automation-id="utilityButtonSignIn"], input[type=password], input[data-automation-id="email"], input[type=email]') ||
+        /sign.?in with email|continue with email|create.{0,10}account|candidate home|sign.?in to|log.?in to/i.test(document.body?.innerText || '')
+      );
+      const wdNoSubmitAuthRetryKey = 'pja_wd_nosubmit_auth_retry_' + (job.id || job.jobId || job.applyUrl || '');
+      if (isWorkdayNoSubmit && wdAuthGateVisible && sessionStorage.getItem(wdNoSubmitAuthRetryKey) !== '1') {
+        sessionStorage.setItem(wdNoSubmitAuthRetryKey, '1');
+        await addDbg('[WD] no_submit auth-gate recovery inputs=' + wdVisibleInputCount + ' url=' + location.pathname.slice(-45));
+        if (typeof window.pjaWorkdayAuth !== 'undefined') {
+          const { pja_job_password: _storedPw2 } = await new Promise(r => chrome.storage.local.get('pja_job_password', r));
+          const authResult2 = await window.pjaWorkdayAuth.run(profile, _storedPw2 || 'ChangeMe#2025!');
+          await addDbg('[WD] no_submit auth-gate recovery result=' + authResult2);
+          if (authResult2 === 'needs_gmail_verify') {
+            await new Promise(r => chrome.storage.local.set({
+              pja_wd_pending_apply: { applyUrl: job.applyUrl, jobId: job.id, hostname: location.hostname, ts: Date.now() }
+            }, r));
+            return;
+          }
+          if (authResult2 === 'signed_in' || authResult2 === 'account_created_verified') {
+            await sleep(2500);
+            return runExternalApply(job, rawAnswers);
+          }
+          if (authResult2 === 'captcha_blocked') {
+            await maybeRequestApplyHelp('workday_captcha', { formSummary: 'workday auth captcha from no-submit recovery', visibleErrors: allBtns });
+            sessionStorage.setItem('pja_last_action', 'recordResult:workday_captcha:' + job.company);
+            await recordResult(job, { success: false, reason: 'workday_captcha' });
+            navigateBack(job);
+            return;
+          }
+          if (authResult2 === 'locked') {
+            await maybeRequestApplyHelp('workday_auth_sign_in_error', { formSummary: 'workday auth lock from no-submit recovery', visibleErrors: allBtns });
+            sessionStorage.setItem('pja_last_action', 'recordResult:workday_account_locked:' + job.company);
+            await recordResult(job, { success: false, reason: 'workday_account_locked' });
+            navigateBack(job);
+            return;
+          }
+        }
+      }
       console.log('PJA ext-apply: no_submit_btn. All buttons:', allBtns.join(' | '));
       await new Promise(r => chrome.storage.local.set({ pja_dbg_nosubmit: { url: location.href.slice(0,120), btns: allBtns.slice(0,15), ts: Date.now() } }, r));
+      await maybeRequestApplyHelp('no_submit_btn', {
+        visibleErrors: allBtns,
+        formSummary: 'submit button absent',
+      });
       sessionStorage.setItem('pja_last_action', 'recordResult:no_submit_btn:' + job.company);
       await recordResult(job, { success: false, reason: 'no_submit_btn' });
       navigateBack(job);
@@ -1332,7 +2400,10 @@
 
     console.log('PJA ext-apply: clicking submit:', submitBtn.textContent.trim().slice(0,40));
     sessionStorage.setItem('pja_last_action', 'submit_clicked:' + job.company);
-    if (/greenhouse\.io|ashbyhq\.com/i.test(location.hostname)) {
+    if (/workday\.com|myworkdayjobs\.com/i.test(location.hostname)) {
+      const clicked = await trustedWorkdayClick(submitBtn, 'submit');
+      if (!clicked) submitBtn.click();
+    } else if (/greenhouse\.io|ashbyhq\.com/i.test(location.hostname)) {
       // Several Remix tenants accept synthetic field events but reject a synthetic final click:
       // the page simply reloads with zero validation errors and no confirmation. Deliver the final
       // action through CDP so event.isTrusted is true, as we already do for Remix option commits.
@@ -1373,13 +2444,98 @@
       })) { success = true; break; }
     }
     console.log('PJA ext-apply: post-submit success:', success, '| url:', location.href.slice(0,80), '| pageText snippet:', document.body.innerText.slice(0,120));
+    // Greenhouse and similar ATSes can leave the form visible after the submit click when a
+    // reCAPTCHA challenge is required. Do not label that ambiguous state as submit_unclear:
+    // explicitly classify it so the queue skips the job and advances without retrying or
+    // implying that an application may have been sent.
+    const visibleValidationErrors = () => {
+      try {
+        return pjaQueryAllExt('[aria-invalid="true"], [class*="error"]:not([class*="error-"]), [role="alert"], .field--error, [class*="invalid"]')
+          .filter(el => {
+            try {
+              const r = el.getBoundingClientRect();
+              if (!(r.width > 0 && r.height > 0)) return false;
+              const txt = (el.textContent || el.getAttribute('aria-label') || el.id || '').replace(/\s+/g, ' ').trim();
+              if (!txt) return false;
+              if (/cookie settings|powered by|privacy policy/i.test(txt)) return false;
+              return true;
+            } catch(_) {
+              return false;
+            }
+          });
+      } catch (_) {
+        return [];
+      }
+    };
+    if (!success) {
+      const errElsBeforeCaptcha = visibleValidationErrors();
+      const explicitMissingErrors = errElsBeforeCaptcha.some(el => /missing entry|required field|field.*required|value is required|needs corrections|please provide|select.+required/i.test(el.textContent || el.getAttribute('aria-label') || ''));
+      const postSubmitText = document.body?.innerText || '';
+      const postSubmitEmailCodeGate = /security code|verification code|code (?:was )?sent|sent to .*@|enter (?:the )?(?:8|six|6)?[- ]?(?:character )?code|confirm you'?re a human/i.test(postSubmitText) && findEmailCodeField();
+      if (postSubmitEmailCodeGate && !explicitMissingErrors) {
+        await addDbg('[submit-fail] email verification code gate detected after submit');
+        const help = await maybeRequestApplyHelp('email_verification_required', {
+          formSummary: 'email security-code verification required after submit click',
+        });
+        const recovery = await recoverEmailVerificationCode('post_submit_email_code');
+        if (recovery.filled) {
+          const btn = findButton(/submit.*application|submit.*app|apply now|send application|complete application|^submit$|^submit application$/i);
+          if (btn) {
+            await addDbg('[email-code] retrying submit once after post-submit code');
+            let clickedAfterCode = false;
+            try {
+              clickedAfterCode = await Promise.race([
+                (async () => { await pjaCdpClickEl(btn); return true; })(),
+                new Promise(resolve => setTimeout(() => resolve(false), 8000))
+              ]);
+            } catch (_) {}
+            if (!clickedAfterCode) {
+              await addDbg('[email-code] cdp submit after code timed out; using DOM click fallback');
+              try { btn.click(); clickedAfterCode = true; } catch (_) {}
+            }
+            for (let i = 0; i < 20; i++) {
+              await sleep(500);
+              if (pjaIsSubmitSuccess({ text: document.body?.innerText || '', title: document.title,
+                url: location.href, preSubmitUrl, hasSubmitButton: !!findButton(/submit/i),
+                hasFormFields: !!pjaQueryAllExt('form input, form select, form textarea').length, iterations: i })) {
+                sessionStorage.setItem('pja_last_action', 'recordResult:applied:' + job.company);
+                await recordResult(job, { success: true, reason: 'applied' });
+                navigateBack(job);
+                return;
+              }
+            }
+            await addDbg('[email-code] submit after code did not confirm');
+            await capturePostClickDiagnostic('email_code_submit_unconfirmed', {
+              branch: 'post_submit_code_gate',
+              clickedAfterCode,
+            });
+          }
+        }
+        if (help && help.shouldAdvance === false) await addDbg('[email-code] recovery incomplete; recording email_verification_required');
+        sessionStorage.setItem('pja_last_action', 'recordResult:email_verification_required:' + job.company);
+        await recordResult(job, { success: false, reason: 'email_verification_required',
+          diagnostic: collectPostClickPageSnapshot() });
+        navigateBack(job);
+        return;
+      }
+      const captchaWidgetVisible = pjaQueryAllExt('iframe[src*="recaptcha"], iframe[title*="reCAPTCHA" i], [class*="captcha" i]')
+        .some(el => { try { const r = el.getBoundingClientRect(); return r.width > 0 && r.height > 0; } catch (_) { return true; } })
+        || /protected by\s+reCAPTCHA|verify you are human/i.test(postSubmitText);
+      if (captchaWidgetVisible && !explicitMissingErrors) {
+        await addDbg('[submit-fail] captcha detected after submit click; deferring');
+        sessionStorage.setItem('pja_last_action', 'recordResult:captcha:' + job.company);
+        await maybeRequestApplyHelp('captcha', { formSummary: 'captcha visible after submit' });
+        await recordResult(job, { success: false, reason: 'captcha' });
+        navigateBack(job);
+        return;
+      }
+    }
     // DIAGNOSTIC: on submit_unclear, dump Greenhouse/ATS validation errors so we can see WHICH
     // field blocked the submit (the form stays up with error text / aria-invalid on the culprit).
     let reactSelectError = false;
     if (!success) {
       try {
-        const errEls = pjaQueryAllExt('[aria-invalid="true"], [class*="error"]:not([class*="error-"]), [role="alert"], .field--error, [class*="invalid"]')
-          .filter(el => { try { const r = el.getBoundingClientRect(); return r.width > 0 && r.height > 0; } catch(_) { return false; } });
+        const errEls = visibleValidationErrors();
         // A react-select-commit failure (degraded-CDP signature) = the blocking fields are
         // country/state/education/location/question comboboxes, or an errored select__control.
         reactSelectError = errEls.some(el => /country|\bstate\b|school|degree|discipline|location|question_|select__control/i.test(
@@ -1390,6 +2546,54 @@
           return lbl;
         }).filter(Boolean);
         await addDbg('[submit-fail] errs(' + errEls.length + '): ' + errs.join(' | ') + ' | pathHint=' + location.pathname.slice(-24));
+        const isWorkdayHost = /workday\.com|myworkdayjobs\.com/i.test(location.hostname);
+        const terminalHelpReason = reactSelectError && isWorkdayHost ? 'wd_selectinput_blocked' : 'submit_unclear';
+        const help = await maybeRequestApplyHelp(terminalHelpReason, {
+          visibleErrors: errs,
+          formSummary: 'post-submit validation errors on ' + location.hostname,
+        });
+        const recoveryKey = 'pja_recovery_submit_' + (job.id || job.jobId || job.applyUrl || '');
+        if (!success && !sessionStorage.getItem(recoveryKey)) {
+          sessionStorage.setItem(recoveryKey, '1');
+          const recovery = await executeRecoveryActions(help, terminalHelpReason);
+          if (recovery.advanceReason) {
+            await addDbg('[recover] terminal advance after ' + terminalHelpReason + ': ' + recovery.advanceReason);
+            await recordResult(job, { success: false, reason: recovery.advanceReason, fields: errs });
+            navigateBack(job);
+            return;
+          }
+          if (recovery.executed || recovery.retrySubmit) {
+            await sleep(900);
+            const submitAgain = findButton(/submit.*application|submit.*app|apply now|send application|complete application|^submit$|^submit application$/i);
+            if (submitAgain && (recovery.retrySubmit || recovery.executed)) {
+              await addDbg('[recover] retrying submit once after LLM recovery');
+              try {
+                submitAgain.scrollIntoView({ block: 'center', behavior: 'instant' });
+                const rr = submitAgain.getBoundingClientRect();
+                const delivered = await new Promise(resolve => {
+                  try { chrome.runtime.sendMessage({ type: 'LINKEDIN_TRUSTED_CLICK', x: rr.left + rr.width / 2, y: rr.top + rr.height / 2 }, resp => resolve(!(chrome.runtime.lastError || resp?.error))); }
+                  catch (_) { resolve(false); }
+                });
+                if (!delivered) submitAgain.click();
+              } catch (_) { try { submitAgain.click(); } catch (_) {} }
+              await sleep(4500);
+              const postRetrySuccess = pjaIsSubmitSuccess({
+                text: document.body?.innerText || '',
+                title: document.title,
+                url: location.href,
+                preSubmitUrl,
+                hasSubmitButton: !!findButton(/submit.*application|submit.*app|apply now|send application|complete application|^submit$|^submit application$/i),
+                hasFormFields: pjaQueryAllExt('form input, form select, form textarea').some(el => el.type !== 'hidden'),
+              });
+              if (postRetrySuccess) {
+                await addDbg('[recover] retry submit confirmed success');
+                await recordResult(job, { success: true, reason: 'applied' });
+                navigateBack(job);
+                return;
+              }
+            }
+          }
+        }
         // Keep a non-rolling failure ledger. pja_dbg is intentionally tiny and the next job's fill
         // logs overwrite the useful validation evidence before a batch monitor can read it.
         try {
@@ -1552,6 +2756,10 @@
       if (/female|woman/.test(g)) return 'Female';
       if (/male|man/.test(g)) return 'Male';
       return '__DECLINE__';
+    } else if (/referred\b.*\b(employee|internal)|\b(employee|internal)\b.*\brefer/i.test(label)) {
+      return 'No';
+    } else if (/how did you hear|where did you (hear|find)|referral source|source of (this )?application|\bsource\b/i.test(label)) {
+      return profile.referralSource || 'LinkedIn';
     }
     return null;
   }
@@ -1589,19 +2797,44 @@
     if (!/workday\.com|myworkdayjobs\.com/i.test(location.hostname)) return;
     const fields = Array.from(document.querySelectorAll('[data-automation-id^="formField-"]'));
     const log = [];
+    const ownText = opt => {
+      const clone = opt.cloneNode(true);
+      clone.querySelectorAll('[role="option"]').forEach(child => child.remove());
+      return (clone.textContent || '').trim().replace(/\s+/g, ' ');
+    };
+    const trustedClick = el => new Promise(resolve => {
+      if (!el) return resolve(false);
+      const priorId = el.id;
+      const tempId = priorId || ('__pja_wd_appq_' + Date.now() + '_' + Math.random().toString(36).slice(2, 6));
+      if (!priorId) el.id = tempId;
+      try {
+        chrome.runtime.sendMessage({ type: 'WORKDAY_TRUSTED_CLICK', selector: '#' + CSS.escape(tempId), single: true }, resp => {
+          if (!priorId && el.id === tempId) el.removeAttribute('id');
+          resolve(!!(resp && resp.ok));
+        });
+      } catch (_) {
+        if (!priorId && el.id === tempId) el.removeAttribute('id');
+        resolve(false);
+      }
+    });
     for (const field of fields) {
-      const btn = field.querySelector('button[type="button"]');
-      if (!btn || btn.textContent.trim() !== 'Select One') continue;
+      const btn = field.querySelector('button[type="button"], button[aria-haspopup], [role="button"]');
+      if (!btn) continue;
       // Label lives in richText div OR in the button's aria-label (e.g. "Protected Veteran: Select One")
       const richLabel = field.querySelector('[data-automation-id="richText"]')?.textContent || '';
       const btnAriaLabel = btn.getAttribute('aria-label') || '';
-      const label = (richLabel || btnAriaLabel.replace(/:\s*select one.*$/i, '')).toLowerCase();
+      const buttonId = btn.id || btn.getAttribute('data-automation-id') || '';
+      const label = (richLabel || btnAriaLabel.replace(/:\s*select one.*$/i, '') || buttonId).toLowerCase();
       const answer = pjaWorkdayAnswerForLabel(label, profile);
       if (!answer) continue;
+      const selectedText = (btn.textContent || btnAriaLabel || '').trim();
+      const unresolved = /select one|select\.\.\.|required/i.test(selectedText + ' ' + btnAriaLabel) ||
+        btn.getAttribute('aria-invalid') === 'true' || /source--source/i.test(buttonId);
+      if (!unresolved && selectedText && selectedText !== 'Select One') continue;
       // Close any stale open listbox before opening this field's dropdown
       document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
       await new Promise(r => setTimeout(r, 150));
-      btn.click();
+      if (!await trustedClick(btn)) btn.click();
       // Poll up to 1.5s for a listbox to appear
       let listbox = null;
       for (let t = 0; t < 15; t++) {
@@ -1611,10 +2844,16 @@
       }
       if (!listbox) continue;
       const optionEls = Array.from(listbox.querySelectorAll('[role="option"]'));
-      const chosenText = pjaPickAnswerOption(answer, optionEls.map(o => (o.textContent || '').trim()), profile);
-      const opt = chosenText == null ? null : optionEls.find(o => (o.textContent || '').trim() === chosenText);
+      const optionTexts = optionEls.map(ownText);
+      let chosenText = pjaPickAnswerOption(answer, optionTexts, profile);
+      if (!chosenText && /how did you hear|referral source|\bsource\b/i.test(label)) {
+        const fallbacks = ['LinkedIn', 'Job Board or Social Media', 'Social Media', 'Job Board', 'Online Job Board', 'Internet', 'Online', 'Career Site'];
+        chosenText = fallbacks.find(fb => optionTexts.some(txt => txt.toLowerCase().includes(fb.toLowerCase()))) || null;
+      }
+      const opt = chosenText == null ? null : optionEls.find(o => ownText(o) === chosenText);
       if (opt) {
-        opt.click();
+        const target = opt.querySelector('[data-automation-id="promptLeafNode"]') || opt;
+        if (!await trustedClick(target)) target.click();
         await new Promise(r => setTimeout(r, 300));
         log.push(label.slice(0, 30) + '→' + answer);
       } else {
@@ -2173,6 +3412,31 @@
       return 'email_path';
     }
 
+    // Generic non-Workday candidate-auth gate (Eightfold/SAP-style): email field + Continue/
+    // social sign-in/create-account controls but no application form yet. We do not create
+    // arbitrary non-Workday accounts in E2E-safe mode; defer and advance instead of stalling.
+    const genericEmailGate = document.querySelector(
+      'input[type=email], input[name*=email]:not([name="website"]), input[id*=email]'
+    );
+    const genericGateText = document.body?.innerText || '';
+    const genericContinue = findButton(/^continue$/i) || findButton(/create.{0,10}account/i);
+    if (genericEmailGate && genericContinue &&
+        /sign in|first time here|create.{0,10}account|candidate authentication|join talent network|sign in using/i.test(genericGateText) &&
+        !document.querySelector('input[type=password]')) {
+      if (typeof pjaSetNative === 'function') {
+        pjaSetNative(genericEmailGate, profile.email || '');
+      } else {
+        genericEmailGate.value = profile.email || '';
+        genericEmailGate.dispatchEvent(new InputEvent('input', { bubbles: true, data: profile.email || '', inputType: 'insertText' }));
+      }
+      try { chrome.storage.local.get('pja_dbg', d => {
+        const a = (d.pja_dbg || []).slice(-160);
+        a.push('[auth] generic email gate needs_login host=' + location.hostname);
+        chrome.storage.local.set({ pja_dbg: a });
+      }); } catch (_) {}
+      return 'needs_password';
+    }
+
     // Strategy 2: Workday / standard password form — auto-create or auto-sign-in
     // Use let so we can re-query after clicking "Create Account" navigation button (SPA).
     // Workday uses data-automation-id="email" with type="text" — NOT type="email".
@@ -2378,7 +3642,7 @@
     : sel => Array.from(document.querySelectorAll(sel));
 
   function findButton(pattern) {
-    return pjaQueryAllExt('button[type=submit], button[type=button], input[type=submit], button')
+    return pjaQueryAllExt('button[type=submit], button[type=button], input[type=submit], button, [role=button], [data-automation-id="click_filter"], spl-button, oc-button')
       .find(b => !b.disabled && pattern.test((b.textContent || b.value || b.getAttribute('aria-label') || '').trim()));
   }
 
@@ -2399,7 +3663,7 @@
       const label = getLabelFor(el);
       if (!label) continue;
       const key = typeof pjaClassify === 'function' ? pjaClassify(label) : null;
-      const isPhoneById = /^phone$/i.test(el.id) || /^phone$/i.test(el.name);
+      const isPhoneById = /^(phone|phoneNumber)$/i.test(el.id || '') || /^(phone|phoneNumber)$/i.test(el.name || '');
       if (key === 'phone' || el.type === 'tel' || isPhoneById) {
         console.log('PJA ext-apply retryPhoneFill: filling', JSON.stringify(label), el.type, el.id);
         // Use fiber onChange to update React state directly; skip blur to avoid validation clearing.
@@ -2419,6 +3683,23 @@
   function findMissingRequired() {
     const missing = [];
     const seen = new Set();
+
+    const committedReactSelectValue = (el) => {
+      try {
+        if (!el) return '';
+        const containers = [
+          el.closest('[class*="select__container"],[class*="select-container"],[class*="select "]'),
+          el.closest('[class*="select__control"],[class*="select-control"]')?.parentElement,
+          el.parentElement?.parentElement?.parentElement,
+        ].filter(Boolean);
+        for (const rsContainer of containers) {
+          const sv = rsContainer.querySelector('[class*="single-value"],[class*="singleValue"],[class*="multi-value"],[class*="multiValue"]');
+          const txt = (sv?.textContent || '').replace(/\s+/g, ' ').trim();
+          if (txt && !/^select( an option| \.\.\.|\.\.\.)?$/i.test(txt)) return txt;
+        }
+      } catch (_) {}
+      return '';
+    };
 
     for (const el of pjaQueryAllExt(
       'input[required]:not([type=hidden]):not([type=file]):not([type=checkbox]):not([type=radio]),' +
@@ -2445,21 +3726,32 @@
       // Only skip non-input elements inside ITI containers; the phone input itself is checked normally.
       if (tag !== 'input' && tag !== 'select' && tag !== 'textarea' && el.closest('.iti, [class*="iti__"]')) continue;
       let val = (el.value || '').trim();
-      // react-select stores selected value in a sibling singleValue span, not el.value
-      if (!val && role === 'combobox') {
-        const rsContainer = el.closest('[class*="select__container"],[class*="select "]') ||
-                            el.parentElement?.parentElement?.parentElement;
-        const sv = rsContainer?.querySelector('[class*="single-value"],[class*="singleValue"]');
-        if (sv?.textContent?.trim()) val = sv.textContent.trim();
+      // SmartRecruiters Stencil/Angular custom selects can expose the committed selection on the
+      // host attribute after a trusted keyboard fallback even when the internal hidden control keeps
+      // an empty .value. Treat that as filled so recovery does not loop on "Country/Region".
+      if (!val && /smartrecruiters\.com/i.test(location.hostname)) {
+        const srHost = (tag === 'spl-select' ? el : el.closest?.('spl-select'));
+        const srVal = srHost && (srHost.value || srHost.getAttribute('value') || srHost.getAttribute('data-pja-value') || '');
+        if (srVal && !/^select( an option| \.\.\.|\.\.\.)?$/i.test(String(srVal).trim())) val = String(srVal).trim();
       }
+      // react-select stores selected value in a sibling singleValue span, not el.value
+      if (!val && role === 'combobox') val = committedReactSelectValue(el);
       // Workday selectinput: el.value is always "" even when items are selected.
       // Check the multiselect container's selectedItemList text instead.
       const isWdSelectinput = el.getAttribute('data-uxi-widget-type') === 'selectinput';
       if (!val && isWdSelectinput) {
         const msContainer = el.closest('[data-uxi-widget-type="multiselect"]');
-        const selectedList = msContainer?.querySelector('[data-automation-id="selectedItemList"]');
+        const selectedList = msContainer?.querySelector('[data-automation-id="selectedItemList"], [data-automation-id="selectedItem"], [data-automation-id="promptOption"]');
         if (selectedList?.textContent?.trim()) val = selectedList.textContent.trim();
         else if (/\d+\s*item/i.test(msContainer?.textContent || '')) val = '1 item selected';
+        else {
+          const fieldText = (el.closest('[data-automation-id^="formField"], [data-uxi-widget-type="multiselect"], fieldset, div')?.textContent || '')
+            .replace(/\s+/g, ' ');
+          if (/(country|territory).{0,60}phone.{0,30}code|phone.{0,30}(country|territory).{0,30}code|dial(?:ing|ling) code/i.test(fieldText) &&
+              /\d+\s*item selected/i.test(fieldText) && /united states/i.test(fieldText) && /\+?1\b/.test(fieldText)) {
+            val = 'United States of America (+1)';
+          }
+        }
       }
       if (val && val !== 'Select an option' && val !== '' && val !== 'Select...') continue;
       const label = getLabelFor(el);
@@ -2585,7 +3877,11 @@
     if (/what state|which state|state (do you|you)[\s\S]{0,20}(live|reside|based)|state of residence|current state/.test(L)) return profile.state || null;
     if (/\bzip\b|zip ?code|postal code/.test(L)) return profile.zip || null;
     if (/\bcity\b (you|do you)[\s\S]{0,15}(live|reside)|what city|which city/.test(L)) return profile.city || null;
+    if (/earliest[\s\S]{0,40}(available|availability|start)|when (?:can|could|will|would|are) you[\s\S]{0,35}(start|available)|available start date|start date/.test(L))
+      return profile.startDate || profile.availability || profile.noticePeriod || 'Available with 2 weeks notice';
+    if (/(country|territory).{0,40}phone.{0,20}code|phone.{0,20}(country|territory).{0,20}code|dial(?:ing|ling) code/.test(L)) return profile.phoneCountryCode || 'United States of America (+1)';
     if (/highest (level of )?education|level of education|education (level|completed)|education you have (completed|attained)/.test(L)) return profile.degree || profile.education || null;
+    if (/discipline|field of study|\bmajor\b|area of study|concentration/.test(L)) return profile.major || null;
     if (/visa (type|status)|immigration status|if yes[\s\S]{0,30}(visa|status)/.test(L)) return profile.visaStatus || null;
     if (/gender identity|how (?:do|would) you describe your gender|\bgender\b/.test(L)) return profile.gender || null;
     return null;
@@ -2601,17 +3897,18 @@
     if (/worked (for|at)[\s\S]{0,30}(pricewaterhouse|pwc)/i.test(t)) return 'No';
     if (/\bat least 18\b|\bover 18\b|\b18 (years|or older)\b|are you 18/i.test(t)) return 'Yes';
     if (/willing to (relocate|travel|commute)|able to[\s\S]{0,25}(relocate|commute|travel)|open to relocat|reliably commute|commute to /i.test(t)) return 'Yes';
-    // Onsite / in-office ability — honest Yes: the candidate is Bay-Area-based and these roles are Bay Area.
+    // Onsite / in-office ability. This deterministic Yes assumes the user has set open-to-onsite
+    // preferences; specific location conflicts still defer to manual/AI handling below.
     if (/able (?:and willing )?to (come|be|work|report)[\s\S]{0,20}(on[ -]?site|in.?office|in person)|available to work at[\s\S]{0,50}(office|site)[\s\S]{0,30}(day|week)|come on[ -]?site|on[ -]?site as (required|needed)|work (on[ -]?site|in.?office|in person)|report to (the )?office|commute to (the )?(office|site)/i.test(t)) return 'Yes';
     // Shift schedules (swing/night/rotating/weekends) — candidate is open to any shift.
     if (/shift schedule|swing shift|night shift|graveyard|rotating shift|able to work[\s\S]{0,15}shift|work[\s\S]{0,10}(nights|weekends)/i.test(t)) return 'Yes';
-    // Located-in / commutable — Bay-Area-based, can commute within NorCal/CA. Defer clearly-distant
-    // SoCal cities (no daily commute from the Bay Area) to the AI/needs_manual rather than fabricate.
+    // Located-in / commutable. Defer clearly distant cities to the AI/needs_manual path rather
+    // than fabricating a commute.
     if (/located in|currently (live|reside)|do you (live|reside)|commutable (distance|to)|within \d+ ?miles|reside (in|within)|based in|bay area/i.test(t)) {
       if (/oxnard|rosemead|valencia|los angeles|\bl\.?a\.?\b|san diego|irvine|carlsbad|orange county|so ?cal|southern california/i.test(t)) return null;
       return 'Yes';
     }
-    // Years-of-experience gates: 3+ years in her CORE domain → Yes when N<=3; skills she LACKS → No;
+    // Years-of-experience gates: 3+ years in configured core domains → Yes when N<=3; known gaps → No;
     // unknown domain → defer (null) so the honest AI answerer decides. Never claims a gap skill.
     { const ym = t.match(/(\d+)\s*\+?\s*(?:or more\s*)?years?/i);
       if (ym && /experience|exp\b/i.test(t)) {
@@ -2636,6 +3933,7 @@
     // Non-compete: honest No for a California-based candidate — CA Bus. & Prof. Code §16600 voids
     // non-compete agreements, so a CA applicant is not bound by an enforceable one.
     if (/non-?compete|noncompete/i.test(t) && /\b(bound|subject|signed|have|are you)\b/i.test(t)) return 'No';
+    if (/referred\b.*\b(employee|internal)|\b(employee|internal)\b.*\brefer/i.test(t)) return 'No';
     if (/how did you hear|where did you (hear|find)|referral source|source of (this )?application/i.test(t)) return 'LinkedIn';
     if (/desired (?:base )?salary|salary expectation|expected (?:base )?(?:salary|compensation)|compensation expectation/i.test(t))
       return '$80,000 - $95,000 depending on role and responsibilities';
@@ -2688,6 +3986,22 @@
     const out = [];
     const seen = new Set();
     const Q = sel => scope ? Array.from(scope.querySelectorAll(sel)) : pjaQueryAllExt(sel);
+    const committedReactSelectValue = (el) => {
+      try {
+        if (!el) return '';
+        const containers = [
+          el.closest('[class*="select__container"],[class*="select-container"],[class*="select "]'),
+          el.closest('[class*="select__control"],[class*="select-control"]')?.parentElement,
+          el.parentElement?.parentElement?.parentElement,
+        ].filter(Boolean);
+        for (const rsContainer of containers) {
+          const sv = rsContainer.querySelector('[class*="single-value"],[class*="singleValue"],[class*="multi-value"],[class*="multiValue"]');
+          const txt = (sv?.textContent || '').replace(/\s+/g, ' ').trim();
+          if (txt && !/^select( an option| \.\.\.|\.\.\.)?$/i.test(txt)) return txt;
+        }
+      } catch (_) {}
+      return '';
+    };
     for (const el of Q(
       'input[required]:not([type=hidden]):not([type=file]):not([type=checkbox]):not([type=radio]),' +
       'select[required], textarea[required],' +
@@ -2701,11 +4015,7 @@
       if (container && container.querySelector('input[type="file"]')) continue;
       if (el.getAttribute('data-uxi-widget-type') === 'selectinput') continue; // WD typeahead handled elsewhere
       let val = (el.value || '').trim();
-      if (!val && role === 'combobox') {
-        const rs = el.closest('[class*="select__container"],[class*="select "]') || el.parentElement?.parentElement?.parentElement;
-        const sv = rs?.querySelector('[class*="single-value"],[class*="singleValue"]');
-        if (sv?.textContent?.trim()) val = sv.textContent.trim();
-      }
+      if (!val && role === 'combobox') val = committedReactSelectValue(el);
       if (val && !/^select( an option| \.\.\.|\.\.\.)?$/i.test(val)) continue;
       const label = getLabelFor(el);
       if (!label || /^resume|^cv\b|curriculum vitae/i.test(label.trim()) || pjaIsGarbageLabel(label) || seen.has(label.toLowerCase())) continue;
@@ -2751,9 +4061,10 @@
     // text/select/combobox controls here too.
     for (const el of Q('input:not([type=hidden]):not([type=file]):not([type=checkbox]):not([type=radio]):not([type=submit]):not([type=button]), select, textarea, [role="combobox"]')) {
       if (!el.offsetParent && el.getBoundingClientRect().width === 0) continue;
-      if (el.value && el.value.trim()) continue;
       const role = (el.getAttribute('role') || '').toLowerCase();
       if (!role && !['input', 'select', 'textarea'].includes(el.tagName.toLowerCase())) continue;
+      const committed = (el.value && el.value.trim()) || (role === 'combobox' ? committedReactSelectValue(el) : '');
+      if (committed && !/^select( an option| \.\.\.|\.\.\.)?$/i.test(committed)) continue;
       if (!pjaLabelHasAsterisk(el)) continue;
       const label = getLabelFor(el);
       if (!label || /^resume|^cv\b|curriculum vitae/i.test(label.trim()) || pjaIsGarbageLabel(label) || seen.has(label.toLowerCase())) continue;
@@ -2796,6 +4107,41 @@
   // both external ATS pages (scope=undefined → whole doc) and Easy Apply (scope=modal root).
   async function pjaAnswerRequiredViaAI(job, scope) {
     const dbg = m => new Promise(r => chrome.storage.local.get('pja_dbg', d => { const a=(d.pja_dbg||[]).slice(-19); a.push(m); chrome.storage.local.set({pja_dbg:a}, r); }));
+    const workdayComboKeyFor = f => {
+      if (!/workday\.com|myworkdayjobs\.com/i.test(location.hostname) || !f) return null;
+      const text = [
+        f.label || '',
+        f.el?.getAttribute?.('aria-label') || '',
+        f.el?.id || '',
+        f.el?.closest?.('[data-automation-id^="formField-"], [data-uxi-widget-type="multiselect"]')?.textContent || '',
+      ].join(' ').replace(/\s+/g, ' ');
+      if (/(country|territory).{0,60}phone.{0,30}code|phone.{0,30}(country|territory).{0,30}code|dial(?:ing|ling) code/i.test(text)) return 'phoneCountryCode';
+      if (/how did you hear|where did you (hear|find)|referral source|source of (this )?application|\bsource\b/i.test(text)) return 'referralSource';
+      return null;
+    };
+    const applyComboboxAnswer = async (f, ans) => {
+      if (typeof pjaFillCombobox !== 'function') return false;
+      const key = workdayComboKeyFor(f);
+      if (key === 'phoneCountryCode') {
+        const fieldText = (f.el?.closest?.('[data-automation-id^="formField-"], [data-uxi-widget-type="multiselect"]')?.textContent || '')
+          .replace(/\s+/g, ' ');
+        if (/united states(?: of america)?\s*\(\+?1\)/i.test(fieldText)) {
+          void dbg('[WD] ai combobox skip phone code already US');
+          return true;
+        }
+      }
+      // Greenhouse Remix react-select fields can show the selected text while Formik still has an
+      // empty value. For AI-answered custom questions, go straight through the trusted option-click
+      // path and force it to ignore stale display text.
+      const ctrl = f.el?.closest?.('[class*="select__control"]');
+      const isGreenhouseReactSelect = /greenhouse\.io/i.test(location.hostname) && !!ctrl;
+      if (isGreenhouseReactSelect && typeof pjaForceReactSelectCommit === 'function') {
+        const ok = await pjaForceReactSelectCommit(f.el, ans, { force: true });
+        if (ok) return true;
+      }
+      pjaFillCombobox(f.el, ans, key || undefined);
+      return true;
+    };
     let fields = collectRequiredEmptyFields(scope);
     await dbg('[ai] collected(' + fields.length + '): ' + fields.map(f => f.type + ':' + (f.label || '').slice(0, 24)).join(' | ').slice(0, 170));
     if (!fields.length) return { applied: 0, asked: 0 };
@@ -2812,14 +4158,16 @@
         // the Places listbox pick that pjaFillCombobox's candidate-location branch performs. Route
         // any location/city field there so it commits reliably (was a ~50% flaky skip otherwise).
         const isLocationField = /location|\bcity\b/i.test(f.label || '') && (f.el.id === 'candidate-location' || /location|city/i.test(f.el.id || '') || f.el.getAttribute('role') === 'combobox' || f.el.getAttribute('aria-autocomplete'));
-        if (isLocationField && typeof pjaFillCombobox === 'function') pjaFillCombobox(f.el, ans);
+        if (isLocationField && typeof pjaFillCombobox === 'function') pjaFillCombobox(f.el, ans, workdayComboKeyFor(f) || undefined);
         else if (f.type === 'radio' && typeof pjaSelectRadio === 'function') pjaSelectRadio(f.radios || [], ans);
         else if (f.type === 'checkboxgroup' && typeof pjaCheckMatchingBox === 'function') {
           const choice = pjaCoerceToOption(ans, f.options || []) || ans;
-          pjaCheckMatchingBox(f.members || [], choice);
+          const multi = /select all|all that apply|multiple|check all/i.test(f.label || '');
+          if (multi && typeof pjaCheckMatchingBoxes === 'function') pjaCheckMatchingBoxes(f.members || [], ans);
+          else pjaCheckMatchingBox(f.members || [], choice);
         }
         else if (f.type === 'select' && typeof pjaFillSelect === 'function') pjaFillSelect(f.el, ans);
-        else if (f.type === 'combobox' && typeof pjaFillCombobox === 'function') pjaFillCombobox(f.el, ans);
+        else if (f.type === 'combobox') await applyComboboxAnswer(f, ans);
         else if ((f.type === 'text' || f.type === 'textarea') && f.el) {
           if (typeof pjaFillTextViaFiber === 'function') pjaFillTextViaFiber(f.el, ans);
           else if (typeof pjaSetNative === 'function') pjaSetNative(f.el, ans);
@@ -2880,7 +4228,7 @@
       try {
         if (f.type === 'checkboxgroup' && typeof pjaCheckMatchingBox === 'function') pjaCheckMatchingBox(f.members || [], ans);
         else if (f.type === 'select' && typeof pjaFillSelect === 'function') pjaFillSelect(f.el, ans);
-        else if (f.type === 'combobox' && typeof pjaFillCombobox === 'function') pjaFillCombobox(f.el, ans);
+        else if (f.type === 'combobox') await applyComboboxAnswer(f, ans);
         else if (f.type === 'radio' && typeof pjaSelectRadio === 'function') pjaSelectRadio(f.radios || [], ans);
         else if (typeof pjaFillTextViaFiber === 'function') pjaFillTextViaFiber(f.el, ans);
         else if (typeof pjaSetNative === 'function') pjaSetNative(f.el, ans);
@@ -2912,14 +4260,17 @@
         const ans = answerCache[norm(f.label)];
         const isLoc = /location|\bcity\b/i.test(f.label || '') && (f.el.id === 'candidate-location' || /location|city/i.test(f.el.id || '') || f.el.getAttribute('role') === 'combobox' || f.el.getAttribute('aria-autocomplete'));
         try {
-          if (isLoc && typeof pjaFillCombobox === 'function') pjaFillCombobox(f.el, ans);
+          if (isLoc && typeof pjaFillCombobox === 'function') pjaFillCombobox(f.el, ans, workdayComboKeyFor(f) || undefined);
           else if (f.type === 'radio' && typeof pjaSelectRadio === 'function') pjaSelectRadio(f.radios || [], ans);
-          else if (f.type === 'checkboxgroup' && typeof pjaCheckMatchingBox === 'function') pjaCheckMatchingBox(f.members || [], ans);
+          else if (f.type === 'checkboxgroup' && typeof pjaCheckMatchingBox === 'function') {
+            if (/select all|all that apply|multiple|check all/i.test(f.label || '') && typeof pjaCheckMatchingBoxes === 'function') pjaCheckMatchingBoxes(f.members || [], ans);
+            else pjaCheckMatchingBox(f.members || [], ans);
+          }
           else if (f.type === 'select' && typeof pjaFillSelect === 'function') pjaFillSelect(f.el, ans);
           // combobox retry: the fiber onChange fired but didn't persist — use the reliable
           // open-menu → type → click-option path (same mechanism that makes country commit).
-          else if (f.type === 'combobox' && typeof pjaForceReactSelectCommit === 'function') await pjaForceReactSelectCommit(f.el, ans);
-          else if (f.type === 'combobox' && typeof pjaFillCombobox === 'function') pjaFillCombobox(f.el, ans);
+          else if (f.type === 'combobox' && typeof pjaForceReactSelectCommit === 'function') await pjaForceReactSelectCommit(f.el, ans, { force: /greenhouse\.io/i.test(location.hostname) });
+          else if (f.type === 'combobox') await applyComboboxAnswer(f, ans);
           else if ((f.type === 'text' || f.type === 'textarea') && typeof pjaSetNative === 'function') pjaSetNative(f.el, ans);
         } catch (_) {}
         await sleep(250);
@@ -3046,6 +4397,11 @@
     // e.g. iCIMS "congratulations", so a real submit isn't misread as submit_unclear).
     const body6k = (title + ' ' + text).slice(0, 6000);
     if (PJA_SUBMIT_SUCCESS_RE.test(body6k)) return true;
+    // Lever sometimes lands on a minimal post-submit page whose only visible controls are
+    // "Return to the main page", company-home, and "Jobs powered by". That page is ambiguous
+    // in isolation, so accept it ONLY when this same run just clicked Submit and the form is gone.
+    if (snap.priorSubmit === true && /jobs\.lever\.co/i.test(url) &&
+        /return to (?:the )?main page|jobs powered by/i.test(body6k)) return true;
     try {
       if (typeof window.PJAAccount !== 'undefined' && window.PJAAccount.matchesSuccess) {
         const ats = (typeof window.PJADetectAts !== 'undefined' && window.PJADetectAts.detectAts) ? window.PJADetectAts.detectAts(url) : '';
@@ -3076,7 +4432,13 @@
     // state, or advance the NEW current job (observed after queue recovery: 27 skips for 21 jobs).
     const ownership = await new Promise(resolve => chrome.storage.local.get(['pja_ext_queue', 'pja_ext_current'], d => {
       const q = d.pja_ext_queue, current = q && q.jobs && q.jobs[q.currentIndex];
-      resolve({ owns: !!q && q.status === 'applying' && pjaSameQueuedJob(current, job) && pjaSameQueuedJob(d.pja_ext_current, job), handled: !!d.pja_ext_current?._handled });
+      const queueOwns = !!q && q.status === 'applying' && pjaSameQueuedJob(current, job);
+      const currentOwns = pjaSameQueuedJob(d.pja_ext_current, job);
+      // Ranked apply uses one-job queues and may repoint pja_ext_current during dispatcher
+      // recovery/reload. The queue is the durable owner for result recording; requiring both
+      // keys to match caused valid terminal results (captcha/missing_required) to be ignored,
+      // leaving pja_ext_queue stuck on the old job.
+      resolve({ owns: queueOwns && (currentOwns || !!job.rankedRun), handled: currentOwns && !!d.pja_ext_current?._handled });
     }));
     if (!ownership.owns || ownership.handled) {
       console.log('PJA ext-apply: stale/duplicate result ignored', job.company, job.title);
@@ -3095,11 +4457,15 @@
     delete job._submitStartedAt;
     await new Promise(resolve => chrome.storage.local.set({ pja_ext_current: job }, resolve));
 
-    // Bug2 fix: persist successful applies to a DURABLE log (pja_ext_queue gets overwritten each
-    // run, so sourcing dedupe needs this to avoid re-surfacing already-applied roles).
-    if (result.success) {
+    const alreadyApplied = /^already_applied\b/i.test(String(result.reason || ''));
+
+    // Persist successful applies — and prior-session already-applied detections — to a DURABLE log
+    // (pja_ext_queue gets overwritten each run, so sourcing dedupe needs this to avoid re-surfacing
+    // the same roles). Prior-session already_applied is not counted as a new confirmed submission.
+    if (result.success || alreadyApplied) {
       await pjaWriteAppliedLog(job, { status: 'applied', reason: result.reason,
-        confirmationSource: 'page', confirmedAt: job._confirmedAt });
+        confirmationSource: result.success ? 'page' : 'prior_session',
+        confirmedAt: result.success ? job._confirmedAt : null });
     }
 
     const uncertain = /unconfirmed|unclear|assumed|inferred/i.test(String(result.reason || ''));
@@ -3108,7 +4474,7 @@
         runId: job.runId || null, jobId: job.jobId || job.id || null,
         applyUrl: job.applyUrl || location.href, company: job.company, title: job.title,
         channel: job.channel || job.ats || 'external',
-        status: result.success ? 'applied' : pending ? 'pending' : uncertain ? 'submitted' : 'failed',
+        status: result.success ? 'applied' : alreadyApplied ? 'skipped' : pending ? 'pending' : uncertain ? 'submitted' : 'failed',
         success: result.success ? true : (uncertain || pending ? null : false), reason: result.reason || '',
         confirmationSource: result.success ? 'page' : null,
         confirmedAt: result.success ? job._confirmedAt : null,
@@ -3122,6 +4488,7 @@
       chrome.runtime.sendMessage({
         type: 'UPDATE_CORPUS_STATE',
         id: job.id,
+        runId: job.runId,
         reason: result.success ? 'applied' : (result.reason || 'unknown'),
       }, () => void chrome.runtime.lastError);
     } catch (_) {}
@@ -3145,7 +4512,9 @@
         if (result.success) {
           r.applied.push({ ...job, appliedAt: Date.now() });
         } else {
-          r.skipped.push({ ...job, skipReason: result.fields?.slice(0, 3).join('; ') || result.reason });
+          const skipped = { ...job, skipReason: result.fields?.slice(0, 3).join('; ') || result.reason };
+          if (result.diagnostic) skipped.diagnostic = result.diagnostic;
+          r.skipped.push(skipped);
         }
 
         queue.currentIndex++;

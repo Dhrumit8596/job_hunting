@@ -16,7 +16,7 @@ const PJA_FIELD_RULES = [
   { key: 'fullName',           patterns: ['full name','your name','legal name','full legal name','applicant name','candidate name','name'] },
   { key: 'email',              patterns: ['email','e-mail','email address','work email'] },
   { key: 'phoneType',          patterns: ['phone type','contact phone type','type of phone','phone number type'] },
-  { key: 'phoneCountryCode',   patterns: ['phone country code','country phone code','dialing code','dialling code'] },
+  { key: 'phoneCountryCode',   patterns: ['phone country code','country phone code','country / territory phone code','country/territory phone code','territory phone code','dialing code','dialling code'] },
   { key: 'phone',              patterns: ['phone','mobile','cell','telephone','contact number','phone number'] },
   { key: 'linkedin',           patterns: ['linkedin','linkedin url','linkedin profile'] },
   { key: 'website',            patterns: ['website','portfolio','personal url','github url','personal site'] },
@@ -50,7 +50,7 @@ const PJA_FIELD_RULES = [
   { key: 'visaStatus',         patterns: ['visa status','visa type','work visa','immigration status','citizenship','work authorization status'] },
   { key: 'usPersonExportControl', patterns: ['u.s. person','us person (i.e.','export control','itar','ear compliance','technology control'] },
   { key: 'willingToRelocate',  patterns: ['relocate','willing to relocate','relocation','open to relocation'] },
-  { key: 'referralSource',     patterns: ['how did you hear','hear about us','how did you find','referral source','source','referred by','how were you referred'] },
+  { key: 'referralSource',     patterns: ['how did you hear','hear about us','how did you find','referral source','source of application','source of this application','where did you hear','where did you find','how were you referred'] },
   { key: 'gender',             patterns: ['gender','sex'] },
   { key: 'ethnicity',          patterns: ['ethnicity','race','hispanic'] },
   { key: 'veteran',            patterns: ['veteran','military service','protected veteran'] },
@@ -183,6 +183,21 @@ function pjaGetLabel(el) {
       .map(id => pjaGetById(root, id)?.textContent.trim())
       .filter(Boolean);
     if (parts.length) return parts.join(' ').toLowerCase();
+  }
+  // Workday's selectinput fields often have opaque generated input IDs and no direct label.
+  // The reliable label lives on the closest formField wrapper. Prefer the field's own label-like
+  // text instead of a larger ancestor, otherwise "Country / Territory Phone Code" can be reduced
+  // to generic "Country / Territory" and a later pass opens the wrong country list.
+  if (/workday\.com|myworkdayjobs\.com/i.test(location.hostname)) {
+    const wdField = el.closest('[data-automation-id^="formField-"]');
+    if (wdField) {
+      const lbl = wdField.querySelector('label, legend, [data-automation-id="richText"], [data-automation-id$="-label"]');
+      const txt = (lbl && !lbl.contains(el) ? lbl.textContent : '').trim().toLowerCase();
+      if (txt) return txt;
+      const ownText = (wdField.textContent || '').replace(/\s+/g, ' ').trim().toLowerCase();
+      const m = ownText.match(/(how did you hear about us|country\s*\/\s*territory phone code|country phone code|phone country code|country\s*\/\s*territory|phone device type|state)\*?/i);
+      if (m) return m[0].toLowerCase();
+    }
   }
   // LinkedIn fb-dash-form-element: walk up past __select-dropdown to the outer container
   // where the question text lives as a sibling div with no class.
@@ -390,6 +405,12 @@ function pjaFillSelect(select, value, key) {
       if (isNo  && (ot === 'no'  || ot.startsWith('no,')  || saysNoSponsor)) return pjaCommitSelect(select, opt.value);
       continue;
     }
+    if (key === 'country') {
+      const wantUs = /^united states(?: of america)?$/i.test(lv);
+      const exactCountry = ot === lv || (wantUs && ot === 'united states of america') || (wantUs && ot === 'united states');
+      if (exactCountry) return pjaCommitSelect(select, opt.value);
+      continue;
+    }
     // BUG7 fix: key-aware 'not authorized' guard.
     // BUG4 fix: lv.length > 3 prevents 'no'/'yes' from substring-matching everything.
     const yesMatch = isYes && (
@@ -574,6 +595,8 @@ const PJA_BUILTIN_ANSWERS = {
   'do you have any relatives employed at this company':          { answer: 'No' },
   'do you have any family members employed here':                { answer: 'No' },
   'do you have any relatives currently employed':                { answer: 'No' },
+  'were you referred by an internal employee':                   { answer: 'No' },
+  'were you referred by an employee':                            { answer: 'No' },
   // Contract / employment obligations
   'do you have a contract that would prevent you from working':  { answer: 'No' },
   'do you have a term contract or years contract':               { answer: 'No' },
@@ -602,6 +625,9 @@ const PJA_BUILTIN_ANSWERS = {
   'are you willing to work full time':                          { answer: 'Yes' },
   // Start date
   'when can you start':                                         { answer: '2 weeks notice required' },
+  'when is the earliest you will be available to start':         { answer: 'Available with 2 weeks notice' },
+  "when is the earliest you'll be available to start":           { answer: 'Available with 2 weeks notice' },
+  'earliest you are available to start':                         { answer: 'Available with 2 weeks notice' },
   'earliest start date':                                        { answer: 'Available with 2 weeks notice' },
   'available start date':                                       { answer: 'Available with 2 weeks notice' },
 };
@@ -799,6 +825,26 @@ function pjaCheckMatchingBox(members, answer) {
   return true;
 }
 
+// Multi-select variant: preserve every truthful match instead of applying the
+// single-select sibling-clearing behavior above. Unmatched options are ignored
+// so callers can route the question to manual review when no option matches.
+function pjaCheckMatchingBoxes(members, answer) {
+  const values = Array.isArray(answer) ? answer : String(answer || '').split(/\s*(?:,|;|\||\band\b)\s*/i);
+  const wanted = values.map(v => String(v).trim()).filter(Boolean);
+  let matched = 0;
+  const optText = cb => pjaCheckboxOptionText(cb).toLowerCase();
+  for (const value of wanted) {
+    const lv = value.toLowerCase();
+    const target = members.find(cb => (cb.value || '').toLowerCase().trim() === lv)
+      || members.find(cb => optText(cb) === lv)
+      || members.find(cb => { const o = optText(cb); return o && (o.includes(lv) || lv.includes(o)); });
+    if (!target) continue;
+    if (!target.checked) target.click();
+    matched++;
+  }
+  return matched;
+}
+
 // Pick the radio in the group whose label/value best matches the stored profile value
 function pjaSelectRadio(radios, value, key) {
   const lv = value.toLowerCase().trim();
@@ -931,6 +977,397 @@ function pjaCdpClickEl(el) {
   });
 }
 
+function pjaWorkdayTrustedClickEl(el, label) {
+  return new Promise(resolve => {
+    if (!el || !/workday\.com|myworkdayjobs\.com/i.test(location.hostname)) return resolve('not-workday');
+    const priorId = el.id;
+    const tempId = priorId || ('__pja_wd_opt_' + Date.now() + '_' + Math.random().toString(36).slice(2, 7));
+    if (!priorId) el.id = tempId;
+    try { el.scrollIntoView({ block: 'center', behavior: 'instant' }); } catch (_) {}
+    const cleanup = () => { if (!priorId && el.id === tempId) el.removeAttribute('id'); };
+    let done = false;
+    const timer = setTimeout(() => {
+      if (done) return;
+      done = true;
+      cleanup();
+      ['pointerdown','mousedown','pointerup','mouseup','click'].forEach(t =>
+        el.dispatchEvent(new MouseEvent(t, { bubbles: true, cancelable: true, button: 0, buttons: 1 })));
+      resolve('synthetic-timeout');
+    }, 4000);
+    try {
+      const sel = '#' + ((window.CSS && CSS.escape) ? CSS.escape(tempId) : tempId);
+      chrome.runtime.sendMessage({ type: 'WORKDAY_TRUSTED_CLICK', selector: sel, single: true }, resp => {
+        if (done) return;
+        done = true;
+        clearTimeout(timer);
+        cleanup();
+        resolve(chrome.runtime.lastError || resp?.error ? 'workday-fail' : 'workday');
+      });
+    } catch (_) {
+      if (!done) {
+        done = true;
+        clearTimeout(timer);
+        cleanup();
+        resolve('workday-catch');
+      }
+    }
+  });
+}
+
+async function pjaFillSmartRecruitersCustomFields(profile) {
+  if (!/smartrecruiters\.com/i.test(location.hostname)) return 0;
+  const sleep = ms => new Promise(r => setTimeout(r, ms));
+  const dbg = msg => {
+    try {
+      chrome.storage.local.get('pja_dbg', d => {
+        const a = (d.pja_dbg || []).slice(-160);
+        a.push('[SR] ' + msg);
+        chrome.storage.local.set({ pja_dbg: a });
+      });
+    } catch (_) {}
+  };
+  const cdpTypeAt = (el, text) => new Promise(resolve => {
+    if (!el) return resolve(false);
+    el.scrollIntoView({ block: 'center', behavior: 'instant' });
+    const r = el.getBoundingClientRect();
+    let done = false;
+    const timer = setTimeout(() => { if (!done) { done = true; resolve(false); } }, 5000);
+    try {
+      chrome.runtime.sendMessage({ type: 'CDP_TYPE_AT', x: r.left + r.width / 2, y: r.top + r.height / 2, text }, resp => {
+        if (done) return;
+        done = true;
+        clearTimeout(timer);
+        resolve(!(chrome.runtime.lastError || resp?.error));
+      });
+    } catch (_) {
+      if (!done) { done = true; clearTimeout(timer); resolve(false); }
+    }
+  });
+  const cdpEnter = () => new Promise(resolve => {
+    try {
+      chrome.runtime.sendMessage({ type: 'WORKDAY_TRUSTED_ENTER' }, resp => {
+        resolve(!(chrome.runtime.lastError || resp?.error));
+      });
+    } catch (_) { resolve(false); }
+  });
+  const committed = host => {
+    const cls = host.getAttribute('class') || '';
+    const val = host.getAttribute('value') || host.value || '';
+    if (/\bng-valid\b/.test(cls) && !/\bng-invalid\b/.test(cls)) return true;
+    return !!String(val || '').trim();
+  };
+  const labelText = host => [
+    host.getAttribute('label') || '',
+    host.getAttribute('aria-label') || '',
+    host.id || '',
+    host.shadowRoot?.querySelector('label,[id$="-label"],spl-typography-label')?.textContent || '',
+  ].join(' ').trim();
+  const splOptions = host => {
+    const roots = [host.shadowRoot, ...(typeof pjaGetAllRoots === 'function' ? pjaGetAllRoots() : [document])].filter(Boolean);
+    const opts = [];
+    for (const root of roots) {
+      root.querySelectorAll('spl-select-option,[role="option"],spl-option,oc-option,li')
+        .forEach(o => {
+          const txt = (o.textContent || '').trim().replace(/\s+/g, ' ');
+          const rr = o.getBoundingClientRect?.();
+          if (txt && (!rr || (rr.width > 0 && rr.height > 0))) opts.push(o);
+        });
+    }
+    return [...new Set(opts)];
+  };
+  const selectSplOption = async (host, want, name) => {
+    if (!host || committed(host)) return false;
+    const fallbackText = /united states/i.test(String(want)) ? 'United States' : String(want || '');
+    const commitFallback = async (source) => {
+      if (!fallbackText) return false;
+      try { host.value = fallbackText; } catch (_) {}
+      try { host.setAttribute('value', fallbackText); } catch (_) {}
+      try { host.setAttribute('data-pja-value', fallbackText); } catch (_) {}
+      const inner = host.shadowRoot?.querySelector('input,[role="combobox"]');
+      if (inner) {
+        try {
+          const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value')?.set;
+          if (setter && inner instanceof HTMLInputElement) setter.call(inner, fallbackText);
+          else if ('value' in inner) inner.value = fallbackText;
+        } catch (_) {}
+        inner.dispatchEvent(new InputEvent('input', { bubbles: true, composed: true, data: fallbackText, inputType: 'insertText' }));
+        inner.dispatchEvent(new Event('change', { bubbles: true, composed: true }));
+        inner.dispatchEvent(new Event('blur', { bubbles: true, composed: true }));
+      }
+      for (const ev of ['input', 'change', 'selectionChange', 'valueChange', 'optionSelected']) {
+        try {
+          host.dispatchEvent(new CustomEvent(ev, {
+            bubbles: true,
+            composed: true,
+            detail: { value: fallbackText, label: fallbackText, text: fallbackText, selected: fallbackText }
+          }));
+        } catch (_) {}
+      }
+      await sleep(250);
+      dbg(name + ' fallback ' + source + ' value="' + fallbackText + '" valid=' + committed(host));
+      return committed(host);
+    };
+    host.scrollIntoView({ block: 'center', behavior: 'instant' });
+    await pjaCdpClickEl(host);
+    await sleep(250);
+    const input = host.shadowRoot?.querySelector('input,[role="combobox"]');
+    if (input && fallbackText) {
+      try {
+        const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value')?.set;
+        input.focus();
+        const query = /united states/i.test(fallbackText) ? 'United' : fallbackText;
+        if (setter) setter.call(input, query); else input.value = query;
+        input.dispatchEvent(new InputEvent('input', { bubbles: true, composed: true, data: query, inputType: 'insertText' }));
+      } catch (_) {}
+      await sleep(450);
+    }
+    let match = null;
+    const re = want instanceof RegExp ? want : new RegExp(String(want).replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i');
+    for (let w = 0; w < 12 && !match; w++) {
+      await sleep(200);
+      const opts = splOptions(host);
+      match = opts.find(o => re.test((o.textContent || '').trim()));
+    }
+    if (!match) {
+      try {
+        const inner = host.shadowRoot?.querySelector('input,[role="combobox"]') || host;
+        inner.focus?.();
+        const setter = inner instanceof HTMLInputElement
+          ? Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value')?.set
+          : null;
+        if (setter) setter.call(inner, '');
+        else if ('value' in inner) inner.value = '';
+        inner.dispatchEvent(new InputEvent('input', { bubbles: true, composed: true, inputType: 'deleteContentBackward' }));
+      } catch (_) {}
+      await cdpTypeAt(host, fallbackText);
+      await sleep(250);
+      await cdpEnter();
+      await sleep(400);
+      if (await commitFallback('no-option-enter')) return true;
+      dbg(name + ' no option for ' + String(want).slice(0, 24) + ' label=' + labelText(host).slice(0, 40));
+      return committed(host);
+    }
+    const how = await pjaCdpClickEl(match);
+    await sleep(500);
+    if (!committed(host)) {
+      const selectedText = (match.textContent || '').trim().replace(/\s+/g, ' ');
+      try { host.value = selectedText; } catch (_) {}
+      try { host.setAttribute('value', selectedText); } catch (_) {}
+      try { host.dispatchEvent(new CustomEvent('selectionChange', { bubbles: true, composed: true, detail: { value: selectedText, label: selectedText } })); } catch (_) {}
+    }
+    host.dispatchEvent(new Event('input', { bubbles: true, composed: true }));
+    host.dispatchEvent(new Event('change', { bubbles: true, composed: true }));
+    host.dispatchEvent(new Event('blur', { bubbles: true, composed: true }));
+    dbg(name + ' option "' + (match.textContent || '').trim().slice(0, 30) + '" via=' + how + ' valid=' + committed(host));
+    return committed(host) || true;
+  };
+  const locValue = profile.currentLocation ||
+    [profile.city, profile.state || profile.country].filter(Boolean).join(', ');
+  const city = profile.city || String(locValue || '').split(',')[0].trim();
+  const state = profile.state || '';
+  if (!city) return 0;
+  let filled = 0;
+  const countryHosts = pjaQueryAll('spl-select[required], spl-select.ng-invalid, spl-select')
+    .filter(el => {
+      const r = el.getBoundingClientRect();
+      return r.width > 0 && r.height > 0 && /country|region/i.test(labelText(el));
+    });
+  for (const host of countryHosts) {
+    if (await selectSplOption(host, /^United States\b/i, 'country/region')) filled++;
+  }
+  // SmartRecruiters phone country code is its own spl-select and often has no useful label; the
+  // option list text starts with country dial codes. Commit United States +1 before typing phone.
+  const phoneCodeHosts = pjaQueryAll('spl-select')
+    .filter(el => {
+      const r = el.getBoundingClientRect();
+      const txt = (el.textContent || '').replace(/\s+/g, ' ').slice(0, 500);
+      const lab = labelText(el);
+      return r.width > 0 && r.height > 0 &&
+        (/phone|dial|code|country/i.test(lab) || /Afghanistan \+93[\s\S]{0,120}United States \+1/i.test(txt));
+    });
+  for (const host of phoneCodeHosts) {
+    if (await selectSplOption(host, /United States\s*\+?1\b/i, 'phone-code')) filled++;
+  }
+  const srScreeningAnswer = (label) => {
+    const L = String(label || '').toLowerCase().replace(/\s+/g, ' ');
+    if (/state or province|what is your state|state\/province|\bstate\b/.test(L)) return profile.state || null;
+    if (/\bgender\b|gender identity/.test(L)) return profile.gender || null;
+    if (/race|ethnic|hispanic/.test(L)) return profile.ethnicity || 'Decline to self-identify';
+    if (/export compliance|u\.?s\.? export|export-control|export control|citizen|permanent resident|protected individual|country of citizenship/.test(L)) {
+      if (/country of citizenship|citizenship country/.test(L)) return profile.citizenship || null;
+      return profile.usPersonForExportControl || null;
+    }
+    if (/privacy notice|privacy policy|read and agree|declare that you have read|terms/.test(L)) return 'Yes';
+    if (/please specify|explain|additional information|details/.test(L) && /export|citizen|visa|work authorization/i.test(L)) {
+      return profile.visaStatus || profile.workAuth || null;
+    }
+    return null;
+  };
+  const fillSrAutocompleteHost = async (host, answer, name) => {
+    if (!host || !answer) return false;
+    const input = host.shadowRoot?.querySelector('input,[role="combobox"]') ||
+      host.querySelector?.('input,[role="combobox"]') ||
+      (host.matches?.('input,[role="combobox"]') ? host : null);
+    const target = input || host;
+    try {
+      const setter = target instanceof HTMLInputElement
+        ? Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value')?.set
+        : null;
+      target.focus?.();
+      if (setter) setter.call(target, '');
+      else if ('value' in target) target.value = '';
+      target.dispatchEvent(new InputEvent('input', { bubbles: true, composed: true, inputType: 'deleteContentBackward' }));
+    } catch (_) {}
+    await sleep(150);
+    await cdpTypeAt(target, answer);
+    await sleep(500);
+    await cdpEnter();
+    await sleep(400);
+    try {
+      const setter = target instanceof HTMLInputElement
+        ? Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value')?.set
+        : null;
+      if (setter) setter.call(target, answer);
+      else if ('value' in target) target.value = answer;
+      target.setAttribute?.('data-pja-value', answer);
+      target.dispatchEvent(new InputEvent('input', { bubbles: true, composed: true, data: answer, inputType: 'insertText' }));
+      target.dispatchEvent(new Event('change', { bubbles: true, composed: true }));
+      target.dispatchEvent(new Event('blur', { bubbles: true, composed: true }));
+      host.value = answer;
+      host.setAttribute?.('value', answer);
+      host.setAttribute?.('data-pja-value', answer);
+      host.dispatchEvent(new CustomEvent('selectionChange', { bubbles: true, composed: true, detail: { value: answer, label: answer } }));
+      host.dispatchEvent(new Event('change', { bubbles: true, composed: true }));
+    } catch (_) {}
+    dbg('screening ' + name + '="' + answer + '" invalid=' + (target.getAttribute?.('aria-invalid') || ''));
+    return true;
+  };
+  const screeningHosts = pjaQueryAll('spl-autocomplete, input[required][role="combobox"], input[aria-required="true"][role="combobox"]')
+    .filter(el => {
+      const r = el.getBoundingClientRect();
+      return r.width > 0 && r.height > 0;
+    });
+  for (const host of screeningHosts) {
+    const wrapper = host.closest?.('spl-autocomplete') || host;
+    const label = [
+      typeof pjaGetLabel === 'function' ? pjaGetLabel(host) : '',
+      labelText(wrapper),
+      wrapper.textContent || '',
+      host.id || ''
+    ].join(' ').replace(/\s+/g, ' ').trim();
+    const ans = srScreeningAnswer(label);
+    if (!ans) continue;
+    const cur = String(host.value || host.getAttribute?.('data-pja-value') || '').trim();
+    if (cur && new RegExp('^' + ans.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '$', 'i').test(cur)) continue;
+    if (await fillSrAutocompleteHost(wrapper, ans, label.slice(0, 40) || host.id || 'screening')) filled++;
+  }
+  pjaQueryAll('input[type="checkbox"][required], input[type="checkbox"][aria-required="true"]')
+    .forEach(cb => {
+      const label = (typeof pjaGetLabel === 'function' ? pjaGetLabel(cb) : '') + ' ' + (cb.closest('label, spl-form-element, div')?.textContent || '');
+      if (/privacy notice|privacy policy|read and agree|declare that you have read|terms/i.test(label) && !cb.checked) {
+        try {
+          const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'checked')?.set;
+          if (setter) setter.call(cb, true); else cb.checked = true;
+          cb.dispatchEvent(new Event('input', { bubbles: true, composed: true }));
+          cb.dispatchEvent(new Event('change', { bubbles: true, composed: true }));
+          cb.click();
+          filled++;
+          dbg('privacy checkbox checked');
+        } catch (_) {}
+      }
+    });
+  const countryInputs = pjaQueryAll('input[required][role="combobox"], input[aria-required="true"][role="combobox"]')
+    .filter(el => {
+      const r = el.getBoundingClientRect();
+      const label = (typeof pjaGetLabel === 'function' ? pjaGetLabel(el) : '') + ' ' + (el.id || '') + ' ' + (el.getAttribute('aria-label') || '');
+      return r.width > 0 && r.height > 0 && /country|region/i.test(label);
+    });
+  for (const input of countryInputs) {
+    const current = String(input.value || '').trim();
+    if (/^United States$/i.test(current) && input.getAttribute('aria-invalid') !== 'true') continue;
+    try {
+      const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value')?.set;
+      input.focus();
+      if (setter) setter.call(input, ''); else input.value = '';
+      input.dispatchEvent(new InputEvent('input', { bubbles: true, composed: true, inputType: 'deleteContentBackward' }));
+    } catch (_) {}
+    await sleep(150);
+    await cdpTypeAt(input, 'United States');
+    await sleep(500);
+    await cdpEnter();
+    await sleep(400);
+    try {
+      const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value')?.set;
+      if (setter) setter.call(input, 'United States'); else input.value = 'United States';
+      input.setAttribute('data-pja-value', 'United States');
+      input.dispatchEvent(new InputEvent('input', { bubbles: true, composed: true, data: 'United States', inputType: 'insertText' }));
+      input.dispatchEvent(new Event('change', { bubbles: true, composed: true }));
+      input.dispatchEvent(new Event('blur', { bubbles: true, composed: true }));
+    } catch (_) {}
+    dbg('country autocomplete input value="' + String(input.value || '').slice(0, 30) + '" invalid=' + input.getAttribute('aria-invalid'));
+    filled++;
+  }
+  const hosts = pjaQueryAll('spl-autocomplete[required], oc-location-autocomplete.ng-invalid spl-autocomplete, oc-location-autocomplete spl-autocomplete')
+    .filter(el => {
+      const r = el.getBoundingClientRect();
+      const label = el.getAttribute('label') || el.getAttribute('aria-label') || el.id || '';
+      return r.width > 0 && r.height > 0 && /city|location/i.test(label + ' ' + (el.id || ''));
+    });
+  for (const host of hosts) {
+    if (committed(host)) continue;
+    // Keep both the custom element attribute and any open-shadow inner input in sync. The
+    // trusted typing below is the authoritative path, but these values help Angular/StenciI
+    // validators that read host.value before the async suggestion click lands.
+    try { host.value = city; } catch (_) {}
+    try { host.setAttribute('value', city); } catch (_) {}
+    const inner = host.shadowRoot?.querySelector('input,[contenteditable="true"]');
+    if (inner) {
+      try {
+        const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value')?.set;
+        if (setter && inner instanceof HTMLInputElement) setter.call(inner, '');
+        else if ('value' in inner) inner.value = '';
+      } catch (_) {}
+      inner.dispatchEvent(new InputEvent('input', { bubbles: true }));
+    }
+    await pjaCdpClickEl(host);
+    await sleep(150);
+    await cdpTypeAt(host, city);
+    let match = null;
+    for (let w = 0; w < 20 && !match; w++) {
+      await sleep(200);
+      const roots = typeof pjaGetAllRoots === 'function' ? pjaGetAllRoots() : [document];
+      let opts = [];
+      for (const root of roots) {
+        root.querySelectorAll('spl-select-option, [role="option"], spl-option, oc-option, li, [data-test*="location"], [data-sr-id*="location"]')
+          .forEach(o => {
+            const txt = (o.textContent || '').trim().replace(/\s+/g, ' ');
+            const rr = o.getBoundingClientRect?.();
+            if (txt && (!rr || (rr.width > 0 && rr.height > 0))) opts.push(o);
+          });
+      }
+      const cityOpts = opts.filter(o => (o.textContent || '').toLowerCase().includes(city.toLowerCase()));
+      match = cityOpts.find(o => state && new RegExp('(?:^|[^a-z])' + state.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '(?:[^a-z]|$)', 'i').test(o.textContent || '')) ||
+        cityOpts.find(o => /united states|usa|u\.s\./i.test(o.textContent || '')) ||
+        (cityOpts.length === 1 ? cityOpts[0] : null);
+    }
+    let how = 'none';
+    if (match) {
+      how = await pjaCdpClickEl(match);
+      filled++;
+    } else if (await cdpEnter()) {
+      how = 'enter';
+      filled++;
+    }
+    await sleep(500);
+    host.dispatchEvent(new Event('input', { bubbles: true, composed: true }));
+    host.dispatchEvent(new Event('change', { bubbles: true, composed: true }));
+    host.dispatchEvent(new Event('blur', { bubbles: true, composed: true }));
+    dbg('city autocomplete via=' + how + ' valid=' + committed(host) + ' label=' + (host.getAttribute('label') || host.id || '').slice(0, 40));
+  }
+  return filled;
+}
+window.pjaFillSmartRecruitersCustomFields = pjaFillSmartRecruitersCustomFields;
+
 async function pjaFillGreenhouseEducation(profile) {
   if (!/greenhouse\.io/i.test(location.hostname)) return;
   const sleep = ms => new Promise(r => setTimeout(r, ms));
@@ -979,9 +1416,30 @@ async function pjaFillGreenhouseEducation(profile) {
     const getOpts = () => { const lb = document.getElementById('react-select-' + inp.id + '-listbox'); return lb ? Array.from(lb.querySelectorAll('[role=option]')) : []; };
     const lv = value.toLowerCase();
     const firstWord = lv.split(' ')[0];
-    const pick = (opts) => opts.find(o => o.textContent.trim().toLowerCase() === lv)
-      || opts.find(o => o.textContent.trim().toLowerCase().includes(lv))
-      || opts.find(o => o.textContent.trim().toLowerCase().includes(firstWord));
+    const pick = (opts) => {
+      if (idPrefix === 'candidate-location') {
+        const city = (profile.city || value.split(',')[0] || '').trim().toLowerCase();
+        const state = (profile.state || '').trim().toLowerCase();
+        const stateAbbr = (profile.state || '').trim().toUpperCase();
+        const country = (profile.country || '').trim().toLowerCase();
+        const isUs = !country || /united states|usa|u\.s\./i.test(country);
+        const cityHits = opts.filter(o => o.textContent.trim().toLowerCase().includes(city));
+        const stateHit = cityHits.find(o => {
+          const t = o.textContent.trim().toLowerCase();
+          return (state && t.includes(state)) || (stateAbbr && new RegExp('(?:^|[^a-z])' + stateAbbr + '(?:[^a-z]|$)', 'i').test(o.textContent));
+        });
+        if (stateHit) return stateHit;
+        if (isUs) {
+          const usHit = cityHits.find(o => /united states|usa|u\.s\./i.test(o.textContent));
+          if (usHit) return usHit;
+        }
+        if (cityHits.length === 1) return cityHits[0];
+        return null;
+      }
+      return opts.find(o => o.textContent.trim().toLowerCase() === lv)
+        || opts.find(o => o.textContent.trim().toLowerCase().includes(lv))
+        || opts.find(o => o.textContent.trim().toLowerCase().includes(firstWord));
+    };
 
     // Step 1: open WITHOUT typing — static lists (Degree/Discipline) show all options;
     // typing would filter out close-but-inexact matches (e.g. "Environmental Studies").
@@ -996,7 +1454,7 @@ async function pjaFillGreenhouseEducation(profile) {
     if (!m) {
       const ir = inp.getBoundingClientRect();
       const ix = ir.left + ir.width / 2, iy = ir.top + ir.height / 2;
-      // Type the first ~2 words: enough to disambiguate a city ("Santa Clara") and to
+      // Type the first ~2 words: enough to disambiguate a city ("San Jose") and to
       // filter discipline ("Environmental Engineering"), while a too-specific school name
       // ("a foreign university") simply yields nothing → Other fallback handles it.
       const q = value.split(/[\s,]+/).slice(0, 2).join(' ').slice(0, 18);
@@ -1007,7 +1465,7 @@ async function pjaFillGreenhouseEducation(profile) {
       });
       await sleep(1200);
       opts = getOpts();
-      m = opts.length ? (pick(opts) || opts[0]) : null;
+      m = opts.length ? pick(opts) : null;
     }
     // Step 3: school not in the (US-centric) DB → select "Other" (honest for intl schools).
     if (!m && otherFallback) {
@@ -1075,6 +1533,8 @@ async function pjaFillGreenhouseEducation(profile) {
     if (/country/i.test(label) || inp.id === 'country') {
       want = /united states|usa|u\.s\./i;
     }
+    else if (/referred\b.*\b(employee|internal)|\b(employee|internal)\b.*\brefer/i.test(label)) want = /^no\b|not/i;
+    else if (/currently located|located in (the )?(u\.?s\.?|united states)|based in (the )?(u\.?s\.?|united states)/i.test(label)) want = /^yes\b/i;
     else if (/sponsor/i.test(label)) want = /no|not/i;             // require sponsorship → No
     else if (/authoriz|legally|eligible to work|right to work/i.test(label)) want = /yes|authorized/i;
     else if (/gender|are you (male|female)/i.test(label)) want = profile.gender ? new RegExp(profile.gender, 'i') : /decline|prefer not/i;
@@ -1091,7 +1551,7 @@ async function pjaFillGreenhouseEducation(profile) {
     inp.scrollIntoView({ block: 'center', behavior: 'instant' });
     await sleep(120);
     const ctrl = inp.closest('[class*="select__control"]');
-    ['mousedown','mouseup','click'].forEach(t => ctrl.dispatchEvent(new MouseEvent(t,{bubbles:true,cancelable:true,button:0,buttons:1})));
+    const openHow = await pjaCdpClickEl(ctrl || inp);
     await sleep(500);
     // Large SEARCHABLE selects (Country: 244 options) don't render "United States" until the
     // input filters. Type into the input to filter, THEN scan + trusted-CDP-click the option
@@ -1180,8 +1640,30 @@ function pjaFillCombobox(input, value, key) {
             [own, menu, pac].forEach(lb => { if (lb) opts = opts.concat(Array.from(lb.querySelectorAll('[role="option"], .pac-item'))); });
           }
           // Only accept an option that actually contains the city — never a fallback opts[0]
-          // (that was clicking "Afghanistan" from a stale country listbox).
-          match = opts.find(o => (o.textContent || '').toLowerCase().includes(cityOnly.toLowerCase())) || null;
+          // (that was clicking "Afghanistan" from a stale country listbox). Prefer the profile
+          // state/country so a same-named city in another country is not selected.
+          const cityMatches = opts.filter(o => (o.textContent || '').toLowerCase().includes(cityOnly.toLowerCase()));
+          const parts = String(value || '').split(',').map(s => s.trim()).filter(Boolean);
+          const state = String(parts[1] || '').trim();
+          const STATE_NAMES = {
+            AL:'Alabama', AK:'Alaska', AZ:'Arizona', AR:'Arkansas', CA:'California', CO:'Colorado',
+            CT:'Connecticut', DE:'Delaware', FL:'Florida', GA:'Georgia', HI:'Hawaii', ID:'Idaho',
+            IL:'Illinois', IN:'Indiana', IA:'Iowa', KS:'Kansas', KY:'Kentucky', LA:'Louisiana',
+            ME:'Maine', MD:'Maryland', MA:'Massachusetts', MI:'Michigan', MN:'Minnesota',
+            MS:'Mississippi', MO:'Missouri', MT:'Montana', NE:'Nebraska', NV:'Nevada',
+            NH:'New Hampshire', NJ:'New Jersey', NM:'New Mexico', NY:'New York',
+            NC:'North Carolina', ND:'North Dakota', OH:'Ohio', OK:'Oklahoma', OR:'Oregon',
+            PA:'Pennsylvania', RI:'Rhode Island', SC:'South Carolina', SD:'South Dakota',
+            TN:'Tennessee', TX:'Texas', UT:'Utah', VT:'Vermont', VA:'Virginia',
+            WA:'Washington', WV:'West Virginia', WI:'Wisconsin', WY:'Wyoming'
+          };
+          const stateFull = STATE_NAMES[state.toUpperCase()] || '';
+          match = cityMatches.find(o => {
+            const txt = o.textContent || '';
+            return (state && new RegExp('(?:^|[^a-z])' + state.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '(?:[^a-z]|$)', 'i').test(txt)) ||
+              (stateFull && txt.toLowerCase().includes(stateFull.toLowerCase()));
+          }) || cityMatches.find(o => /united states|usa|u\.s\./i.test(o.textContent || '')) ||
+            (cityMatches.length === 1 ? cityMatches[0] : null);
         }
         if (match) {
           const how = await pjaCdpClickEl(match);
@@ -1198,15 +1680,31 @@ function pjaFillCombobox(input, value, key) {
   // Container click doesn't open the dropdown — must type into the input via nativeInputValueSetter.
   // Options must be selected via the inner promptLeafNode child, not the outer role="option" div.
   if (input.getAttribute('data-uxi-widget-type') === 'selectinput') {
+    if (key === 'phoneCountryCode') {
+      try {
+        const msContainer = input.closest('[data-uxi-widget-type="multiselect"]');
+        const selectedText = (msContainer?.querySelector('[data-automation-id="selectedItemList"], [data-automation-id="selectedItem"], [data-automation-id="promptOption"]')?.textContent || '').trim();
+        if (/united states/i.test(selectedText) && /\+?1\b/.test(selectedText)) {
+          chrome.storage.local.get('pja_dbg', d => {
+            const arr = (d.pja_dbg || []).slice(-160);
+            arr.push('[WD] phoneCountryCode selected chip US; skip reopen');
+            chrome.storage.local.set({ pja_dbg: arr });
+          });
+          return true;
+        }
+      } catch (_) {}
+    }
     const _nativeSetter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set;
     let _wdLastOptionTexts = [];
     let _wdExpandedMajor = false;
 
     const doSelectWorkday = () => {
-      const listbox = document.querySelector('[data-automation-id="activeListContainer"]') ||
-        document.querySelector('[role="listbox"]:not([hidden]):not([id*="iti"]):not([aria-label*="countr"])');
+      const activeList = document.querySelector('[data-automation-id="activeListContainer"]');
+      const listbox = activeList || (key === 'phoneCountryCode'
+        ? null
+        : document.querySelector('[role="listbox"]:not([hidden]):not([id*="iti"]):not([aria-label*="countr"])'));
       if (!listbox) return false;
-      const opts = Array.from(listbox.querySelectorAll('[role="option"]'));
+      const opts = Array.from(listbox.querySelectorAll('[role="option"], [data-automation-id="promptOption"], [data-automation-id="selectedItem"]'));
       if (!opts.length) return false;
 
       // Use only the option's OWN label text — clone and strip nested child options
@@ -1221,13 +1719,25 @@ function pjaFillCombobox(input, value, key) {
       const isYes = ['yes','true','1'].includes(lv);
       const isNo  = ['no','false','0'].includes(lv);
       let match = opts.find(o => getOptText(o) === lv);
-      if (!match && lv.length > 3) match = opts.find(o => getOptText(o).includes(lv));
+      if (!match && key === 'country') {
+        const wantUs = /^united states(?: of america)?$/i.test(lv);
+        match = opts.find(o => {
+          const t = getOptText(o);
+          return t === lv || (wantUs && (t === 'united states of america' || t === 'united states'));
+        }) || null;
+      }
+      if (!match && key !== 'country' && lv.length > 3) match = opts.find(o => getOptText(o).includes(lv));
       if (!match && isYes) match = opts.find(o => /^yes\b/i.test(getOptText(o)));
       if (!match && isNo)  match = opts.find(o => /^no\b/i.test(getOptText(o)));
       if (!match && key === 'requireSponsorship' && isNo)
         match = opts.find(o => /not required|will not require|no.*will not/i.test(getOptText(o)));
       if (!match && key === 'workAuth' && isYes)
         match = opts.find(o => /authorized/i.test(getOptText(o)) && !/not authorized/i.test(getOptText(o)));
+      if (!match && key === 'phoneCountryCode') {
+        match = opts.find(o => /^united states of america\s*\(\+?1\)$/i.test(getOptText(o)));
+        if (!match) match = opts.find(o => /^united states\b/i.test(getOptText(o)) && /\+?1\b/.test(getOptText(o)));
+        if (!match) match = opts.find(o => /^united states\b/i.test(getOptText(o)));
+      }
       if (!match && key === 'referralSource') {
         const RF = ['linkedin','job board or social media','social media','job board','online job board','internet','online','job posting','indeed','glassdoor','external job board'];
         for (const fb of RF) { match = opts.find(o => getOptText(o).includes(fb)); if (match) break; }
@@ -1264,28 +1774,42 @@ function pjaFillCombobox(input, value, key) {
       const isLeafOption = !match.querySelector('[role="option"]');
       const leafNode = isLeafOption ? match.querySelector('[data-automation-id="promptLeafNode"]') : null;
       const target = leafNode || match;
-      if (key === 'major') {
-        pjaCdpClickEl(target).then(how => {
-          try { chrome.storage.local.get('pja_dbg', d => {
-            const arr = (d.pja_dbg || []).slice(-160);
-            arr.push('[WD] multiselect selected: "' + (target.textContent || '').trim().slice(0,40) + '" key=major via=' + how);
-            chrome.storage.local.set({ pja_dbg: arr });
-          }); } catch (_) {}
-        });
-        return true;
-      }
-      target.dispatchEvent(new MouseEvent('mouseover', { bubbles: true }));
-      target.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true, button: 0, buttons: 1 }));
-      target.dispatchEvent(new MouseEvent('mouseup',   { bubbles: true, cancelable: true, button: 0 }));
-      target.dispatchEvent(new MouseEvent('click',     { bubbles: true, cancelable: true, button: 0 }));
       const selText = target.textContent?.trim();
-      console.log('PJA WD multiselect select:', selText, 'via:', leafNode ? 'leafNode' : 'option');
-      chrome.storage.local.get('pja_dbg', d => {
-        const arr = (d.pja_dbg || []).slice(-19);
-        arr.push('[WD] multiselect selected: "' + selText?.slice(0,40) + '" key=' + key);
-        chrome.storage.local.set({ pja_dbg: arr });
+      const clicker = /workday\.com|myworkdayjobs\.com/i.test(location.hostname) ? pjaWorkdayTrustedClickEl : pjaCdpClickEl;
+      clicker(target, 'wd-multiselect-' + key).then(async how => {
+        if (key === 'referralSource' && /workday-fail|synthetic|fail/i.test(String(how || ''))) {
+          try {
+            const fallback = await pjaCdpClickEl(target);
+            how = String(how || '') + '+cdp-' + fallback;
+          } catch (_) {}
+        }
+        try { chrome.storage.local.get('pja_dbg', d => {
+          const arr = (d.pja_dbg || []).slice(-160);
+          arr.push('[WD] multiselect selected: "' + String(selText || '').slice(0,40) + '" key=' + key + ' via=' + how);
+          chrome.storage.local.set({ pja_dbg: arr });
+        }); } catch (_) {}
       });
       return true;
+    };
+    const pressWorkdayEnter = () => new Promise(resolve => {
+      if (!/workday\.com|myworkdayjobs\.com/i.test(location.hostname)) return resolve(false);
+      try {
+        chrome.runtime.sendMessage({ type: 'WORKDAY_TRUSTED_ENTER' }, resp => {
+          resolve(!(chrome.runtime.lastError || resp?.error));
+        });
+      } catch (_) { resolve(false); }
+    });
+    const workdaySelectionCommitted = () => {
+      try {
+        const msContainer = input.closest('[data-uxi-widget-type="multiselect"]');
+        const selectedText = (msContainer?.querySelector('[data-automation-id="selectedItemList"], [data-automation-id="selectedItem"], [data-automation-id="promptOption"]')?.textContent || '').trim();
+        if (!selectedText) return false;
+        if (key === 'phoneCountryCode') return /united states/i.test(selectedText) && /\+?1\b/.test(selectedText);
+        if (key === 'referralSource') return /linkedin|job board|social media|online|internet|website|career/i.test(selectedText);
+        return /\S/.test(selectedText);
+      } catch (_) {
+        return false;
+      }
     };
 
     // Open via CDP trusted click (bypasses Workday's isTrusted check).
@@ -1318,7 +1842,8 @@ function pjaFillCombobox(input, value, key) {
               arr.push('[WD] CDP click ok=' + ok + ' key=' + key + ' val=' + String(value).slice(0,30));
               chrome.storage.local.set({ pja_dbg: arr });
             });
-            const filterValue = value == null ? '' : String(value).trim();
+            const filterValue = key === 'phoneCountryCode' ? 'United States'
+              : value == null ? '' : String(value).trim();
             if (!ok || !filterValue) { resolve(ok); return; }
             try {
               if (_nativeSetter) _nativeSetter.call(input, ''); else input.value = '';
@@ -1345,36 +1870,93 @@ function pjaFillCombobox(input, value, key) {
       });
     };
 
-    window._pjaComboChain = (window._pjaComboChain || Promise.resolve()).then(() => new Promise(resolve => {
+    window._pjaComboChain = (window._pjaComboChain || Promise.resolve()).catch(() => {}).then(() => Promise.race([
+      new Promise(resolve => {
+      if (key === 'phoneCountryCode') {
+        try {
+          const msContainer = input.closest('[data-uxi-widget-type="multiselect"]');
+          const selectedList = msContainer?.querySelector('[data-automation-id="selectedItemList"], [data-automation-id="selectedItem"], [data-automation-id="promptOption"]');
+          const selectedText = (selectedList?.textContent || '').trim();
+          if (/united states/i.test(selectedText) && /\+?1\b/.test(selectedText)) {
+            chrome.storage.local.get('pja_dbg', d => {
+              const arr = (d.pja_dbg || []).slice(-160);
+              arr.push('[WD] phoneCountryCode already committed US; skip reopen');
+              chrome.storage.local.set({ pja_dbg: arr });
+            });
+            resolve();
+            return;
+          }
+          if (selectedText && !/united states/i.test(selectedText)) {
+            const selected = selectedList?.matches?.('[data-automation-id="selectedItem"], [role="option"]')
+              ? selectedList
+              : selectedList?.querySelector('[data-automation-id="selectedItem"], [role="option"]');
+            if (selected) {
+              selected.dispatchEvent(new KeyboardEvent('keydown', { key: 'Delete', code: 'Delete', bubbles: true, cancelable: true }));
+              selected.dispatchEvent(new KeyboardEvent('keyup', { key: 'Delete', code: 'Delete', bubbles: true, cancelable: true }));
+              selected.dispatchEvent(new KeyboardEvent('keydown', { key: 'Backspace', code: 'Backspace', bubbles: true, cancelable: true }));
+              selected.dispatchEvent(new KeyboardEvent('keyup', { key: 'Backspace', code: 'Backspace', bubbles: true, cancelable: true }));
+            }
+            if (_nativeSetter) _nativeSetter.call(input, ''); else input.value = '';
+            input.dispatchEvent(new InputEvent('input', { bubbles: true, data: '', inputType: 'deleteContentBackward' }));
+            chrome.storage.local.get('pja_dbg', d => {
+              const arr = (d.pja_dbg || []).slice(-160);
+              arr.push('[WD] cleared non-US phoneCountryCode selected="' + selectedText.slice(0, 60) + '"');
+              chrome.storage.local.set({ pja_dbg: arr });
+            });
+          }
+        } catch (_) {}
+      }
       openWdMultiselect().then(() => {
         // Wait for the dropdown to populate, then select the target option.
-        setTimeout(() => {
-          if (!doSelectWorkday()) {
-            // Retry after extra delay (options may load via network)
-            setTimeout(() => {
-              if (!doSelectWorkday()) {
-                console.log('PJA WD multiselect: no match for', value, 'key:', key);
+        setTimeout(async () => {
+          const selectAttempt = async (label) => {
+            const clicked = doSelectWorkday();
+            // For Workday phone-code, doSelectWorkday schedules a trusted click on the exact US
+            // option. Pressing Enter immediately afterward can commit the currently highlighted
+            // first row (observed: Albania +355) before the trusted click lands.
+      const shouldPressEnter = key === 'referralSource';
+            if (shouldPressEnter && await pressWorkdayEnter()) {
+              try { chrome.storage.local.get('pja_dbg', d => {
+                const arr = (d.pja_dbg || []).slice(-160);
+                arr.push('[WD] multiselect trusted Enter ' + label + ' key=' + key + ' committed=' + workdaySelectionCommitted());
+                chrome.storage.local.set({ pja_dbg: arr });
+              }); } catch (_) {}
+            }
+            await _sleep((key === 'phoneCountryCode' || key === 'referralSource') ? 900 : 450);
+            // For Workday phone-code/referral-source, a click being scheduled is not evidence of
+            // success: trusted clicks can miss or land on a non-leaf/group row. Require the actual
+            // selected chip before resolving so the retry path remains active.
+            if (key === 'phoneCountryCode' || key === 'referralSource') return workdaySelectionCommitted();
+            return clicked || workdaySelectionCommitted();
+          };
+          if (await selectAttempt('initial')) { resolve(); return; }
+          setTimeout(async () => {
+            if (await selectAttempt('retry1')) { resolve(); return; }
+            setTimeout(async () => {
+              const ok = await selectAttempt('retry2');
+              if (!ok) {
+                console.log('PJA WD multiselect: no match/commit for', value, 'key:', key);
                 try { chrome.storage.local.get('pja_dbg', d => {
                   const arr = (d.pja_dbg || []).slice(-160);
-                  arr.push('[WD] multiselect no match key=' + key + ' val=' + String(value).slice(0,30) + ' opts=' + _wdLastOptionTexts.join('|').slice(0,300));
+                  arr.push('[WD] multiselect no commit key=' + key + ' val=' + String(value).slice(0,30) + ' opts=' + _wdLastOptionTexts.join('|').slice(0,300));
                   chrome.storage.local.set({ pja_dbg: arr });
                 }); } catch (_) {}
               }
               resolve();
-            }, 800);
-            return;
-          }
-          // If we clicked a parent category to expand it, the item isn't selected yet.
-          // Re-run after expansion to pick the correct leaf option.
-          setTimeout(() => {
-            const msContainer = input.closest('[data-uxi-widget-type="multiselect"]');
-            const containerText = msContainer?.textContent || '';
-            if (!/\d+ item/.test(containerText)) doSelectWorkday();
-            resolve();
-          }, 500);
+            }, 2200);
+          }, 1200);
         }, 700);
       });
-    }));
+      }),
+      new Promise(resolve => setTimeout(() => {
+        try { chrome.storage.local.get('pja_dbg', d => {
+          const arr = (d.pja_dbg || []).slice(-160);
+          arr.push('[WD] multiselect per-field timeout key=' + key);
+          chrome.storage.local.set({ pja_dbg: arr });
+        }); } catch (_) {}
+        resolve();
+      }, 12000))
+    ]));
     return true;
   }
 
@@ -1461,6 +2043,54 @@ function pjaFillCombobox(input, value, key) {
       match = opts.find(o => /not required|will not require|no.*will not/i.test(o.textContent));
     if (!match && key === 'workAuth' && isYes)
       match = opts.find(o => /authorized/i.test(o.textContent) && !/not authorized/i.test(o.textContent));
+    if (!match && key === 'phoneCountryCode') {
+      match = opts.find(o => /united states/i.test(o.textContent) && /\+?1\b/.test(o.textContent));
+      if (!match) match = opts.find(o => /^united states\b/i.test(o.textContent.trim()));
+    }
+    if (!match && key === 'visaStatus') {
+      const visaFallbacks = [/^tn$/, /^tn visa$/, /^other$/, /^not applicable$/, /^n\/a$/i];
+      for (const pat of visaFallbacks) {
+        match = opts.find(o => pat.test(o.textContent.trim()));
+        if (match) break;
+      }
+    }
+    if (!match && key === 'major') {
+      const majorFallbacks = [/^environmental engineering$/i, /^engineering$/i, /^engineering,? general$/i, /^general engineering$/i, /^other engineering$/i, /^other$/i];
+      for (const pat of majorFallbacks) {
+        match = opts.find(o => pat.test(o.textContent.trim()));
+        if (match) break;
+      }
+    }
+    if (!match && key === 'salaryExpectation') {
+      const money = lv.match(/\$?\s*(\d{2,3})(?:[,\s]*(\d{3}))?/);
+      const wantSalary = money ? parseInt(money[1] + (money[2] || '000'), 10) : 0;
+      if (wantSalary) {
+        match = opts.find(o => {
+          const txt = o.textContent.trim().toLowerCase();
+          const nums = (txt.match(/\$?\s*\d{2,3}(?:[,\s]*\d{3})?/g) || []).map(x => {
+            const m = x.match(/(\d{2,3})(?:[,\s]*(\d{3}))?/);
+            return m ? parseInt(m[1] + (m[2] || '000'), 10) : 0;
+          }).filter(Boolean);
+          if (!nums.length) return false;
+          if (/\+|more than|over|above|or more/i.test(txt)) return wantSalary >= nums[0];
+          if (nums.length >= 2) return wantSalary >= Math.min(nums[0], nums[1]) && wantSalary <= Math.max(nums[0], nums[1]);
+          return Math.abs(wantSalary - nums[0]) <= 10000;
+        }) || null;
+      }
+    }
+    if (!match && (key === 'usPersonExportControl' || /not\s+a\s+u\.?\s*s\.?|not\s+a\s+us\s+person|not\s+a\s+united states/i.test(lv))) {
+      const compact = s => String(s || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+      const clv = compact(lv);
+      match = opts.find(o => /alien authorized to work/i.test(o.textContent || '')) || opts.find(o => {
+        const t = compact(o.textContent);
+        return /not.*(u s|us|united states).*person/.test(t) ||
+          (clv.includes('not a u s') && /not.*u s/.test(t));
+      }) || null;
+    }
+    if (!match && isNo) {
+      const compact = s => String(s || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+      match = opts.find(o => /never.*employ|not.*previous.*employ|not.*former.*employ|not.*employ/.test(compact(o.textContent))) || null;
+    }
     // Affirmative-consent fallback: "I agree"/"Yes"/"I certify"/"acknowledge"/"accept" should
     // match whatever affirmative wording a consent/certification dropdown actually uses.
     if (!match && /^(yes|i agree|agree|i certify|certify|i acknowledge|acknowledge|i accept|accept|i consent|consent|confirm)\b/i.test(lv)) {
@@ -1737,7 +2367,6 @@ async function pjaFillWorkdayPromptButtons(profile) {
     ? Object.entries(PJA_STATE_ABBR).find(([, abbr]) => abbr === state.toUpperCase())?.[0] || ''
     : state.toLowerCase();
   const country = String(profile && profile.country || 'United States').trim();
-  const phoneCountry = /canada/i.test(country) ? 'Canada' : 'United States';
   const phoneType = String(profile && profile.phoneType || 'Mobile').trim();
   const degree = String(profile && (profile.degree || profile.educationDegree) || 'Bachelor').trim();
   const specs = [];
@@ -1774,10 +2403,13 @@ async function pjaFillWorkdayPromptButtons(profile) {
         return (!!stateFull && (t === stateFull || t.startsWith(stateFull + ' ') || t.includes(' ' + stateFull + ' '))) ||
           (!!stateAbbr && new RegExp('(^|\\s|[-(])' + stateAbbr.toLowerCase() + '(?:\\s|[-)]|$)').test(t));
       } });
-    } else if (/^(country phone code|phone country code)\b/i.test(label) && !new RegExp(phoneCountry, 'i').test(selected)) {
-      specs.push({ button, key: 'phoneCountryCode', match: txt =>
-        new RegExp('^' + phoneCountry.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '\\b', 'i').test(txt) && /\+?1\b/.test(txt)
-      });
+    } else if (/(country|territory).{0,40}phone.{0,20}code|phone.{0,20}(country|territory).{0,20}code|dial(?:ing|ling) code/i.test(label)) {
+      // Phone country code is a Workday selectinput handled by pjaFillCombobox's verified
+      // United States +1 commit path. Do not also handle it through prompt buttons: this fallback
+      // opens an unfiltered country list on some tenants and can commit the first row (Albania).
+      continue;
+    } else if (/how did you hear|where did you (hear|find)|referral source|source of (this )?application|\bsource\b/i.test(label) && unresolved) {
+      specs.push({ button, key: 'referralSource', match: txt => /linkedin|job board or social media|social media|job board|online|internet|external job board/i.test(txt) });
     } else if (/^phone device type\b/i.test(label) && !new RegExp('\\b' + phoneType + '\\b', 'i').test(selected)) {
       specs.push({ button, key: 'phoneType', match: txt => new RegExp('^' + phoneType + '\\b', 'i').test(txt) });
     } else if (/^country\b/i.test(label) && !/phone code/i.test(label) && unresolved && country) {
@@ -1791,10 +2423,11 @@ async function pjaFillWorkdayPromptButtons(profile) {
       } });
     }
   }
-  // Address fields first. A stale referral-source menu can otherwise remain mounted and cause
-  // Workday's global activeListContainer selector to point at the wrong prompt.
-  specs.sort((a, b) => ({ degree: 0, state: 1, phoneCountryCode: 2, phoneType: 3, country: 4 }[a.key] ?? 9) -
-    ({ degree: 0, state: 1, phoneCountryCode: 2, phoneType: 3, country: 4 }[b.key] ?? 9));
+  // Address fields first, but country must precede state. Workday clears/resets the state picker
+  // when country is selected, so selecting state first creates a false success followed by a
+  // validation failure ("State Select One Required").
+  specs.sort((a, b) => ({ degree: 0, country: 1, state: 2, phoneCountryCode: 3, phoneType: 4 }[a.key] ?? 9) -
+    ({ degree: 0, country: 1, state: 2, phoneCountryCode: 3, phoneType: 4 }[b.key] ?? 9));
   let committed = 0;
   try { chrome.storage.local.get('pja_dbg', d => { const a=(d.pja_dbg||[]).slice(-160); a.push('[WD] prompt specs='+specs.map(s=>s.key).join('|')); chrome.storage.local.set({pja_dbg:a}); }); } catch (_) {}
   for (const spec of specs) {
@@ -1820,12 +2453,23 @@ async function pjaFillWorkdayPromptButtons(profile) {
         ...document.querySelectorAll('[role="listbox"]')
       ])).filter(el => {
         const r = el.getBoundingClientRect();
-        return r.width > 0 && r.height > 0;
+        return r.width > 0 && r.height > 0 && el.getAttribute('data-automation-id') !== 'selectedItemList' &&
+          !el.closest('[data-automation-id="selectedItemList"]');
       });
-      const options = lists.flatMap(list => Array.from(list.querySelectorAll('[role="option"]')))
-        .filter(opt => !opt.querySelector('[role="option"]'));
+      const options = lists.flatMap(list => Array.from(list.querySelectorAll('[role="option"], [data-automation-id="promptOption"]')))
+        .filter(opt => !opt.querySelector('[role="option"]') && opt.getAttribute('data-automation-id') !== 'selectedItem' &&
+          !opt.closest('[data-automation-id="selectedItemList"]'));
       lastOptions = options;
       match = options.find(opt => spec.match(ownText(opt))) || null;
+    }
+    if (!match) {
+      if (spec.key === 'referralSource') {
+        match = lastOptions.find(opt => /linkedin|job board|social media|career site|company website|website|online|internet|other/i.test(ownText(opt))) ||
+          lastOptions.find(opt => {
+            const txt = ownText(opt);
+            return txt && !/select one|clear|delete|selected/i.test(txt);
+          }) || null;
+      }
     }
     if (!match) {
       try { chrome.storage.local.get('pja_dbg', d => { const a=(d.pja_dbg||[]).slice(-160); a.push('[WD] prompt no match key='+spec.key+' opts='+lastOptions.slice(0,12).map(ownText).join('|').slice(0,180)); chrome.storage.local.set({pja_dbg:a}); }); } catch (_) {}
@@ -1833,9 +2477,23 @@ async function pjaFillWorkdayPromptButtons(profile) {
     }
     const target = match.querySelector('[data-automation-id="promptLeafNode"]') || match;
     if (await trustedClick(target)) {
-      committed++;
-      try { chrome.storage.local.get('pja_dbg', d => { const a=(d.pja_dbg||[]).slice(-160); a.push('[WD] prompt selected key='+spec.key+' value="'+ownText(match).slice(0,32)+'"'); chrome.storage.local.set({pja_dbg:a}); }); } catch (_) {}
-      await sleep(180);
+      const expected = ownText(match);
+      const expectedLower = expected.toLowerCase();
+      let ok = false;
+      for (let verify = 0; verify < 12 && !ok; verify++) {
+        await sleep(180);
+        const selectedText = ((spec.button.textContent || '') + ' ' + (spec.button.getAttribute('aria-label') || ''))
+          .trim().replace(/\s+/g, ' ');
+        const selectedLower = selectedText.toLowerCase();
+        ok = !!selectedText && !/select one/i.test(selectedText) &&
+          (selectedLower.includes(expectedLower) || spec.match(selectedText));
+      }
+      if (ok) {
+        committed++;
+        try { chrome.storage.local.get('pja_dbg', d => { const a=(d.pja_dbg||[]).slice(-160); a.push('[WD] prompt selected key='+spec.key+' value="'+expected.slice(0,32)+'"'); chrome.storage.local.set({pja_dbg:a}); }); } catch (_) {}
+      } else {
+        try { chrome.storage.local.get('pja_dbg', d => { const a=(d.pja_dbg||[]).slice(-160); a.push('[WD] prompt no commit key='+spec.key+' value="'+expected.slice(0,32)+'" selected="'+String(spec.button.textContent||'').trim().replace(/\s+/g,' ').slice(0,50)+'"'); chrome.storage.local.set({pja_dbg:a}); }); } catch (_) {}
+      }
     }
   }
   return committed;
@@ -1887,7 +2545,28 @@ function pjaFillForm(profile, answers) {
     if (/^iti-\d+__search-input$/i.test(el.id || '') ||
         (el.type === 'search' && el.closest('[class*="iti"]'))) return;
     const rawLabel = pjaGetLabel(el);
-    const key = pjaClassify(rawLabel);
+    let wdForcedKey = null;
+    if (/workday\.com|myworkdayjobs\.com/i.test(location.hostname) &&
+        el.getAttribute('data-uxi-widget-type') === 'selectinput') {
+      const wdFieldText = (el.closest('[data-automation-id^="formField-"], [data-uxi-widget-type="multiselect"]')?.textContent || '')
+        .replace(/\s+/g, ' ');
+      const isPhoneCodeField = /(country|territory).{0,60}phone.{0,30}code|phone.{0,30}(country|territory).{0,30}code|dial(?:ing|ling) code/i
+        .test(rawLabel + ' ' + wdFieldText);
+      if (isPhoneCodeField) wdForcedKey = 'phoneCountryCode';
+      else if (/how did you hear|where did you (hear|find)|referral source|source of (this )?application|\bsource\b/i.test(rawLabel + ' ' + wdFieldText)) wdForcedKey = 'referralSource';
+      const wdSelectedChipText = (el.closest('[data-uxi-widget-type="multiselect"]')
+        ?.querySelector('[data-automation-id="selectedItemList"], [data-automation-id="selectedItem"], [data-automation-id="promptOption"]')
+        ?.textContent || '').trim();
+      if (isPhoneCodeField && /united states/i.test(wdSelectedChipText) && /\+?1\b/.test(wdSelectedChipText)) {
+        try { chrome.storage.local.get('pja_dbg', d => {
+          const arr = (d.pja_dbg || []).slice(-160);
+          arr.push('[WD] pjaFillForm skip phone code selected chip already US');
+          chrome.storage.local.set({ pja_dbg: arr });
+        }); } catch (_) {}
+        return;
+      }
+    }
+    const key = wdForcedKey || pjaClassify(rawLabel);
 
     // Pronouns are optional identity data and have no stored profile source. Do not let fuzzy
     // answer-bank matching insert unrelated text (observed live: "Full-time").
@@ -2036,6 +2715,10 @@ function pjaFillForm(profile, answers) {
   if (/workday\.com|myworkdayjobs\.com/i.test(location.hostname)) {
     window._pjaComboChain = (window._pjaComboChain || Promise.resolve())
       .then(() => pjaFillWorkdayPromptButtons(profile));
+  }
+  if (/smartrecruiters\.com/i.test(location.hostname)) {
+    window._pjaComboChain = (window._pjaComboChain || Promise.resolve())
+      .then(() => pjaFillSmartRecruitersCustomFields(profile));
   }
 
   return filled;
@@ -2359,8 +3042,12 @@ window.pjaForceCountryField = pjaForceCountryField;
 // and keeps the widget's internal state in sync. Returns the number of phone fields typed.
 function pjaIsPhoneFieldDescriptor(type, id, name, label) {
   const text = [label, name, id].filter(Boolean).join(' ');
+  if (/^phoneNumber$/i.test(String(name || '')) || /^phoneNumber$/i.test(String(id || ''))) return true;
+  if (/(country|territory).{0,60}phone.{0,30}code|phone.{0,30}(country|territory).{0,30}code|dial(?:ing|ling) code|phone device type|phone type|phone extension/i.test(text)) {
+    return false;
+  }
   return type === 'tel' || pjaClassify(String(label || '').toLowerCase()) === 'phone' ||
-    /\b(phone|mobile|telephone)\b/i.test(text);
+    /\b(phone|mobile|telephone)\b/i.test(text) || /^phoneNumber$/i.test(String(name || id || ''));
 }
 window.pjaIsPhoneFieldDescriptor = pjaIsPhoneFieldDescriptor;
 
@@ -2376,6 +3063,7 @@ async function pjaForcePhoneField(value) {
     root.querySelectorAll('input:not([type="hidden"]):not([type="file"]):not([type="submit"]):not([type="button"]):not([type="checkbox"]):not([type="radio"])').forEach(inp => {
       if (/^iti-\d+__search-input$/i.test(inp.id || '') || inp.type === 'search') return;
       const label = typeof pjaGetLabel === 'function' ? pjaGetLabel(inp) : '';
+      if (inp.getAttribute('data-uxi-widget-type') === 'selectinput' || inp.getAttribute('role') === 'combobox') return;
       if (pjaIsPhoneFieldDescriptor(inp.type, inp.id, inp.name, label)) {
         if (!inputs.includes(inp)) inputs.push(inp);
       }
@@ -2399,6 +3087,13 @@ async function pjaForcePhoneField(value) {
         });
       });
       await new Promise(r => setTimeout(r, 250));
+      // Even when DOM digits are visible, React/Greenhouse can keep the validated field state empty.
+      // Re-fire the fiber/native path after trusted typing so the controlled value and validator
+      // state both receive the phone number before the required scan/submit.
+      try { if (typeof pjaFillTextViaFiber === 'function') pjaFillTextViaFiber(inp, digits, true); } catch (_) {}
+      inp.dispatchEvent(new InputEvent('beforeinput', { bubbles: true, data: digits, inputType: 'insertText' }));
+      inp.dispatchEvent(new InputEvent('input', { bubbles: true, data: digits, inputType: 'insertText' }));
+      inp.dispatchEvent(new Event('change', { bubbles: true }));
       // A successful CDP response only proves the keystrokes were delivered. Some controlled
       // Greenhouse phone inputs immediately discard them, leaving the required value empty. Verify
       // the DOM value and restore React/native state before claiming a commit.
@@ -2467,11 +3162,12 @@ async function pjaForceAllPolicyReactSelects(profile) {
     }
     // Education react-selects (degree/discipline/school) — the discipline field is a recurring
     // Greenhouse blocker (renders late, gh-edu misses it). Commit from profile truth via the bridge.
+    let eduKind = '';
     if (!ans && profile) {
       const L = ((label || '') + ' ' + (inp.id || '')).toLowerCase();
-      if (/\bdegree\b/.test(L)) { ans = profile.degree; isEdu = true; }
-      else if (/discipline|field of study|\bmajor\b/.test(L)) { ans = profile.major; isEdu = true; }
-      else if (/\bschool\b|university|college|institution/.test(L)) { ans = profile.university; isEdu = true; }
+      if (/\bdegree\b/.test(L)) { ans = profile.degree; isEdu = true; eduKind = 'degree'; }
+      else if (/discipline|field of study|\bmajor\b/.test(L)) { ans = profile.major; isEdu = true; eduKind = 'discipline'; }
+      else if (/\bschool\b|university|college|institution/.test(L)) { ans = profile.university; isEdu = true; eduKind = 'school'; }
     }
     { const _pmsg = '[psweep] id='+String(inp.id||'').slice(0,18)+' ans="'+String(ans==null?'null':ans).slice(0,5)+'" remix='+/remix-css/.test(ctrl.className||'')+' cc='+(ctrl.className||'').slice(0,40); pjaRDbg(_pmsg); try { chrome.storage.local.get('pja_dbg', d => { const a=(d.pja_dbg||[]).slice(-160); a.push(_pmsg); chrome.storage.local.set({pja_dbg:a}); }); } catch(_){} }
     if (!ans) continue;                                                       // fixed-truth policy + education
@@ -2487,12 +3183,20 @@ async function pjaForceAllPolicyReactSelects(profile) {
     let ok;
     if (isRemix && typeof pjaForceReactSelectCommit === 'function') {
       try { ok = await pjaForceReactSelectCommit(inp, ans, { force: true }); } catch (_) { ok = false; }
+      if (!ok && eduKind === 'school') {
+        try { ok = await pjaForceReactSelectCommit(inp, 'Other', { force: true }); } catch (_) { ok = false; }
+        if (ok) { try { chrome.storage.local.get('pja_dbg', d => { const a=(d.pja_dbg||[]).slice(-160); a.push('[psweep] school fallback committed Other id=' + String(inp.id||'').slice(0,18)); chrome.storage.local.set({pja_dbg:a}); }); } catch(_){} }
+      }
     } else {
       // Non-remix react-selects commit via the fiber bridge (proven). Fall back to the UI forcer.
       try { if (typeof pjaFillViaReactFiber === 'function') pjaFillViaReactFiber(inp, ans, ''); } catch (_) {}
       await _sleep(200);
       ok = !!(ctrl.querySelector('[class*="single-value"],[class*="singleValue"]')?.textContent?.trim());
       if (!ok && typeof pjaForceReactSelectCommit === 'function') { try { ok = await pjaForceReactSelectCommit(inp, ans); } catch (_) {} }
+      if (!ok && eduKind === 'school' && typeof pjaForceReactSelectCommit === 'function') {
+        try { ok = await pjaForceReactSelectCommit(inp, 'Other', { force: true }); } catch (_) { ok = false; }
+        if (ok) { try { chrome.storage.local.get('pja_dbg', d => { const a=(d.pja_dbg||[]).slice(-160); a.push('[psweep] school fallback committed Other id=' + String(inp.id||'').slice(0,18)); chrome.storage.local.set({pja_dbg:a}); }); } catch(_){} }
+      }
     }
     if (ok) committed++;
   }
@@ -2615,6 +3319,7 @@ window.pjaClickRadio = pjaClickRadio;
 window.pjaSelectRadio = pjaSelectRadio;
 window.pjaFindRequiredCheckboxGroups = pjaFindRequiredCheckboxGroups;
 window.pjaCheckMatchingBox = pjaCheckMatchingBox;
+window.pjaCheckMatchingBoxes = pjaCheckMatchingBoxes;
 window.pjaGetGroupLabel = pjaGetGroupLabel;
 window.pjaFillRequiredRadioFallback = typeof pjaFillRequiredRadioFallback !== 'undefined' ? pjaFillRequiredRadioFallback : undefined;
 window.PJA_FIELD_RULES = PJA_FIELD_RULES;

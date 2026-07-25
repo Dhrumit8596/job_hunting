@@ -37,6 +37,12 @@ function load(html) {
 }
 
 module.exports = (t) => {
+  const autoApplySource = fs.readFileSync(path.resolve(ROOT, 'content/auto-apply.js'), 'utf8');
+  t.ok(autoApplySource.includes('required-combobox skip phone code visible US') &&
+    autoApplySource.includes("isWorkdayPhoneCode ? 'phoneCountryCode'") &&
+    autoApplySource.includes("val = 'LinkedIn'"),
+  'EA/shared fallback: Workday phone-code and referral-source comboboxes use site-specific safe keys');
+
   const w = load(MODAL_HTML);
 
   // modal-state detection
@@ -110,6 +116,23 @@ module.exports = (t) => {
   wFill.pjaFillForm({ email: 'q@e.com', firstName: 'Q' }, {});
   t.eq(wFill.document.getElementById('jobs-search-box-keyword-id-ember1').value, '', 'EA: pjaFillForm leaves the page search bar empty');
   t.eq(wFill.document.getElementById('global-nav-search-input').value, '', 'EA: pjaFillForm leaves the global nav search empty');
+
+  // --- Greenhouse required consent checkbox with machine-readable id/name ---
+  // Regression: Greenhouse labels can be sparse/visually separated, while the required checkbox
+  // is identifiable only by name/id (gdpr_demographic_data_consent_given).
+  const wConsent = load(`<!DOCTYPE html><html><body>
+    <form>
+      <input id="gdpr_demographic_data_consent_given"
+        name="gdpr_demographic_data_consent_given"
+        type="checkbox"
+        required
+        aria-required="true">
+      <label for="gdpr_demographic_data_consent_given">I consent to demographic data processing</label>
+    </form>
+  </body></html>`);
+  wConsent.__pjaAutoCheckConsent();
+  t.eq(wConsent.document.getElementById('gdpr_demographic_data_consent_given').checked, true,
+    'EA/Greenhouse: auto-checks required GDPR demographic consent checkbox by id/name');
 
   // --- education-LEVEL radio picker (the Penumbra 'stuck' blocker) ---
   // The question has degree-level options, not Yes/No → pick the one matching profile.degree.

@@ -24,7 +24,7 @@ const PJA_EA_AUTO_OPEN = false;          // SEMI (only working path): user click
                                          // for any future LinkedIn change, but they don't open it today.
 const PJA_EA_STOP_BEFORE_SUBMIT = false; // false = fill, step, AND submit (auto-submit authorized)
 
-// Search URL: Bay Area · Easy Apply · past month · quality roles
+// Search URL: Easy Apply · past month · quality roles
 const PJA_AUTO_SEARCH_URL =
   'https://www.linkedin.com/jobs/search/?keywords=quality%20technician%20quality%20engineer&f_AL=true&location=San%20Francisco%20Bay%20Area&geoId=90000084&f_TPR=r2592000';
 
@@ -312,7 +312,7 @@ function pjaScanQualifyingJobs() {
 // ── Voluntary self-identification / EEO answer policy ────────────────────────
 // Race, ethnicity, Hispanic/Latino, gender, veteran status, disability. These are
 // VOLUNTARY — "decline to self-identify" is always a valid, honest answer. Where the
-// candidate has a banked factual answer that forms commonly require (gender=Female,
+// user may have a banked factual answer that forms commonly require (gender,
 // veteran=No, disability=No, Hispanic/Latino=No), prefer it; otherwise decline.
 // Returns the matching item from `opts` (option elements OR {el,value,text} for radios),
 // or null when `labelText` is not a self-ID question. Without this, self-ID selects have
@@ -389,7 +389,7 @@ function pjaFillRequiredRadioFallback(profile) {
 
     let defaultVal = null;
     if (/certif|licens|accreditat|credential|qualification/i.test(legendText)) {
-      defaultVal = 'Yes'; // the candidate has ASQ/quality certifications and 6yrs quality experience
+      defaultVal = 'Yes'; // generic fallback for required certification/qualification prompts
     } else if (/background check|drug test|drug screen/i.test(legendText)) {
       defaultVal = 'Yes';
     } else if (/authorize|authorized|eligible|legally|legal right/i.test(legendText)) {
@@ -418,7 +418,7 @@ function pjaFillRequiredRadioFallback(profile) {
     } else if (/experience.*quality|quality.*experience|quality.*background/i.test(legendText)) {
       defaultVal = 'Yes';
     } else if (/bachelor|degree|diploma|education/i.test(legendText)) {
-      defaultVal = 'Yes'; // the candidate has equivalent education/experience
+      defaultVal = 'Yes'; // generic fallback for required education/experience prompts
     } else if (/currently.*employ|actively.*look|full.time|part.time|intern/i.test(legendText)) {
       defaultVal = 'Yes';
     } else if (/as9100|iso.*900|iatf|gmp|fda|21 cfr|medical device/i.test(legendText)) {
@@ -427,7 +427,7 @@ function pjaFillRequiredRadioFallback(profile) {
 
     if (!defaultVal) {
       // Work authorization category radios (U.S. Citizen / Green Card / Temporary / Other)
-      // the candidate is on TN Visa = Temporary Employment Authorization
+      // If the user's profile maps to temporary employment authorization, choose that category.
       const labelsAndVals = radios.map(r => {
         const lbl = (typeof pjaGetLabel === 'function' ? pjaGetLabel(r) : r.getAttribute('aria-label') || '').toLowerCase();
         return (r.value || '').toLowerCase() + ' ' + lbl;
@@ -484,7 +484,7 @@ function pjaFillRequiredSelectFallback() {
     if (sidOpt) { pjaCommitSelect(sel, sidOpt.value); continue; }
 
     // Work authorization category selects (U.S. Citizen / Green Card / Temporary / Other)
-    // the candidate is on TN Visa = Temporary Employment Authorization
+    // If the user's profile maps to temporary employment authorization, choose that category.
     const hasAuthCategory = opts.some(o => /citizen|green card|permanent resident|temporary employment/i.test(o.text));
     if (hasAuthCategory && /authoriz|work permit|visa|basis/i.test(labelText)) {
       const tempOpt = opts.find(o => /temporary/i.test(o.text));
@@ -512,9 +512,9 @@ function pjaFillRequiredSelectFallback() {
     } else if (/outside (business|employment|interest)|conflict(s)? of interest|moonlight|secondary employment/i.test(labelText)) {
       fillVal = 'No'; // no outside business interests / conflicts
     } else if (/citizen|green card|permanent resident/i.test(labelText)) {
-      fillVal = 'No'; // TN visa, not citizen/GC
+      continue; // legal status must come from the user's profile/answer bank, not a default
     } else if (/passport|travel/i.test(labelText)) {
-      fillVal = 'Yes'; // the candidate has a passport
+      fillVal = 'Yes'; // generic fallback for travel/passport availability prompts
     }
 
     const target = fillVal === 'Yes' ? yesOpt : noOpt;
@@ -532,7 +532,10 @@ function pjaAutoCheckConsent() {
       || cb.getAttribute('aria-label')
       || cb.closest('label')?.textContent?.toLowerCase()
       || '';
-    if (/^\s*(acknowledge(?:\/confirm)?|confirm|agree|consent|certify)\b|\bi (understand|acknowledge|agree|accept|confirm|consent|certify|attest|authorize)\b|i have read|certify that|to the best of my knowledge|terms and conditions|privacy policy|eeo|equal opportunity|background check consent|data.*(processing|privacy)|gdpr|ai tool|automated/i.test(lbl)) {
+    const cbIdent = [cb.id, cb.name, cb.getAttribute('data-testid'), cb.getAttribute('aria-describedby')]
+      .filter(Boolean).join(' ');
+    if (/gdpr_demographic_data_consent_given|demographic.*consent|gdpr.*consent/i.test(cbIdent) ||
+        /^\s*(acknowledge(?:\/confirm)?|confirm|agree|consent|certify)\b|\bi (understand|acknowledge|agree|accept|confirm|consent|certify|attest|authorize)\b|i have read|certify that|to the best of my knowledge|terms and conditions|privacy policy|eeo|equal opportunity|background check consent|data.*(processing|privacy)|gdpr|ai tool|automated/i.test(lbl)) {
       // Setting checked=true and then dispatching/calling click toggles the box BACK off. Let the
       // real click activation perform the state transition first; only use the native setter if a
       // controlled widget rejected it.
@@ -574,13 +577,22 @@ function pjaFillRequiredComboboxFallback(profile, answers) {
     const rawLabel = (typeof pjaGetLabel === 'function' ? pjaGetLabel(el) : '') || el.getAttribute('aria-label') || '';
     if (!rawLabel) continue;
     if (/^(school|degree|discipline)\s*\*?$/i.test(rawLabel.trim())) continue;
+    const isWorkdayPhoneCode = /workday\.com|myworkdayjobs\.com/i.test(location.hostname) &&
+      /(?:country|territory).{0,60}phone.{0,30}code|phone.{0,30}(?:country|territory).{0,30}code|dial(?:ing|ling) code/i.test(rawLabel);
+    if (isWorkdayPhoneCode &&
+        /(?:country\s*(?:\/\s*territory)?\s*)?phone\s*code\*?.{0,120}united states(?: of america)?\s*\(\+?1\)/i
+          .test((document.body?.innerText || '').replace(/\s+/g, ' '))) {
+      try { if (typeof pjaRDbg === 'function') pjaRDbg('[WD] required-combobox skip phone code visible US'); } catch (_) {}
+      continue;
+    }
     const norm = (typeof pjaNormalizeLabel === 'function') ? pjaNormalizeLabel(rawLabel) : rawLabel.toLowerCase();
 
     // Try answer bank first (short answers only — long sentences won't match combobox options)
     if (typeof pjaFindBestAnswer === 'function') {
       const banked = pjaFindBestAnswer(norm, answers);
       if (banked && banked.length <= 20) {
-        if (typeof pjaFillCombobox === 'function') pjaFillCombobox(el, banked);
+        if (typeof pjaFillCombobox === 'function') pjaFillCombobox(el, banked,
+          isWorkdayPhoneCode ? 'phoneCountryCode' : undefined);
         continue;
       }
     }
@@ -594,11 +606,16 @@ function pjaFillRequiredComboboxFallback(profile, answers) {
     else if (/background check|drug test/i.test(rawLabel)) val = 'Yes';
     else if (/reloca/i.test(rawLabel)) val = 'Yes';
     else if (/certif|licens|degree|bachelor|diploma/i.test(rawLabel)) val = 'Yes';
+    else if (/how did you hear|where did you (hear|find)|referral source|source of (this )?application|\bsource\b/i.test(rawLabel)) val = 'LinkedIn';
+    else if (isWorkdayPhoneCode) val = (profile && profile.phoneCountryCode) || 'United States of America (+1)';
     else if (/years.*experience|experience.*years/i.test(rawLabel)) {
       val = (profile && profile.yearsExperience) ? String(profile.yearsExperience) : '6';
     }
 
-    if (val && typeof pjaFillCombobox === 'function') pjaFillCombobox(el, val);
+    if (val && typeof pjaFillCombobox === 'function') pjaFillCombobox(el, val,
+      isWorkdayPhoneCode ? 'phoneCountryCode'
+        : /how did you hear|where did you (hear|find)|referral source|source of (this )?application|\bsource\b/i.test(rawLabel) ? 'referralSource'
+        : undefined);
   }
 }
 
@@ -1272,6 +1289,7 @@ window.__pjaExternalApplyOnCurrentPage = pjaExternalApplyOnCurrentPage;
 window.__pjaModalHeading               = pjaModalHeading;
 window.__pjaModalBtns                  = pjaModalBtns;
 window.__pjaFillRequiredRadioFallback  = pjaFillRequiredRadioFallback;
+window.__pjaAutoCheckConsent           = pjaAutoCheckConsent;
 window.__pjaSelfIdPick                 = pjaSelfIdPick;
 window.__pjaEmptyRequiredFields        = pjaEmptyRequiredFields;
 window.__pjaEasyApplyState             = pjaEasyApplyState;

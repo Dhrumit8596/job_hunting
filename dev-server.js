@@ -55,6 +55,29 @@ const SYSTEM_PROMPT = (() => {
 const CANDIDATE_FINGERPRINT = HAS_CANDIDATE_PROFILE
   ? crypto.createHash('sha256').update(SYSTEM_PROMPT).digest('hex').slice(0, 24)
   : '';
+let runtimeCandidatePrompt = SYSTEM_PROMPT;
+let runtimeCandidateFingerprint = CANDIDATE_FINGERPRINT;
+let runtimeHasCandidateProfile = HAS_CANDIDATE_PROFILE;
+
+// Build a private, per-user scoring profile from extension storage. This keeps new users from
+// needing a gitignored candidate.local.txt while ensuring an empty/new profile still fails closed.
+async function refreshRuntimeCandidateProfile() {
+  const st = await getStorageFromExtension(['pja_profile', 'pja_resume_filename']);
+  const profile = st && st.pja_profile && typeof st.pja_profile === 'object' ? st.pja_profile : {};
+  const resume = String(st && st.pja_resume_filename || '').trim();
+  const meaningful = Object.entries(profile).filter(([k, v]) => v != null && String(v).trim() && !/^savedAt$/i.test(k));
+  if (meaningful.length < 3 || !resume) {
+    runtimeCandidatePrompt = SYSTEM_PROMPT;
+    runtimeCandidateFingerprint = CANDIDATE_FINGERPRINT;
+    runtimeHasCandidateProfile = HAS_CANDIDATE_PROFILE;
+    return { configured: runtimeHasCandidateProfile, resume: !!resume, fields: meaningful.length };
+  }
+  const facts = meaningful.map(([k, v]) => `${k}: ${String(v).slice(0, 500)}`).join('\n');
+  runtimeCandidatePrompt = `${GENERIC_SYSTEM_PROMPT}\n\nVERIFIED USER PROFILE (from local extension storage):\n${facts}\nResume uploaded locally: ${resume}. Treat the profile as authoritative; do not invent resume facts not represented here.`;
+  runtimeCandidateFingerprint = crypto.createHash('sha256').update(runtimeCandidatePrompt).digest('hex').slice(0, 24);
+  runtimeHasCandidateProfile = true;
+  return { configured: true, resume: true, fields: meaningful.length };
+}
 
 const JSON_SCHEMA = JSON.stringify({
   type: 'object',
@@ -158,7 +181,7 @@ function applicationAuditFromStorage(storage, options = {}) {
 }
 
 // Score one chunk (<=10) of jobs via the same prompt /batch-score uses.
-const SCORE_SYSTEM_PROMPT = `${SYSTEM_PROMPT}
+const SCORE_PROMPT_SUFFIX = `
 
 FOR BATCH FIT SCORING, the verified candidate/resume profile above is authoritative. Ignore any
 earlier output-format instruction and return the JSON ARRAY schema below. A title containing
@@ -179,7 +202,7 @@ function scoringExcerpt(description) {
 async function scoreJobChunk(batch) {
   const jobList = batch.map((j, i) => `Job ${i + 1}: id=${JSON.stringify(j.id)}\nTitle: ${j.title}\nCompany: ${j.company}\nLocation: ${j.location}\nPosting: ${scoringExcerpt(j.description)}`).join('\n---\n');
   const prompt = `Score each job using only the resume facts and posting text. A score of 75+ requires at least three direct requirement matches, no hard conflict, realistic seniority, and medium/high confidence.\n\nJobs:\n${jobList}`;
-  const raw = await runClaudeWithSystemPrompt(SCORE_SYSTEM_PROMPT, prompt);
+  const raw = await runClaudeWithSystemPrompt(`${runtimeCandidatePrompt}${SCORE_PROMPT_SUFFIX}`, prompt);
   const s = raw.indexOf('['), e = raw.lastIndexOf(']');
   if (s === -1 || e === -1) return [];
   try { return JSON.parse(raw.slice(s, e + 1)); } catch (_) { return []; }
@@ -187,10 +210,13 @@ async function scoreJobChunk(batch) {
 
 // Score all jobs in chunks of 10, with bounded concurrency. Resilient: a chunk that errors
 // or times out leaves its jobs unscored (→ shortlist) instead of stalling the whole run.
-async function scoreAll(jobs, concurrency = 4) {
+// Codex calls are independent; bounded parallelism keeps full-corpus scoring practical while
+// avoiding an unbounded process/connection fan-out.
+async function scoreAll(jobs, concurrency = 12) {
   // Deterministic safety boundary: prompt instructions are not the enforcement layer. Without a
   // verified local resume, no job can obtain an autonomous-apply score.
-  if (!HAS_CANDIDATE_PROFILE) return (jobs || []).map(j => ({ ...j, fitScore: 25,
+  await refreshRuntimeCandidateProfile();
+  if (!runtimeHasCandidateProfile) return (jobs || []).map(j => ({ ...j, fitScore: 25,
     matchEvidence: [], gaps: ['verified local candidate profile is not configured'],
     conflicts: [], confidence: 'low' }));
   const chunks = [];
@@ -222,10 +248,41 @@ async function scoreAll(jobs, concurrency = 4) {
   });
 }
 
+function summarizeFailureSnapshot(snapshot = {}) {
+  return {
+    company: snapshot.company || '',
+    title: snapshot.title || '',
+    ats: snapshot.ats || '',
+    applyUrl: snapshot.applyUrl || '',
+    hostname: snapshot.hostname || '',
+    phase: snapshot.phase || '',
+    reason: snapshot.reason || '',
+    stuckForMs: snapshot.stuckForMs || 0,
+    missingRequired: Array.isArray(snapshot.missingRequired) ? snapshot.missingRequired.slice(0, 20) : [],
+    visibleErrors: Array.isArray(snapshot.visibleErrors) ? snapshot.visibleErrors.slice(0, 20) : [],
+    formSummary: snapshot.formSummary || '',
+    stepLog: Array.isArray(snapshot.stepLog) ? snapshot.stepLog.slice(-20) : [],
+    domSummary: snapshot.domSummary && typeof snapshot.domSummary === 'object' ? snapshot.domSummary : null,
+    screenshot: snapshot.screenshot && snapshot.screenshot.dataUrl ? {
+      present: true,
+      mime: snapshot.screenshot.mime || 'image/jpeg',
+      chars: String(snapshot.screenshot.dataUrl || '').length,
+      truncated: !!snapshot.screenshot.truncated,
+    } : { present: false },
+  };
+}
+
 // ── HTTP request handler ────────────────────────────────────────────────────
 async function handleRequest(req, res) {
   if (req.method === 'OPTIONS') {
     res.writeHead(204, CORS); res.end(); return;
+  }
+
+  // Non-sensitive onboarding diagnostic: reports whether local profile/resume prerequisites
+  // exist without returning any personal values.
+  if (req.method === 'GET' && req.url === '/candidate-status') {
+    const status = await refreshRuntimeCandidateProfile();
+    res.writeHead(200, CORS); res.end(JSON.stringify(status)); return;
   }
 
   if (req.method === 'GET' && req.url === '/health') {
@@ -325,6 +382,20 @@ async function handleRequest(req, res) {
     for (const client of wsClients) { if (client.readyState === 1) { client.send(JSON.stringify({ cmd: 'closeJobTabs' })); pushed++; } }
     res.writeHead(200, CORS); res.end(JSON.stringify({ ok: true, pushed }));
     console.log(`[PJA] /close-job-tabs → ${pushed} client(s)`);
+    return;
+  }
+
+  // Close only duplicate tabs for the active ranked job, keeping the current in-flight tab.
+  if (req.method === 'POST' && req.url === '/close-duplicate-apply-tabs') {
+    (async () => {
+      try {
+        const data = await wsAsk('closeDuplicateActiveApplyTabs', {}, 'closeDuplicateActiveApplyTabsReply', 10000);
+        res.writeHead(200, CORS); res.end(JSON.stringify(data));
+        console.log(`[PJA] /close-duplicate-apply-tabs → closed=${data && data.closed}`);
+      } catch (e) {
+        res.writeHead(500, CORS); res.end(JSON.stringify({ ok: false, error: e.message }));
+      }
+    })();
     return;
   }
 
@@ -687,6 +758,25 @@ async function handleRequest(req, res) {
     return;
   }
 
+  // ── /resume-apply: ask extension SW to reconcile ledger/current state and dispatch next job ──
+  if (req.method === 'POST' && req.url === '/resume-apply') {
+    req.resume();
+    req.on('end', async () => {
+      try {
+        if (![...wsClients].some(c => c.readyState === 1)) {
+          res.writeHead(503, CORS); res.end(JSON.stringify({ ok: false, error: 'no extension connected' })); return;
+        }
+        const data = await wsAsk('resumeRankedApply', {}, 'resumeRankedApplyReply', 30000);
+        res.writeHead(data && data.ok ? 200 : 502, CORS);
+        res.end(JSON.stringify(data || { ok: false, error: 'resume did not reply' }));
+      } catch (e) {
+        res.writeHead(502, CORS);
+        res.end(JSON.stringify({ ok: false, error: e.message }));
+      }
+    });
+    return;
+  }
+
   if (req.method === 'POST' && req.url === '/analyze') {
     let body = '';
     req.on('data', d => body += d);
@@ -914,9 +1004,10 @@ ${(description || '').slice(0, 6000)}`;
         const dailyCap = o.dailyCap != null ? o.dailyCap : 50;
         const dailyTarget = o.targetConfirmed != null ? Math.max(1, Number(o.targetConfirmed) || 1)
           : Math.max(1, Number(dailyCap) || 1);
+        const e2eSafe = o.e2eSafe === true;
         // Zero means keep every qualified reserve. The global dispatcher stops as soon as the
         // confirmed target is reached, so reserves replace failures without causing over-submit.
-        const attemptCap = o.attemptCap != null ? Math.max(0, Number(o.attemptCap) || 0) : 0;
+        const attemptCap = o.attemptCap != null ? Math.max(0, Number(o.attemptCap) || 0) : (e2eSafe ? Math.max(25, dailyTarget * 2) : 0);
         // Evidence-grounded resume/JD rescoring is the safe default. Callers may explicitly set
         // rescore:false for diagnostics, but autonomous apply planning should never trust title-only
         // heuristic scores.
@@ -930,6 +1021,7 @@ ${(description || '').slice(0, 6000)}`;
         const perCompanyCap = o.perCompanyCap != null ? Math.max(0, Number(o.perCompanyCap) || 0) : 0;
         const includeAssisted = o.includeAssisted === true;
         const timeZone = o.timeZone || 'America/Los_Angeles';
+        const candidateStatus = await refreshRuntimeCandidateProfile();
         const Ledger = require('./application-ledger');
         const day = o.day || Ledger.dayKey(Date.now(), timeZone);
         const companyDeny = new Set((Array.isArray(o.companyDeny) ? o.companyDeny : [])
@@ -986,7 +1078,9 @@ ${(description || '').slice(0, 6000)}`;
         const setResp = await wsAsk('getApplySet', { threshold: rescore ? 0 : threshold,
           dailyCap: rescore ? 0 : dailyCap, perCompanyCap: rescore ? 0 : perCompanyCap,
           atsAllow, requireEvidence: !rescore && requireEvidence, maxGaps,
-          candidateFingerprint: !rescore ? CANDIDATE_FINGERPRINT : undefined }, 'applySetReply', 20000);
+          retryDeferred: e2eSafe ? false : undefined,
+          maxAttempts: e2eSafe ? 1 : undefined,
+          candidateFingerprint: !rescore ? runtimeCandidateFingerprint : undefined }, 'applySetReply', 20000);
         let jobs = (setResp && setResp.jobs) || [];
         if (setResp.error) { res.writeHead(502, CORS); res.end(JSON.stringify({ error: 'getApplySet: ' + setResp.error })); return; }
         if (candidateAllow.size || candidateIds.size) jobs = jobs.filter(allowed);
@@ -1010,14 +1104,14 @@ ${(description || '').slice(0, 6000)}`;
           for (const j of jobs) {
             const fp = descriptionFingerprint(j.description);
             if (j.scoreKind === 'llm' && j.fitScore != null && j.descriptionFingerprint === fp &&
-                j.candidateFingerprint === CANDIDATE_FINGERPRINT) reusable.push(j);
+                j.candidateFingerprint === runtimeCandidateFingerprint) reusable.push(j);
             else needsScore.push(j);
           }
           const scored = needsScore.length ? await scoreAll(needsScore) : [];
           if (scored.length) await wsAsk('updateScores', { scores: scored.map(j => ({ id: j.id, fitScore: j.fitScore,
             descriptionFingerprint: descriptionFingerprint(j.description),
-            candidateFingerprint: CANDIDATE_FINGERPRINT,
-            evidenceFingerprint: `${descriptionFingerprint(j.description)}:${CANDIDATE_FINGERPRINT}`,
+            candidateFingerprint: runtimeCandidateFingerprint,
+            evidenceFingerprint: `${descriptionFingerprint(j.description)}:${runtimeCandidateFingerprint}`,
             matchEvidence: j.matchEvidence,
             gaps: j.gaps, conflicts: j.conflicts, confidence: j.confidence })) }, 'updateScoresReply', 120000);
           const ranked = reusable.concat(scored)
@@ -1040,11 +1134,13 @@ ${(description || '').slice(0, 6000)}`;
           dailyTarget, alreadyConfirmedToday, remainingTarget })); return; }
 
         // 3. build the queue + seed current, then open the first job's tab to start the loop.
+        // Keep the active ranked-run object compact. Chrome storage can reject large single-item
+        // writes; scoring evidence remains persisted in the corpus via updateScores above and does
+        // not need to be duplicated into pja_ranked_apply/pja_ext_current.
         const queueJobs = jobs.map(j => ({ id: j.id, jobId: j.sourceJobId || j.jobId || '',
           sourceJobId: j.sourceJobId || j.jobId || '', title: j.title, company: j.company,
           ats: j.ats || j.strategy, strategy: j.strategy || '', channel: j.channel || 'external',
           applyUrl: j.applyUrl, listingUrl: j.listingUrl || '', location: j.location, fitScore: j.fitScore,
-          matchEvidence: j.matchEvidence || [], gaps: j.gaps || [], conflicts: j.conflicts || [],
           confidence: j.confidence || '', profile: {}, answers: {} }));
         const runId = 'apply-' + Date.now();
         const plannedAt = Date.now();
@@ -1062,7 +1158,7 @@ ${(description || '').slice(0, 6000)}`;
             results: { confirmed: [], failed: [], unverified: [], skipped: [] }, blockedChannels: [],
             runId, targetConfirmed: dailyTarget, dailyTarget, day, timeZone,
             confirmedCount: alreadyConfirmedToday, remaining: remainingTarget,
-            stopBeforeSubmit, startedAt: plannedAt, updatedAt: plannedAt };
+            stopBeforeSubmit, e2eSafe, startedAt: plannedAt, updatedAt: plannedAt };
           const started = await wsAsk('startRankedApply', { master, force: !!o.force },
             'startRankedApplyReply', 30000);
           if (!started || started.ok !== true) {
@@ -1077,7 +1173,7 @@ ${(description || '').slice(0, 6000)}`;
         const previewLimit = Math.max(1, Math.min(500, Number(o.previewLimit) || 12));
         res.end(JSON.stringify({ success: true, dryRun, planned: queueJobs.length,
           targetConfirmed: remainingTarget, dailyTarget, alreadyConfirmedToday, remainingTarget,
-          day, timeZone, assistedExcluded, includeAssisted,
+          day, timeZone, assistedExcluded, includeAssisted, e2eSafe,
           reserveCount: Math.max(0, queueJobs.length - remainingTarget), runId, byChannel,
           byStrategy, corpusTotal: setResp.total,
           top: jobs.slice(0, previewLimit).map(j => ({ fit: j.fitScore, company: j.company, title: j.title,
@@ -1248,7 +1344,7 @@ Matched skills: ${(matchedSkills || []).join(', ')}.
 Job snippet: ${(description || '').slice(0, 400)}
 
 Return ONLY valid JSON, no markdown:
-{"dmMessage":"<LinkedIn DM under 280 chars, open with Canadian TN Visa no sponsorship>","emailMessage":"<cold email, Subject: line first, TN Visa in first sentence, under 500 chars>","recruiterSearchUrl":"recruiter ${encodeURIComponent(company)}","hmSearchUrl":"hiring manager engineer ${encodeURIComponent(company)}"}`;
+{"dmMessage":"<LinkedIn DM under 280 chars, grounded only in supplied profile/job facts>","emailMessage":"<cold email, Subject: line first, under 500 chars, grounded only in supplied profile/job facts>","recruiterSearchUrl":"recruiter ${encodeURIComponent(company)}","hmSearchUrl":"hiring manager engineer ${encodeURIComponent(company)}"}`;
 
         const raw = await runClaude(prompt);
         const start = raw.indexOf('{');
@@ -1261,6 +1357,53 @@ Return ONLY valid JSON, no markdown:
         res.end(JSON.stringify({ success: true, ...data }));
       } catch (e) {
         console.error(`\n[PJA] Outreach error: ${e.message}`);
+        res.writeHead(500, CORS);
+        res.end(JSON.stringify({ success: false, error: e.message }));
+      }
+    });
+    return;
+  }
+
+  // ── /apply-help: analyze a blocked apply attempt and suggest a recovery path ─────────────
+  if (req.method === 'POST' && req.url === '/apply-help') {
+    let body = '';
+    req.on('data', d => body += d);
+    req.on('end', async () => {
+      try {
+        const snapshot = JSON.parse(body || '{}');
+        const compact = summarizeFailureSnapshot(snapshot);
+        const screenshotNote = snapshot.screenshot && snapshot.screenshot.dataUrl
+          ? `\nA screenshot was captured and attached as a ${snapshot.screenshot.mime || 'image/jpeg'} data URL (${String(snapshot.screenshot.dataUrl).length} chars${snapshot.screenshot.truncated ? ', truncated' : ''}). If your CLI/runtime can inspect images, use it. If not, rely on the DOM summary and logs.\n`
+          : '\nNo screenshot was available; rely on DOM summary and logs.\n';
+        const prompt =
+`A job application automation attempt got stuck. Diagnose the current page status and propose bounded recovery actions.
+
+Return ONLY valid JSON:
+{"classification":"applied|captcha|missing_required|email_verification_required|login_required|no_apply_path|submit_unclear|manual_required|stuck_wait","confidence":"low|medium|high","likelyCause":"...","evidence":["..."],"blockedFields":["..."],"recommendedActions":[{"type":"retry_fill_phone|retry_fill_country|retry_fill_phone_country_code|retry_greenhouse_react_selects|retry_smartrecruiters_custom_fields|retry_answer_required|wait_for_hydration|retry_submit_once|check_gmail_confirmation|record_captcha_and_advance|record_needs_manual","fieldHint":"...","valueKey":"profile.phone|profile.country|profile.phoneCountryCode|answers","reason":"..."}],"shouldRetry":true|false,"shouldRetrySubmit":true|false,"shouldAdvance":true|false,"needsCodeChange":true|false,"nextSelectors":["..."],"notes":["..."]}
+
+Snapshot:
+${JSON.stringify(compact, null, 2)}
+${screenshotNote}
+
+Rules:
+- Be concrete about the most likely blocker.
+- If the blocker is captcha, auth, missing required data, or a closed/stale posting, do not recommend blind retry.
+- If the blocker looks like a selector or DOM handling problem, propose one or more whitelisted recovery actions and suggest the next selector change.
+- Do not propose arbitrary code, arbitrary clicks, CAPTCHA bypass, or fabricated profile answers.
+- Mark applied only with strong visual/URL/DOM confirmation evidence; otherwise use submit_unclear or check_gmail_confirmation.`;
+        const raw = await runClaudeWithSystemPrompt(`${runtimeCandidatePrompt}\n\nYou are helping debug a live job application automation system.`, prompt, 120000);
+        const start = raw.indexOf('{');
+        const end = raw.lastIndexOf('}');
+        if (start === -1 || end === -1) throw new Error('No JSON in response');
+        const data = JSON.parse(raw.slice(start, end + 1));
+        const allowed = new Set(['retry_fill_phone','retry_fill_country','retry_fill_phone_country_code','retry_greenhouse_react_selects','retry_smartrecruiters_custom_fields','retry_answer_required','wait_for_hydration','retry_submit_once','check_gmail_confirmation','record_captcha_and_advance','record_needs_manual']);
+        data.recommendedActions = Array.isArray(data.recommendedActions)
+          ? data.recommendedActions.filter(a => a && allowed.has(String(a.type))).slice(0, 5)
+          : [];
+        res.writeHead(200, CORS);
+        res.end(JSON.stringify({ success: true, ...data, snapshot: compact }));
+      } catch (e) {
+        console.error(`\n[PJA] apply-help error: ${e.message}`);
         res.writeHead(500, CORS);
         res.end(JSON.stringify({ success: false, error: e.message }));
       }
@@ -1288,19 +1431,20 @@ Return ONLY valid JSON, no markdown:
         process.stdout.write(`[PJA] Answering ${questions.length} question(s) for ${title} @ ${company}… `);
         const t0 = Date.now();
 
-        // Build dynamic profile fields, falling back to hardcoded the candidate defaults
+        // Build dynamic profile fields from local extension storage. Missing facts stay unknown;
+        // do not inherit another user's work-authorization or background assumptions.
         const p = profile || {};
         const pf = prefs || {};
         const fa = (prefs && prefs.factual) || {};
         const fullName      = [p.firstName, p.lastName].filter(Boolean).join(' ') || 'the candidate';
-        const currentRole   = [p.currentTitle, p.currentCompany].filter(Boolean).join(' at ') || 'Senior Inspection Metrology Tech at a medical-device employer';
+        const currentRole   = [p.currentTitle, p.currentCompany].filter(Boolean).join(' at ') || 'not provided';
         const prevRole      = p.prevTitle && p.prevCompany
           ? `${p.prevTitle} at ${p.prevCompany}`
-          : 'Operation Associate II at a medical-device employer (May 2022–Aug 2024)';
-        const yearsExp      = p.yearsExperience || '6';
-        const locationLine  = [p.city, p.state].filter(Boolean).join(', ') || 'Santa Clara, CA';
-        const visaLine      = p.visa || 'Canadian citizen, TN Visa (USMCA) — no sponsorship needed';
-        const skillsLine    = p.skills || 'wafer inspection (~2,500/day), thin film metrology, photolithography, GMP, SPC, quality management, 5S, root cause analysis, EH&S, defect detection, yield improvement, clean room operations, data management, Lean Six Sigma White Belt';
+          : 'not provided';
+        const yearsExp      = p.yearsExperience || 'not provided';
+        const locationLine  = [p.city, p.state, p.country].filter(Boolean).join(', ') || 'not provided';
+        const visaLine      = p.visaStatus || p.visa || p.workAuth || 'not provided';
+        const skillsLine    = p.skills || p.summary || 'not provided';
 
         const ANSWER_SYSTEM_PROMPT =
 `You are filling out a job application for ${fullName}.
@@ -1308,9 +1452,9 @@ Return ONLY valid JSON, no markdown:
 PROFILE:
 - Current: ${currentRole}
 - Previous: ${prevRole}
-- Total work experience: ${yearsExp} years; semiconductor/medtech quality/metrology experience: ~4 years
+- Total work experience: ${yearsExp}
 - Skills: ${skillsLine}
-- Does NOT have (flag as aspirational or "actively learning" if asked): FMEA, 8D, ISO 13485, optical metrology, supplier audits, Python, CAD
+- Known gaps: ${fa.honestGaps || 'not provided'}
 - Visa: ${visaLine}
 - Location: ${locationLine}
 
@@ -1322,19 +1466,19 @@ PREFERENCES (use these for preference/logistics questions):
 - Consent stance: ${pf.screeningStance || 'consent to standard background/drug/data checks'}
 
 FACTUAL ANSWERS (use these EXACTLY for the matching question — do not contradict them):
-- Authorized to work in the US: ${fa.authorizedToWorkUS || 'Yes'}
-- Requires visa sponsorship (H-1B/etc.): ${fa.requiresSponsorship || 'No'}
-- Visa status: ${fa.visaStatus || 'TN visa (Canadian citizen)'}
-- Is a US citizen or permanent resident: ${fa.usCitizenOrPermanentResident || 'No'}
-- Is a "US person" for export-control/ITAR/EAR: ${fa.usPersonForExportControl || 'No'}
+- Authorized to work in the US: ${fa.authorizedToWorkUS || p.workAuth || 'not provided'}
+- Requires visa sponsorship (H-1B/etc.): ${fa.requiresSponsorship || p.requireSponsorship || 'not provided'}
+- Visa status: ${fa.visaStatus || p.visaStatus || 'not provided'}
+- Is a US citizen or permanent resident: ${fa.usCitizenOrPermanentResident || 'not provided'}
+- Is a "US person" for export-control/ITAR/EAR: ${fa.usPersonForExportControl || 'not provided'}
 - 18 or older: ${fa.over18 || 'Yes'}
 - Has security clearance: ${fa.securityClearance || 'No'}
 - Veteran status: ${fa.veteranStatus || 'Not a protected veteran'}
 - Disability: ${fa.disability || 'No'}
-- Gender: ${fa.gender || 'Female'}
+- Gender: ${fa.gender || p.gender || 'not provided'}
 - Race/ethnicity: ${fa.ethnicity || 'Decline to self-identify'}
 - Years of experience: ${fa.yearsExperience || yearsExp}
-- HONEST GAPS: ${fa.honestGaps || 'Do NOT claim FMEA, 8D, ISO 13485, optical metrology, supplier audits, Python, or CAD — answer such requirements honestly (no / limited / willing to learn).'}
+- HONEST GAPS: ${fa.honestGaps || 'Do not claim any skill, credential, citizenship, clearance, or work-authorization fact that is not supplied by the profile/resume.'}
 
 ANSWERING RULES:
 1. First person ("I have…"). Be truthful — never claim a skill/credential ${fullName} lacks (see HONEST GAPS).
@@ -1343,7 +1487,7 @@ ANSWERING RULES:
 4. Work-authorization / sponsorship / citizenship / US-person / export-control / clearance / age / veteran / disability / gender / ethnicity → use the FACTUAL ANSWERS above verbatim in meaning.
 5. Consent/agreement/certification questions (background check, drug test, data/GDPR, "I certify/agree/acknowledge") → answer affirmatively per the consent stance ("Yes"/"I agree"/"I certify").
 6. Salary/compensation → follow the Compensation preference (range/"competitive"/"negotiable"); never output a low hourly rate.
-7. Open-ended prompts — "describe your experience"/knowledge, "most impressive accomplishment", "your impact on quality", "top priorities in the first month", "why this role/mission", "which statement describes you" → 2–4 sentences grounded in her real resume, LEADING with her wafer-inspection / thin-film-metrology impact: high-volume wafer inspection (~2,500/day), defect detection, thickness metrology, yield improvement, and SPC/GMP quality at a medical-device / point-of-care diagnostics company. First-person, concrete, honest. Do NOT invent.
+7. Open-ended prompts — "describe your experience"/knowledge, "most impressive accomplishment", "your impact", "top priorities in the first month", "why this role/mission", "which statement describes you" → 2–4 sentences grounded in the supplied profile/resume. First-person, concrete, honest. Do NOT invent.
 8. When options are provided, the answer MUST be copied exactly from one of the options.
 9. Keep proportional to maxLength. No filler. Output ONLY the JSON array — one object per question, in order. NEVER ask for clarification or write prose: if a question is unclear/malformed, still include it with your best reasonable answer and confidence "low".
 10. Confidence: ALWAYS "high" for consent/agreement/certification/acknowledgment questions, and for anything covered by the FACTUAL ANSWERS or PREFERENCES above (work-auth, sponsorship, citizenship, US-person/export-control, clearance, age, veteran, disability, gender, ethnicity, years, salary, relocation, availability) — these are policy/fact, NOT guesses, even when the question text is long legalese. Use "low" ONLY for open-ended experiential/knowledge questions you are genuinely unsure about.`;

@@ -100,10 +100,9 @@ function tnAdjustScore(title, score) {
   return s;
 }
 
-// MEDICAL-WAFER priority boost. The candidate's actual background is wafer inspection / metrology
-// / quality at a MEDICAL-DEVICE (point-of-care diagnostics) company, so medical-device roles in
-// her core domain are the MOST relevant — rank them above generic semiconductor. Boost when the role
-// is medical/medtech AND in her domain (wafer/metrology/inspection/quality/process). Smaller boost
+// MEDICAL-WAFER priority boost. This is a domain-specific scoring preference for profiles whose
+// target background is wafer/metrology/inspection/quality/process work. Boost when the role
+// is medical/medtech AND in that target domain. Smaller boost
 // for medical-device quality/manufacturing generally. Caps at 100. Applied after tnAdjustScore.
 const MEDICAL_RE = /\b(medical|medtech|med.?device|medical device|diagnostic|in.?vitro|ivd|biomedical|implant|surgical|orthoped|cardio|catheter|point.?of.?care|patient|fda|iso ?13485|gmp|cgmp|clinical|pharmaceutical|biotech|life science|drug delivery|combination product)\b/i;
 const CORE_DOMAIN_RE = /\b(wafer|metrolog|inspection|defect|thin film|photolith|cleanroom|clean room|microfab|mems|semiconductor|yield|failure analysis|spc|process engineer|process development|process integration)\b/i;
@@ -115,7 +114,7 @@ function medicalWaferBoost(title, company, description, score) {
   const isMedical = MEDICAL_RE.test(text);
   const isCore = CORE_DOMAIN_RE.test(String(title || '') + ' ' + String(description || ''));
   let boost = 0;
-  if (isMedical && isCore) boost = 12;          // medical-device + her core wafer/metrology domain
+  if (isMedical && isCore) boost = 12;          // medical-device + target wafer/metrology domain
   else if (isMedical && /\b(quality|manufactur|process|equipment|reliability)\b/i.test(text)) boost = 7; // medical-device adjacent
   return Math.min(100, s + boost);
 }

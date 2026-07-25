@@ -5,6 +5,7 @@ const {
   emptyLedger,
   reduceLedger,
   mergeLedgers,
+  compactLedger,
   auditLedger,
   reconcileEmails,
   canonicalApplyUrl,
@@ -150,4 +151,27 @@ module.exports = (t) => {
   audit = auditLedger(ledger, auditOpts);
   t.eq(audit.counts.confirmed, 1, 'ledger email: duplicate message evidence is counted for only one job');
   t.eq(audit.counts.unverified, 1, 'ledger email: the duplicate assignment is surfaced as unverified');
+
+  ledger = emptyLedger();
+  const oldRun = 'old-run';
+  for (let i = 0; i < 30; i++) {
+    ledger = reduceLedger(ledger, event('old-fail-' + i, 'OLD-' + i, 'failed', {
+      runId: oldRun, occurredAt: T0 + i, applicationAt: T0 + i,
+    }));
+  }
+  for (let i = 0; i < 12; i++) {
+    ledger = reduceLedger(ledger, event('run-fail-' + i, 'RUN-' + i, 'failed', {
+      occurredAt: T0 + 1000 + i, applicationAt: T0 + 1000 + i,
+    }));
+  }
+  ledger = reduceLedger(ledger, event('confirmed-keep', 'KEEP', 'applied', {
+    runId: oldRun, occurredAt: T0 - 1000, applicationAt: T0 - 1000,
+    confirmationSource: 'page', confirmedAt: T0 - 999,
+  }));
+  const compact = compactLedger(ledger, { runId: RUN, maxRunEvents: 5, maxOtherEvents: 3 });
+  t.eq(Object.keys(compact.events).length, 9, 'ledger compact: keeps bounded active-run, bounded other-run, and all confirmations');
+  t.eq(auditLedger(compact, { runId: oldRun, day: null }).counts.confirmed, 1,
+    'ledger compact: confirmed history survives compaction');
+  t.eq(auditLedger(compact, { runId: RUN, day: null }).counts.failed, 5,
+    'ledger compact: active run keeps the configured recent failed events');
 };

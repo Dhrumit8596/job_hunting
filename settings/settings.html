@@ -68,7 +68,7 @@
     <div class="field-grid">
       <div class="form-group full"><label>Street Address</label><input id="pf-address" placeholder="123 Main St"></div>
       <div class="form-group full"><label>Apt / Suite / Unit</label><input id="pf-address2" placeholder=""></div>
-      <div class="form-group"><label>City</label><input id="pf-city" placeholder="Santa Clara"></div>
+      <div class="form-group"><label>City</label><input id="pf-city" placeholder="Your city"></div>
       <div class="form-group"><label>State</label><input id="pf-state" placeholder="CA"></div>
       <div class="form-group"><label>ZIP</label><input id="pf-zip" placeholder=""></div>
       <div class="form-group"><label>Country</label><input id="pf-country" placeholder="United States"></div>
@@ -77,7 +77,7 @@
     <div class="profile-section-label">Work</div>
     <div class="field-grid">
       <div class="form-group full"><label>Current Job Title</label><input id="pf-currentTitle" placeholder="e.g. Process Engineer"></div>
-      <div class="form-group full"><label>Current Company</label><input id="pf-currentCompany" placeholder="a medical-device employer"></div>
+      <div class="form-group full"><label>Current Company</label><input id="pf-currentCompany" placeholder="Current employer"></div>
       <div class="form-group"><label>Years of Experience</label><input id="pf-yearsExperience" placeholder="6"></div>
       <div class="form-group"><label>Salary Expectation</label><input id="pf-salaryExpectation" placeholder="$110,000"></div>
     </div>
@@ -88,6 +88,10 @@
       <div class="form-group"><label>Degree</label><input id="pf-degree" placeholder="B.Sc. Engineering"></div>
       <div class="form-group"><label>Major</label><input id="pf-major" placeholder="Materials Science"></div>
       <div class="form-group"><label>Graduation Year</label><input id="pf-graduationYear" placeholder="2019"></div>
+      <div class="form-group"><label>Education Start Month</label><input id="pf-educationStartMonth" placeholder="August"></div>
+      <div class="form-group"><label>Education Start Year</label><input id="pf-educationStartYear" placeholder="2019"></div>
+      <div class="form-group"><label>Education End Month</label><input id="pf-educationEndMonth" placeholder="May"></div>
+      <div class="form-group"><label>Education End Year</label><input id="pf-educationEndYear" placeholder="2023"></div>
     </div>
 
     <div class="profile-section-label">Work Authorization</div>
@@ -106,7 +110,7 @@
           <option value="Yes">Yes</option>
         </select>
       </div>
-      <div class="form-group"><label>Visa / Status</label><input id="pf-visaStatus" placeholder="TN Visa"></div>
+      <div class="form-group"><label>Visa / Status</label><input id="pf-visaStatus" placeholder="Work visa/status, if applicable"></div>
       <div class="form-group">
         <label>Willing to Relocate?</label>
         <select id="pf-willingToRelocate">
@@ -194,7 +198,7 @@
         <button class="btn btn-secondary gmail-acct-btn" data-idx="2">Account 3 (u/2)</button>
         <button class="btn btn-secondary gmail-acct-btn" data-idx="3">Account 4 (u/3)</button>
       </div>
-      <div class="help">Select which Gmail account is the candidate's job email. Workday sends verification emails there — the extension will open that inbox automatically. Currently signed-in accounts appear as u/0, u/1, u/2, u/3 in Gmail.</div>
+      <div class="help">Select which Gmail account receives job verification emails. Workday and some ATS platforms send verification emails there — the extension will open that inbox automatically. Currently signed-in accounts appear as u/0, u/1, u/2, u/3 in Gmail.</div>
       <div id="gmail-acct-status" style="margin-top:6px;font-size:13px;color:#16a34a;"></div>
     </div>
 
@@ -260,35 +264,8 @@
   <!-- Profile Summary -->
   <div class="card">
     <h2>AI Analysis Profile</h2>
-    <p class="card-desc">This profile is embedded in every Claude analysis prompt. Based on verified resume.</p>
-    <div class="profile-item">
-      <div class="profile-key">Current Role</div>
-      <div class="profile-val">Senior Inspection Metrology Tech, a medical-device employer (Sept 2024–present)</div>
-    </div>
-    <div class="profile-item">
-      <div class="profile-key">Previous</div>
-      <div class="profile-val">Operation Associate II, a medical-device employer (May 2022–Aug 2024)</div>
-    </div>
-    <div class="profile-item">
-      <div class="profile-key">Target Roles</div>
-      <div class="profile-val">Senior Metrology Tech · Quality Technician · Quality Inspector · Quality Engineer (stretch)</div>
-    </div>
-    <div class="profile-item">
-      <div class="profile-key">Confirmed Skills</div>
-      <div class="profile-val">Wafer Inspection · Thin Film Metrology · Photolithography · GMP · SPC · Quality Management · 5S · Root Cause Analysis · Clean Room · Defect Detection · EH&S · Lean Six Sigma (White Belt certified, Green Belt training)</div>
-    </div>
-    <div class="profile-item">
-      <div class="profile-key">Not on Resume</div>
-      <div class="profile-val" style="color:#dc2626">FMEA · 8D · ISO 13485 · Optical Metrology · Supplier Audits · Python · CAD — treated as gaps when required</div>
-    </div>
-    <div class="profile-item">
-      <div class="profile-key">Education</div>
-      <div class="profile-val">B.E. Environmental Engineering (WES equivalency) · Diploma Water &amp; Wastewater Management</div>
-    </div>
-    <div class="profile-item">
-      <div class="profile-key">Visa</div>
-      <div class="profile-val"><span class="tn-badge">✓ Canadian Citizen · USMCA TN Visa Eligible · No H-1B Needed</span></div>
-    </div>
+    <p class="card-desc">This summary is generated from your saved profile and is embedded in AI analysis prompts. Upload a resume and complete the factual fields above to improve fit scoring.</p>
+    <div id="analysis-profile-summary"><div class="empty-state">No profile fields configured yet.</div></div>
   </div>
 
   <!-- Pipeline Stats -->

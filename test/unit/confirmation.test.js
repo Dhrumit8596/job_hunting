@@ -40,6 +40,10 @@ module.exports = (t) => {
   // --- must NOT false-positive ---
   // still on the apply form (everything present, no confirmation text)
   t.eq(ok({ text: 'Apply for this job. Resume. Submit application.', url: 'https://acme.com/apply', preSubmitUrl: 'https://acme.com/apply', hasSubmitButton: true, hasFormFields: true, iterations: 5 }), false, 'confirm: still-on-form is NOT success');
+  t.eq(ok({ text: 'Return to the main page Cellares Home Page Jobs powered by Lever', url: 'https://jobs.lever.co/acme/uuid/apply', hasSubmitButton: false, hasFormFields: false, priorSubmit: true }), true,
+    'confirm: Lever sparse landing after this run submitted -> success');
+  t.eq(ok({ text: 'Return to the main page Cellares Home Page Jobs powered by Lever', url: 'https://jobs.lever.co/acme/uuid/apply', hasSubmitButton: false, hasFormFields: false, priorSubmit: false }), false,
+    'confirm: Lever sparse landing without this-run submit is not success');
   // a same-path re-render where the form is still present
   t.eq(ok({ text: 'Please complete required fields', url: 'https://acme.com/apply#err', preSubmitUrl: 'https://acme.com/apply', hasFormFields: true, iterations: 4 }), false, 'confirm: validation re-render is NOT success');
   t.eq(ok({ text: 'Thank you for applying. Please fix the highlighted field.',

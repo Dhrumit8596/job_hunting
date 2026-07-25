@@ -57,6 +57,8 @@ async function pjaBuildApplySet(opts) {
     threshold: opts && opts.threshold != null ? opts.threshold : 70,
     dailyCap: opts && opts.dailyCap != null ? opts.dailyCap : 30,
     atsAllow: opts && opts.atsAllow,
+    retryDeferred: opts && Object.prototype.hasOwnProperty.call(opts, 'retryDeferred') ? opts.retryDeferred : undefined,
+    maxAttempts: opts && opts.maxAttempts != null ? opts.maxAttempts : undefined,
     requireEvidence: !!(opts && opts.requireEvidence),
     maxGaps: opts && opts.maxGaps != null ? opts.maxGaps : 2,
     perCompanyCap: opts && opts.perCompanyCap != null ? opts.perCompanyCap : 2,
@@ -79,8 +81,11 @@ function pjaAppendApplicationEvent(event) {
     if (!self.PJAApplicationLedger) throw new Error('application ledger unavailable');
     const data = await new Promise(r => chrome.storage.local.get(PJA_APPLICATION_LEDGER_KEY, r));
     const current = data[PJA_APPLICATION_LEDGER_KEY] || self.PJAApplicationLedger.emptyLedger();
-    const next = self.PJAApplicationLedger.reduceLedger(current, event);
-    await new Promise(r => chrome.storage.local.set({ [PJA_APPLICATION_LEDGER_KEY]: next }, r));
+    let next = self.PJAApplicationLedger.reduceLedger(current, event);
+    if (typeof self.PJAApplicationLedger.compactLedger === 'function') {
+      next = self.PJAApplicationLedger.compactLedger(next, { runId: event && event.runId, maxRunEvents: 180, maxOtherEvents: 60 });
+    }
+    await pjaSetLocal({ [PJA_APPLICATION_LEDGER_KEY]: next });
     await pjaAdvanceRankedRun(event, next);
     return next;
   });
@@ -89,7 +94,15 @@ function pjaAppendApplicationEvent(event) {
 }
 
 function pjaSetLocal(values) {
-  return new Promise(resolve => chrome.storage.local.set(values, resolve));
+  return new Promise((resolve, reject) => {
+    try {
+      chrome.storage.local.set(values, () => {
+        const err = chrome.runtime.lastError;
+        if (err) reject(new Error(err.message || String(err)));
+        else resolve();
+      });
+    } catch (e) { reject(e); }
+  });
 }
 
 function pjaLaunchEasyApplySingle(job, master) {
@@ -132,12 +145,31 @@ async function pjaLaunchExternalSingle(job, master) {
   const queue = { status: 'applying', jobs: [job], currentIndex: 0,
     results: { applied: [], skipped: [] }, runId: master.runId, startedAt: launchedAt };
   const current = Object.assign({}, job, { returnUrl: 'https://www.linkedin.com/jobs/', runId: master.runId });
-  await pjaSetLocal({ pja_ext_queue: queue, pja_ext_current: current,
+  const seed = { pja_ext_queue: queue, pja_ext_current: current,
     pja_ext_stop_before_submit: !!master.stopBeforeSubmit, pja_navigate_to: job.applyUrl,
     // Every ranked reserve is a one-job subqueue with the same runId/index. Include its canonical
     // identity so the legacy SW watchdog cannot inherit the prior reserve's elapsed timer.
     pja_apply_wd: { runId: master.runId, idx: 0,
-      jobKey: self.PJAApplySelect?.queueJobKey(job) || '', startedAt: launchedAt } });
+      jobKey: self.PJAApplySelect?.queueJobKey(job) || '', startedAt: launchedAt } };
+  await pjaSetLocal(seed);
+  const verify = await new Promise(r => chrome.storage.local.get(['pja_ext_queue', 'pja_ext_current'], r));
+  const seededQueue = verify.pja_ext_queue || null;
+  const seededCurrent = verify.pja_ext_current || null;
+  const seededOk = seededQueue && seededCurrent && seededQueue.runId === master.runId &&
+    seededCurrent.runId === master.runId && pjaSameRankedJob(job, seededCurrent);
+  if (!seededOk) {
+    // Retry each key separately. This avoids losing the whole launch if Chrome rejects one
+    // composite write and gives us a second chance before opening a dead ATS tab.
+    await pjaSetLocal({ pja_ext_queue: queue });
+    await pjaSetLocal({ pja_ext_current: current });
+    await pjaSetLocal({ pja_ext_stop_before_submit: !!master.stopBeforeSubmit,
+      pja_navigate_to: job.applyUrl, pja_apply_wd: seed.pja_apply_wd });
+    const retry = await new Promise(r => chrome.storage.local.get(['pja_ext_queue', 'pja_ext_current'], r));
+    if (!(retry.pja_ext_queue && retry.pja_ext_current && retry.pja_ext_queue.runId === master.runId &&
+        retry.pja_ext_current.runId === master.runId && pjaSameRankedJob(job, retry.pja_ext_current))) {
+      throw new Error('external queue seed verification failed');
+    }
+  }
   return new Promise((resolve, reject) => chrome.tabs.create({ url: job.applyUrl, active: true }, tab =>
     chrome.runtime.lastError || !tab
       ? reject(new Error(chrome.runtime.lastError?.message || 'external tab create failed')) : resolve(tab.id)));
@@ -161,15 +193,222 @@ async function pjaCloseRankedTab(tabId) {
   try { await chrome.tabs.remove(tabId); } catch (_) {}
 }
 
-async function pjaRestoreRankedFailureState(job, reason) {
+async function pjaCloseDuplicateRankedTabs(job, keepTabId) {
+  if (!job || !job.applyUrl || keepTabId == null) return 0;
+  const wanted = self.PJAApplySelect?.applyUrlKey(job.applyUrl) || String(job.applyUrl || '');
+  if (!wanted) return 0;
+  let closed = 0;
+  try {
+    const tabs = await new Promise(r => chrome.tabs.query({}, r));
+    for (const tab of tabs) {
+      if (tab.id === keepTabId) continue;
+      const tabUrl = self.PJAApplySelect?.applyUrlKey(tab.url || '') || String(tab.url || '');
+      if (tabUrl && (tabUrl === wanted || tabUrl.startsWith(wanted) || wanted.startsWith(tabUrl))) {
+        try { await chrome.tabs.remove(tab.id); closed++; } catch (_) {}
+      }
+    }
+  } catch (_) {}
+  if (closed) console.warn('PJA ranked apply: closed duplicate tabs for current job', closed, job.company, job.title);
+  return closed;
+}
+
+async function pjaReinjectRankedTab(tabId, reason) {
+  if (tabId == null) return false;
+  const scripts = [
+    'content/extractors/generic.js',
+    'content/autofill.js',
+    'content/workday-auth.js',
+    'content/external-apply.js',
+  ];
+  try {
+    await chrome.scripting.executeScript({
+      target: { tabId },
+      func: () => { try { delete window.__pjaExtApplyLoaded; } catch (_) { window.__pjaExtApplyLoaded = false; } },
+    });
+    await chrome.scripting.executeScript({ target: { tabId }, files: scripts });
+    console.warn('PJA ranked apply: reinjected active tab', tabId, reason || '');
+    return true;
+  } catch (e) {
+    console.warn('PJA ranked apply: reinject failed', tabId, reason || '', e.message);
+    return false;
+  }
+}
+
+function pjaScheduleRankedReinject(runId, index, tabId, delayMs) {
+  if (!runId || tabId == null) return;
+  setTimeout(async () => {
+    try {
+      const d = await new Promise(r => chrome.storage.local.get('pja_ranked_apply', r));
+      const master = d.pja_ranked_apply;
+      if (!master || master.runId !== runId || master.status !== 'applying') return;
+      if (master.currentIndex !== index || master.inFlightIndex !== index || master.inFlightTabId !== tabId) return;
+      await pjaReinjectRankedTab(tabId, 'watchdog_' + delayMs);
+    } catch (e) {
+      console.warn('PJA ranked apply: reinject watchdog error', e.message);
+    }
+  }, delayMs);
+}
+
+async function pjaRankedTabExists(tabId) {
+  if (tabId == null) return false;
+  return new Promise(resolve => {
+    try {
+      chrome.tabs.get(tabId, tab => resolve(!!tab && !chrome.runtime.lastError));
+    } catch (_) {
+      resolve(false);
+    }
+  });
+}
+
+async function pjaClearRankedExtQueue(master) {
+  if (!master || !master.runId) return;
+  try {
+    const data = await new Promise(r => chrome.storage.local.get(['pja_ext_queue', 'pja_ext_current', 'pja_apply_wd'], r));
+    const q = data.pja_ext_queue || null;
+    const cur = data.pja_ext_current || null;
+    const qRunId = q && (q.runId || (q.jobs && q.jobs[0] && q.jobs[0].runId));
+    const curRunId = cur && cur.runId;
+    if (qRunId !== master.runId && curRunId !== master.runId) return;
+    const terminalQueue = {
+      status: master.status || 'done',
+      jobs: [],
+      currentIndex: 0,
+      results: { applied: [], skipped: [], errors: [] },
+      runId: master.runId,
+      finishedAt: Date.now()
+    };
+    await new Promise(r => chrome.storage.local.set({
+      pja_ext_queue: terminalQueue,
+      pja_ext_current: null,
+      pja_apply_wd: null
+    }, r));
+    await new Promise(r => chrome.storage.local.remove(['pja_navigate_to'], r));
+  } catch (e) { console.error('PJA: failed to clear ranked ext queue', e); }
+}
+
+async function pjaRestoreRankedFailureState(job, reason, masterHint) {
   if (!self.PJAIdb || !self.PJAApplySelect || !job || !job.id) return;
   try {
     const current = await self.PJAIdb.getJob(job.id);
     const attempts = current?.state?.attempts != null ? current.state.attempts : (job.attempts || 0);
-    const next = self.PJAApplySelect.resultToState(reason, attempts);
+    let ranked = masterHint || null;
+    if (!ranked && job.runId) {
+      const d = await new Promise(r => chrome.storage.local.get('pja_ranked_apply', r));
+      ranked = d.pja_ranked_apply || null;
+    }
+    const maxAttempts = ranked && ranked.runId === job.runId && ranked.e2eSafe ? 1 : undefined;
+    const next = self.PJAApplySelect.resultToState(reason, attempts, maxAttempts);
     await self.PJAIdb.updateState(job.id, { status: next.status, reason: next.reason,
       attempts: next.attempts != null ? next.attempts : attempts, updatedAt: Date.now() });
   } catch (e) { console.error('PJA: failed to restore ranked corpus state', e); }
+}
+
+async function pjaReconcileRankedExtCurrent(master) {
+  if (!master || master.status !== 'applying' || !master.runId) return master;
+  try {
+    const data = await new Promise(r => chrome.storage.local.get(['pja_ext_current', 'pja_ext_queue'], r));
+    const cur = data.pja_ext_current || null;
+    const q = data.pja_ext_queue || null;
+    if (!cur || cur.runId !== master.runId) return master;
+    const extActive = q && q.runId === master.runId && q.status === 'applying';
+    if (!extActive) return master;
+    const curIndex = (master.jobs || []).findIndex((candidate, idx) =>
+      idx > master.currentIndex && pjaSameRankedJob(candidate, cur));
+    if (curIndex <= master.currentIndex) return master;
+    console.warn('PJA ranked apply: reconciling ext_current ahead of master', master.currentIndex, '→', curIndex, cur.company, cur.title);
+    for (let idx = master.currentIndex; idx < curIndex; idx++) {
+      const stale = master.jobs[idx];
+      if (!stale) continue;
+      const hadSubmitClick = false; // kept explicit: stale external-current advance is not confirmation.
+      const reason = hadSubmitClick ? 'submit_unclear_ext_current_advanced' : 'stale_ext_current_reconciled';
+      master.results.failed.push({ ...stale, reason });
+      await pjaRestoreRankedFailureState(stale, reason, master);
+    }
+    master.currentIndex = curIndex;
+    master.inFlightIndex = curIndex;
+    master.updatedAt = Date.now();
+    await pjaSetLocal({ pja_ranked_apply: master });
+  } catch (e) { console.warn('PJA ranked apply: ext_current reconcile failed', e.message); }
+  return master;
+}
+
+function pjaRankedResultRecorded(master, job) {
+  if (!master || !job) return false;
+  const buckets = master.results || {};
+  const all = ['confirmed', 'failed', 'skipped', 'unverified']
+    .flatMap(k => Array.isArray(buckets[k]) ? buckets[k] : []);
+  return all.some(existing => pjaSameRankedJob(existing, job));
+}
+
+function pjaRankedApplyTerminal(master, job, event) {
+  if (!master.results) master.results = { confirmed: [], failed: [], unverified: [], skipped: [] };
+  for (const key of ['confirmed', 'failed', 'unverified', 'skipped']) {
+    if (!Array.isArray(master.results[key])) master.results[key] = [];
+  }
+  const confirmed = self.PJAApplicationLedger.confirmationKinds(event).length > 0;
+  if (confirmed) master.results.confirmed.push({ ...job, confirmedAt: event.confirmedAt });
+  else if (/^already_applied\b/i.test(event.reason || '')) {
+    master.results.skipped.push({ ...job, reason: event.reason || 'already_applied' });
+  }
+  else if (/captcha/i.test(event.reason || '')) {
+    master.results.skipped.push({ ...job, reason: event.reason || 'captcha' });
+  }
+  else if (/^(failed|failure|error|blocked|aborted|skipped)$/.test(event.status) || event.success === false) {
+    master.results.failed.push({ ...job, reason: event.reason || event.status });
+  } else master.results.unverified.push({ ...job, reason: event.reason || 'unverified' });
+}
+
+async function pjaReconcileRankedLedger(master, ledger) {
+  if (!master || master.status !== 'applying' || !master.runId || !ledger || !self.PJAApplicationLedger) return master;
+  if (!master.results) master.results = { confirmed: [], failed: [], unverified: [], skipped: [] };
+  for (const key of ['confirmed', 'failed', 'unverified', 'skipped']) {
+    if (!Array.isArray(master.results[key])) master.results[key] = [];
+  }
+  const events = Object.values(ledger.events || {})
+    .map(e => self.PJAApplicationLedger.normalizeEvent(e))
+    .filter(e => e && e.runId === master.runId && !/^(submitting|pending|queued|started|in_progress)$/.test(e.status))
+    .sort((a, b) => (a.occurredAt || 0) - (b.occurredAt || 0));
+  let changed = false;
+  for (const event of events) {
+    const idx = (master.jobs || []).findIndex((candidate, i) => i >= master.currentIndex && pjaSameRankedJob(candidate, event));
+    if (idx < 0) continue;
+    const job = master.jobs[idx];
+    if (pjaRankedResultRecorded(master, job)) {
+      if (master.currentIndex <= idx) { master.currentIndex = idx + 1; changed = true; }
+      continue;
+    }
+    if (idx > master.currentIndex) {
+      for (let i = master.currentIndex; i < idx; i++) {
+        const stale = master.jobs[i];
+        if (stale && !pjaRankedResultRecorded(master, stale)) {
+          master.results.failed.push({ ...stale, reason: 'ledger_reconcile_gap' });
+          await pjaRestoreRankedFailureState(stale, 'ledger_reconcile_gap', master);
+        }
+      }
+    }
+    pjaRankedApplyTerminal(master, job, event);
+    await pjaRestoreRankedFailureState(job, event.reason || event.status || 'ledger_reconciled', master);
+    master.currentIndex = idx + 1;
+    changed = true;
+  }
+  if (changed) {
+    const dailyTarget = master.dailyTarget || master.targetConfirmed || 50;
+    const auditOpts = master.day
+      ? { day: master.day, timeZone: master.timeZone || 'America/Los_Angeles', target: dailyTarget }
+      : { runId: master.runId, day: null, target: dailyTarget };
+    const audit = self.PJAApplicationLedger.auditLedger(ledger, auditOpts);
+    master.confirmedCount = audit.counts.confirmed;
+    master.remaining = audit.remaining;
+    master.inFlightIndex = null;
+    master.inFlightTabId = null;
+    master.updatedAt = Date.now();
+    if (audit.counts.confirmed >= dailyTarget) {
+      master.status = 'done';
+      master.finishedAt = Date.now();
+    }
+    await pjaSetLocal({ pja_ranked_apply: master });
+  }
+  return master;
 }
 
 async function pjaApplyUrlAlive(url, timeoutMs = 8000) {
@@ -181,22 +420,95 @@ async function pjaApplyUrlAlive(url, timeoutMs = 8000) {
       cache: 'no-store', credentials: 'include' });
     // Only explicit terminal HTTP states are proof that a posting is dead. 401/403/405 and
     // network/anti-bot failures remain launchable because ATSes commonly reject HEAD requests.
-    return response.status !== 404 && response.status !== 410;
+    if (response.status === 404 || response.status === 410) return false;
+    // Some ATSes (notably Ashby) serve a branded "posting not found" page with HTTP 200.
+    // Do a bounded GET only for those hosts so stale postings do not consume E2E apply attempts.
+    if (/ashbyhq\.com/i.test(String(url))) {
+      const bodyCtrl = new AbortController();
+      const bodyTimer = setTimeout(() => bodyCtrl.abort(), Math.min(timeoutMs, 8000));
+      try {
+        const bodyResp = await fetch(url, { method: 'GET', redirect: 'follow', signal: bodyCtrl.signal,
+          cache: 'no-store', credentials: 'include' });
+        if (bodyResp.status === 404 || bodyResp.status === 410) return false;
+        const text = (await bodyResp.text()).slice(0, 200000);
+        if (/(posting|job|position)\s+(not\s+found|no\s+longer\s+available|closed)|this\s+job\s+is\s+no\s+longer\s+available|application\s+is\s+no\s+longer\s+available/i.test(text)) {
+          return false;
+        }
+      } catch (_) {
+        return true;
+      } finally {
+        clearTimeout(bodyTimer);
+      }
+    }
+    return true;
   } catch (_) { return true; }
   finally { clearTimeout(timer); }
 }
 
+async function pjaRecoverRankedLastFailure(master) {
+  if (!master || master.status !== 'applying' || !master.runId) return master;
+  const job = master.jobs && master.jobs[master.currentIndex];
+  if (!job || pjaRankedResultRecorded(master, job)) return master;
+  const d = await new Promise(r => chrome.storage.local.get(['pja_last_apply_failure', 'pja_ext_queue', 'pja_ext_current'], r));
+  const failure = d.pja_last_apply_failure || null;
+  if (!failure || !pjaSameRankedJob(failure, job)) return master;
+  const extQueueOwns = d.pja_ext_queue && d.pja_ext_queue.runId === master.runId &&
+    d.pja_ext_queue.status === 'applying' && pjaSameRankedJob((d.pja_ext_queue.jobs || [])[d.pja_ext_queue.currentIndex || 0], job);
+  const currentOwns = pjaSameRankedJob(d.pja_ext_current, job);
+  if (!extQueueOwns && !currentOwns) return master;
+  const reason = String(failure.reason || '');
+  const isSuccessFactors = /successfactors|talentcommunity/i.test(String(job.ats || job.channel || '') + ' ' + String(job.applyUrl || ''));
+  const recoveredReason = isSuccessFactors && reason === 'no_submit_btn' ? 'no_apply_path' : reason;
+  if (!/^(no_apply_path|no_submit_btn|posting_not_found|apply_btn_no_form|no_apply_btn_on_description)$/.test(reason)) return master;
+  const event = {
+    runId: master.runId,
+    jobId: job.jobId || job.id || null,
+    applyUrl: job.applyUrl,
+    company: job.company,
+    title: job.title,
+    channel: job.channel || job.ats || 'external',
+    status: 'failed',
+    success: false,
+    reason: recoveredReason,
+    applicationAt: job.applicationAt || master.inFlightAt || Date.now(),
+    occurredAt: Date.now(),
+  };
+  if (self.PJAApplicationLedger) {
+    await pjaAppendApplicationEvent(event);
+    const ledgerData = await new Promise(r => chrome.storage.local.get(PJA_APPLICATION_LEDGER_KEY, r));
+    master = await pjaReconcileRankedLedger(master, ledgerData[PJA_APPLICATION_LEDGER_KEY]);
+  } else {
+    pjaRankedApplyTerminal(master, job, event);
+    master.currentIndex++;
+    master.inFlightIndex = null;
+    master.inFlightTabId = null;
+    master.updatedAt = Date.now();
+    await pjaSetLocal({ pja_ranked_apply: master });
+  }
+  return master;
+}
+
 async function pjaDispatchRankedCurrent(master) {
+  if (self.PJAApplicationLedger) {
+    try {
+      const data = await new Promise(r => chrome.storage.local.get(PJA_APPLICATION_LEDGER_KEY, r));
+      master = await pjaReconcileRankedLedger(master, data[PJA_APPLICATION_LEDGER_KEY]);
+    } catch (e) { console.warn('PJA ranked apply: ledger reconcile failed', e.message); }
+  }
+  master = await pjaRecoverRankedLastFailure(master);
+  master = await pjaReconcileRankedExtCurrent(master);
   if (master.day && self.PJAApplicationLedger?.dayKey(Date.now(), master.timeZone || 'America/Los_Angeles') !== master.day) {
     master.status = 'day_changed'; master.finishedAt = Date.now(); master.inFlightIndex = null;
     master.inFlightTabId = null;
     await pjaSetLocal({ pja_ranked_apply: master });
+    await pjaClearRankedExtQueue(master);
     return master;
   }
   if (master.remaining != null && master.remaining <= 0) {
     master.status = 'done'; master.finishedAt = Date.now(); master.inFlightIndex = null;
     master.inFlightTabId = null;
     await pjaSetLocal({ pja_ranked_apply: master });
+    await pjaClearRankedExtQueue(master);
     return master;
   }
   const blocked = new Set(master.blockedChannels || []);
@@ -207,9 +519,17 @@ async function pjaDispatchRankedCurrent(master) {
   if (master.currentIndex >= master.jobs.length) {
     master.status = 'exhausted'; master.finishedAt = Date.now(); master.inFlightIndex = null;
     await pjaSetLocal({ pja_ranked_apply: master });
+    await pjaClearRankedExtQueue(master);
     return master;
   }
-  if (master.inFlightIndex === master.currentIndex) return master;
+  if (master.inFlightIndex === master.currentIndex) {
+    if (await pjaRankedTabExists(master.inFlightTabId)) return master;
+    console.warn('PJA ranked apply: in-flight tab missing; relaunching current job', master.currentIndex);
+    master.inFlightIndex = null;
+    master.inFlightTabId = null;
+    master.inFlightAt = null;
+    await pjaSetLocal({ pja_ranked_apply: master });
+  }
   const job = Object.assign({}, master.jobs[master.currentIndex], { runId: master.runId,
     applicationAt: Date.now(), rankedRun: true });
   master.jobs[master.currentIndex] = job;
@@ -231,6 +551,7 @@ async function pjaDispatchRankedCurrent(master) {
     if (job.channel === 'linkedin_easy_apply') tabId = await pjaLaunchEasyApplySingle(job, master);
     else if (job.channel === 'indeed_apply') tabId = await pjaLaunchIndeedSingle(job, master);
     else tabId = await pjaLaunchExternalSingle(job, master);
+    await pjaCloseDuplicateRankedTabs(job, tabId);
     // Capture the exact tab after launch so timeout/channel-pause handling can close redirected
     // pages before the next reserve starts. Re-read ownership to avoid overwriting a very fast result.
     const latest = await new Promise(r => chrome.storage.local.get('pja_ranked_apply', r));
@@ -240,12 +561,14 @@ async function pjaDispatchRankedCurrent(master) {
       owned.inFlightTabId = tabId;
       master = owned;
       await pjaSetLocal({ pja_ranked_apply: master });
+      pjaScheduleRankedReinject(master.runId, master.currentIndex, tabId, 75000);
+      pjaScheduleRankedReinject(master.runId, master.currentIndex, tabId, 150000);
     } else await pjaCloseRankedTab(tabId);
   } catch (e) {
     master.results.failed.push({ ...job, reason: 'launch_failed: ' + e.message });
     master.currentIndex++; master.inFlightIndex = null;
     master.inFlightTabId = null;
-    await pjaRestoreRankedFailureState(job, 'launch_failed');
+    await pjaRestoreRankedFailureState(job, 'launch_failed', master);
     await pjaSetLocal({ pja_ranked_apply: master });
     return pjaDispatchRankedCurrent(master);
   }
@@ -258,13 +581,23 @@ async function pjaAdvanceRankedRun(rawEvent, ledger) {
   const d = await new Promise(r => chrome.storage.local.get('pja_ranked_apply', r));
   const master = d.pja_ranked_apply;
   if (!master || master.status !== 'applying' || event.runId !== master.runId) return;
-  const job = master.jobs[master.currentIndex];
-  if (!pjaSameRankedJob(job, event)) return;
-  const confirmed = self.PJAApplicationLedger.confirmationKinds(event).length > 0;
-  if (confirmed) master.results.confirmed.push({ ...job, confirmedAt: event.confirmedAt });
-  else if (/^(failed|failure|error|blocked|aborted|skipped)$/.test(event.status) || event.success === false) {
-    master.results.failed.push({ ...job, reason: event.reason || event.status });
-  } else master.results.unverified.push({ ...job, reason: event.reason || 'unverified' });
+  let job = master.jobs[master.currentIndex];
+  if (!pjaSameRankedJob(job, event)) {
+    const matchIndex = (master.jobs || []).findIndex((candidate, idx) =>
+      idx > master.currentIndex && pjaSameRankedJob(candidate, event));
+    if (matchIndex < 0) return;
+    console.warn('PJA ranked apply: reconciling stale currentIndex', master.currentIndex, '→', matchIndex, event.company, event.title);
+    for (let idx = master.currentIndex; idx < matchIndex; idx++) {
+      const skipped = master.jobs[idx];
+      if (skipped) {
+        master.results.failed.push({ ...skipped, reason: 'stale_inflight_reconciled' });
+        await pjaRestoreRankedFailureState(skipped, 'stale_inflight_reconciled', master);
+      }
+    }
+    master.currentIndex = matchIndex;
+    job = master.jobs[master.currentIndex];
+  }
+  pjaRankedApplyTerminal(master, job, event);
   if (/daily_limit|checkpoint|challenge/i.test(event.reason || '') && job.channel === 'linkedin_easy_apply') {
     master.blockedChannels = Array.from(new Set([...(master.blockedChannels || []), 'linkedin_easy_apply']));
   }
@@ -286,6 +619,7 @@ async function pjaAdvanceRankedRun(rawEvent, ledger) {
   if (audit.counts.confirmed >= dailyTarget) {
     master.status = 'done'; master.finishedAt = Date.now();
     await pjaSetLocal({ pja_ranked_apply: master });
+    await pjaClearRankedExtQueue(master);
     await pjaCloseRankedTab(tabToClose);
     return;
   }
@@ -301,13 +635,19 @@ async function pjaAdvanceRankedRun(rawEvent, ledger) {
 async function pjaApplyWatchdogTick() {
   if (!self.PJAApplySelect) return;
   const rankedData = await new Promise(r => chrome.storage.local.get('pja_ranked_apply', r));
-  const ranked = rankedData.pja_ranked_apply;
+  let ranked = rankedData.pja_ranked_apply;
+  if (self.PJAApplicationLedger) {
+    const ledgerData = await new Promise(r => chrome.storage.local.get(PJA_APPLICATION_LEDGER_KEY, r));
+    ranked = await pjaReconcileRankedLedger(ranked, ledgerData[PJA_APPLICATION_LEDGER_KEY]);
+  }
+  ranked = await pjaReconcileRankedExtCurrent(ranked);
+  const rankedCapMs = ranked && ranked.e2eSafe ? 3 * 60 * 1000 : 10 * 60 * 1000;
   if (ranked && ranked.status === 'applying' && ranked.inFlightIndex != null &&
-      Date.now() - (ranked.inFlightAt || Date.now()) > 10 * 60 * 1000) {
+      Date.now() - (ranked.inFlightAt || Date.now()) > rankedCapMs) {
     const stuck = ranked.jobs[ranked.currentIndex];
     if (stuck) {
       await pjaCloseRankedTab(ranked.inFlightTabId);
-      await pjaRestoreRankedFailureState(stuck, 'ranked_watchdog_timeout');
+      await pjaRestoreRankedFailureState(stuck, 'ranked_watchdog_timeout', ranked);
       await pjaAppendApplicationEvent({ runId: ranked.runId,
         jobId: stuck.jobId || stuck.id, applyUrl: stuck.applyUrl, company: stuck.company, title: stuck.title,
         channel: stuck.channel, status: 'failed', success: false, reason: 'ranked_watchdog_timeout',
@@ -325,7 +665,8 @@ async function pjaApplyWatchdogTick() {
   const idx = dec.idx;
   const job = (q.jobs || [])[idx];
   if (!job) return;
-  if (job.runId) {
+  const rankedOwnsQueueJob = !!(ranked && ranked.status === 'applying' && job.runId && ranked.runId === job.runId);
+  if (rankedOwnsQueueJob) {
     try {
       const tabs = await new Promise(r => chrome.tabs.query({}, r));
       for (const t of tabs) if (t.url && job.applyUrl && (t.url === job.applyUrl || t.url.indexOf(job.applyUrl) === 0)) chrome.tabs.remove(t.id).catch(() => {});
@@ -355,6 +696,14 @@ async function pjaApplyWatchdogTick() {
     writeObj.pja_navigate_to = nextJob.applyUrl;
   }
   await new Promise(r => chrome.storage.local.set(writeObj, r));
+  if (job.runId) {
+    try {
+      await pjaAppendApplicationEvent({ runId: job.runId, jobId: job.jobId || job.id,
+        applyUrl: job.applyUrl, company: job.company, title: job.title, channel: job.channel || job.ats,
+        status: 'failed', success: false, reason: 'stuck_watchdog',
+        applicationAt: q.startedAt || now, occurredAt: now });
+    } catch (_) {}
+  }
   console.log('PJA apply-watchdog: force-advanced stuck job', job.company, '→ idx', q.currentIndex, q.status);
   // Close the hung tab(s) for the stuck job (match its applyUrl prefix so we don't close siblings).
   try {
@@ -517,6 +866,23 @@ if (DEV_MODE) {
               })();
             } else if (msg.cmd === 'openTab') {
               chrome.tabs.create({ url: msg.url });
+            } else if (msg.cmd === 'resumeRankedApply') {
+              (async () => {
+                let data;
+                try {
+                  const current = await new Promise(r => chrome.storage.local.get('pja_ranked_apply', r));
+                  let master = current.pja_ranked_apply || null;
+                  if (!master || master.status !== 'applying') {
+                    data = { ok: false, error: 'no active ranked apply run' };
+                  } else {
+                    master = await pjaDispatchRankedCurrent(master);
+                    data = { ok: true, runId: master.runId, status: master.status,
+                      currentIndex: master.currentIndex, inFlightIndex: master.inFlightIndex,
+                      tabId: master.inFlightTabId };
+                  }
+                } catch (e) { data = { ok: false, error: e.message }; }
+                try { _wsReloadSocket.send(JSON.stringify({ cmd: 'resumeRankedApplyReply', reqId: msg.reqId, data })); } catch (_) {}
+              })();
             } else if (msg.cmd === 'startRankedApply') {
               // Installation is acknowledged and the service worker is the final atomic owner of
               // the active-run lock. The HTTP caller must not report "queued" until this succeeds.
@@ -556,7 +922,30 @@ if (DEV_MODE) {
                     out.push({ tabId: tab.id, url: tab.url, frames: frames.map(x => x.result).filter(Boolean) });
                   } catch (e) { out.push({ tabId: tab.id, url: tab.url, error: e.message }); }
                 }
-                reply({ tabs: out });
+                const st = await new Promise(r => chrome.storage.local.get(['pja_ranked_apply', 'pja_last_apply_failure'], r));
+                const ranked = st.pja_ranked_apply || null;
+                const slimResults = rows => (rows || []).map(row => ({
+                  company: row.company || '', title: row.title || '', ats: row.ats || row.strategy || '',
+                  reason: row.reason || '', status: row.status || '', applyUrl: row.applyUrl || '',
+                })).slice(0, 100);
+                reply({ tabs: out, ranked: ranked ? {
+                  runId: ranked.runId, status: ranked.status, currentIndex: ranked.currentIndex,
+                  inFlightIndex: ranked.inFlightIndex, inFlightTabId: ranked.inFlightTabId,
+                  totalJobs: ranked.jobs && ranked.jobs.length,
+                  confirmed: ranked.results && ranked.results.confirmed && ranked.results.confirmed.length || 0,
+                  failed: ranked.results && ranked.results.failed && ranked.results.failed.length || 0,
+                  skipped: ranked.results && ranked.results.skipped && ranked.results.skipped.length || 0,
+                  unverified: ranked.results && ranked.results.unverified && ranked.results.unverified.length || 0,
+                  results: ranked.results ? {
+                    confirmed: slimResults(ranked.results.confirmed),
+                    failed: slimResults(ranked.results.failed),
+                    skipped: slimResults(ranked.results.skipped),
+                    unverified: slimResults(ranked.results.unverified),
+                  } : null,
+                } : null, lastFailure: st.pja_last_apply_failure ? {
+                  reason: st.pja_last_apply_failure.reason || '', company: st.pja_last_apply_failure.company || '',
+                  title: st.pja_last_apply_failure.title || '', ats: st.pja_last_apply_failure.ats || '',
+                } : null });
               });
             } else if (msg.cmd === 'injectResume') {
               // Dev-server-triggered résumé upload: reads pja_resume_b64 (a data URL) and injects
@@ -771,6 +1160,21 @@ if (DEV_MODE) {
                   }
                 }
               });
+            } else if (msg.cmd === 'closeDuplicateActiveApplyTabs') {
+              (async () => {
+                let data;
+                try {
+                  const d = await new Promise(r => chrome.storage.local.get('pja_ranked_apply', r));
+                  const master = d.pja_ranked_apply || null;
+                  const job = master && master.jobs && master.jobs[master.currentIndex];
+                  if (!master || !job) data = { ok: false, error: 'no active ranked job' };
+                  else {
+                    const closed = await pjaCloseDuplicateRankedTabs(job, master.inFlightTabId);
+                    data = { ok: true, closed, runId: master.runId, keepTabId: master.inFlightTabId };
+                  }
+                } catch (e) { data = { ok: false, error: e.message }; }
+                try { _wsReloadSocket.send(JSON.stringify({ cmd: 'closeDuplicateActiveApplyTabsReply', reqId: msg.reqId, data })); } catch (_) {}
+              })();
             } else if (msg.cmd === 'resolveAts') {
               // Resolve external ATS URLs for a batch of jobIds via the voyager API on a LinkedIn
               // tab (paced, account-safe). Writes externalApplyUrl back onto pja_shortlist entries.
@@ -836,6 +1240,7 @@ function injectContentScriptsIntoExistingTabs() {
     'content/extractors/glassdoor.js',
     'content/extractors/generic.js',
     'content/autofill.js',
+    'content/workday-auth.js',
     'content/auto-apply.js',
     'content/external-apply.js',
     'content/job-scraper.js',
@@ -853,7 +1258,10 @@ function injectContentScriptsIntoExistingTabs() {
   ];
   chrome.tabs.query({ url: targetUrls }, tabs => {
     for (const tab of tabs) {
-      chrome.scripting.executeScript({ target: { tabId: tab.id }, files: allScripts })
+      chrome.scripting.executeScript({
+        target: { tabId: tab.id },
+        func: () => { try { delete window.__pjaExtApplyLoaded; } catch (_) { window.__pjaExtApplyLoaded = false; } },
+      }).catch(() => {}).then(() => chrome.scripting.executeScript({ target: { tabId: tab.id }, files: allScripts }))
         .then(() => console.log('PJA: injected into tab', tab.id, tab.url))
         .catch(err => console.log('PJA: inject failed for tab', tab.id, err.message));
     }
@@ -913,28 +1321,44 @@ chrome.tabs.onRemoved.addListener(tabId => pjaGreenhouseFallbackTabs.delete(tabI
 // Note: autofill.js + external-apply.js are injected by manifest content_scripts (<all_urls>)
 // on every page load — no need for programmatic injection via onUpdated.
 
-// TOP-LEVEL: inject gmail-verify.js when Gmail tab opens during WD auth flow
+// TOP-LEVEL: inject gmail-verify.js when Gmail tab opens during Workday auth or generic
+// ATS email-code recovery.
 chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
   if (changeInfo.status !== 'complete') return;
   if (!tab.url || !tab.url.includes('mail.google.com')) return;
-  const { pja_wd_gmail_session: session } = await new Promise(r =>
-    chrome.storage.local.get('pja_wd_gmail_session', r)
+  const data = await new Promise(r =>
+    chrome.storage.local.get(['pja_wd_gmail_session', 'pja_email_code_session'], r)
   );
+  const session = data.pja_wd_gmail_session || data.pja_email_code_session;
   if (!session || session.gmailTabId !== tabId) return;
-  if (Date.now() - session.startedAt > 180000) return;
+  if (Date.now() - session.startedAt > 180000) {
+    if (data.pja_email_code_session) chrome.storage.local.remove('pja_email_code_session');
+    return;
+  }
   console.log('PJA bg: injecting gmail-verify.js into Gmail tab', tabId);
+  await chrome.scripting.executeScript({
+    target: { tabId },
+    func: () => { try { delete window.__pjaGmailVerifyRunning; } catch (_) { window.__pjaGmailVerifyRunning = false; } }
+  }).catch(() => {});
   chrome.scripting.executeScript({
     target: { tabId },
     files: ['content/gmail-verify.js']
   }).catch(err => {
     console.error('PJA bg: gmail-verify injection failed', err);
-    chrome.storage.local.set({
-      pja_wd_verify_result: { hostname: session.hostname, success: false, reason: 'inject_failed', ts: Date.now() }
-    });
-    if (session.applyTabId) {
-      chrome.tabs.sendMessage(session.applyTabId, { type: 'WD_VERIFY_COMPLETE', success: false }).catch(() => {});
+    if (data.pja_email_code_session) {
+      chrome.storage.local.set({
+        pja_email_code_result: { hostname: session.hostname, company: session.company, success: false, reason: 'inject_failed', ts: Date.now() }
+      });
+      chrome.storage.local.remove('pja_email_code_session');
+    } else {
+      chrome.storage.local.set({
+        pja_wd_verify_result: { hostname: session.hostname, success: false, reason: 'inject_failed', ts: Date.now() }
+      });
+      if (session.applyTabId) {
+        chrome.tabs.sendMessage(session.applyTabId, { type: 'WD_VERIFY_COMPLETE', success: false }).catch(() => {});
+      }
+      chrome.storage.local.remove('pja_wd_gmail_session');
     }
-    chrome.storage.local.remove('pja_wd_gmail_session');
   });
 });
 
@@ -1207,10 +1631,10 @@ function getTemplateAnalysis(title, company, description) {
   const safeCompany = company || 'your company';
 
   const dmMessage =
-    `Hi [Name], I'm the candidate — Canadian citizen, TN Visa eligible (zero sponsorship). experienced engineer. Your ${safeTitle} at ${safeCompany} looks like a strong fit. Happy to connect!`;
+    `Hi [Name], I came across the ${safeTitle} role at ${safeCompany}. My background appears relevant, and I would be glad to connect if this role is still active.`;
 
   const emailMessage =
-    `Subject: ${safeTitle} – TN Visa Eligible, No Sponsorship Needed\n\nHi [Name],\n\nI came across the ${safeTitle} at ${safeCompany} and wanted to reach out directly.\n\nKey highlight: I'm a Canadian citizen and TN Visa eligible — no H-1B sponsorship required, zero USCIS overhead for your team.\n\nI'm currently a Senior Inspection Metrology Tech at a medical-device employer, where I:\n• Led GMP-compliant quality programs across clean room and photolithography lines\n• Implemented SPC controls that reduced defect escapes by 18%\n• Maintained thin film metrology tools and wafer inspection systems\n• Hold a Lean Six Sigma Green Belt\n\nI believe my background aligns well with what ${safeCompany} is building. Happy to share my resume or jump on a 15-minute intro call.\n\nBest,\nthe candidate\n[LinkedIn URL] | [Phone]`;
+    `Subject: ${safeTitle} at ${safeCompany}\n\nHi [Name],\n\nI came across the ${safeTitle} role at ${safeCompany} and wanted to reach out directly. My background appears relevant to the posting, and I would be glad to share more context or connect for a brief conversation.\n\nBest,\n[Your Name]\n[LinkedIn URL] | [Phone]`;
 
   return {
     fitScore,
@@ -1885,6 +2309,43 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     return true;
   }
 
+  if (msg.type === 'SUCCESSFACTORS_START') {
+    (async () => {
+      try {
+        const tabId = _sender.tab && _sender.tab.id;
+        if (!tabId) throw new Error('no sender tab');
+        const injected = await chrome.scripting.executeScript({
+          target: { tabId },
+          world: 'MAIN',
+          func: () => {
+            const apply = globalThis.j2w && globalThis.j2w.Apply;
+            const handler = apply && apply.handleApplyNowButton;
+            const diagnostics = {
+              url: location.href,
+              title: document.title,
+              j2wPresent: !!globalThis.j2w,
+              applyPresent: !!apply,
+              handlerType: typeof handler,
+            };
+            if (typeof handler !== 'function') return { ok: false, error: 'j2w.Apply.handleApplyNowButton is unavailable', diagnostics };
+            try {
+              const eventLike = { target: {}, currentTarget: {}, preventDefault() {}, stopPropagation() {} };
+              const result = handler.call(apply, eventLike);
+              diagnostics.invoked = true;
+              diagnostics.returnType = typeof result;
+              return { ok: true, diagnostics };
+            } catch (e) {
+              diagnostics.invoked = false;
+              return { ok: false, error: String(e && (e.message || e)), diagnostics };
+            }
+          },
+        });
+        sendResponse(injected && injected[0] && injected[0].result || { ok: false, error: 'no result' });
+      } catch (e) { sendResponse({ ok: false, error: e.message || String(e) }); }
+    })();
+    return true;
+  }
+
   if (msg.type === 'CDP_TYPE_AT') {
     pjaWithCdpTabLock(_sender.tab.id, () => cdpTypeAt(_sender.tab.id, msg.x, msg.y, msg.text))
       .then(() => sendResponse({ ok: true }))
@@ -2255,20 +2716,18 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   if (msg.type === 'GET_PROFILE') {
     chrome.storage.local.get(['pja_profile', 'appMode'], r => {
       const defaults = {
-        salutation: 'Mrs', firstName: 'the candidate', middleName: '',
-        lastName: '', fullName: 'the candidate',
+        salutation: '', firstName: '', middleName: '',
+        lastName: '', fullName: '',
         email: '', phone: '', linkedin: '', website: '',
         address: '', address2: '',
-        city: 'Santa Clara', state: 'CA', zip: '', country: 'United States',
-        currentTitle: 'Senior Inspection Metrology Technician',
-        currentCompany: 'a medical-device employer',
-        yearsExperience: '6', university: '', degree: '', major: '',
+        city: '', state: '', zip: '', country: 'United States',
+        currentTitle: '', currentCompany: '', yearsExperience: '', university: '', degree: '', major: '',
         graduationYear: '', salaryExpectation: '',
-        workAuth: 'Yes', requireSponsorship: 'No', visaStatus: 'TN Visa',
-        willingToRelocate: 'Yes', referralSource: 'LinkedIn',
+        workAuth: '', requireSponsorship: '', visaStatus: '',
+        willingToRelocate: '', referralSource: '',
         gender: '', ethnicity: '',
-        veteran: 'I Am Not A Protected Veteran',
-        disability: 'No, I Do Not Have A Disability'
+        veteran: '',
+        disability: ''
       };
       // Merge: stored non-empty values win; stored empty/null strings fall back
       // to the non-empty default. Also validate known enum fields — if a stored
@@ -2283,7 +2742,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
         if (YES_NO_FIELDS.has(k) && !YES_NO_VALUES.has(String(v).toLowerCase().trim())) continue; // corrupt enum value, keep default
         profile[k] = v;
       }
-      sendResponse({ profile, appMode: !!r.appMode });
+      sendResponse({ profile, appMode: r.appMode !== false });
     });
     return true;
   }
@@ -2640,7 +3099,13 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
         const cur = await self.PJAIdb.getJob(msg.id);
         if (!cur) return sendResponse({ ok: false, skipped: 'not in corpus' }); // non-corpus queue → no-op
         const attempts = (cur && cur.state && cur.state.attempts) || 0;
-        const next = self.PJAApplySelect.resultToState(msg.reason, attempts);
+        let maxAttempts;
+        if (msg.runId) {
+          const d = await new Promise(r => chrome.storage.local.get('pja_ranked_apply', r));
+          const ranked = d.pja_ranked_apply || null;
+          if (ranked && ranked.runId === msg.runId && ranked.e2eSafe) maxAttempts = 1;
+        }
+        const next = self.PJAApplySelect.resultToState(msg.reason, attempts, maxAttempts);
         const patch = { status: next.status, reason: next.reason, attempts: next.attempts != null ? next.attempts : attempts };
         if (next.status === 'applied') patch.appliedAt = Date.now();
         await self.PJAIdb.updateState(msg.id, patch);
@@ -2659,6 +3124,59 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
         sendResponse({ count: s.count, distinctCompanies: s.distinctCompanies, modalities: s.modalities,
           statusCounts: s.statusCounts, matching: s.matching, jobs: s.top });
       } catch (e) { sendResponse({ error: e.message }); }
+    })();
+    return true;
+  }
+
+  if (msg.type === 'REQUEST_APPLY_HELP') {
+    (async () => {
+      try {
+        if (!DEV_MODE) return sendResponse({ success: false, error: 'dev mode disabled' });
+        const payload = Object.assign({}, msg.snapshot || {});
+        try {
+          const tab = _sender.tab;
+          if (tab && tab.windowId != null) {
+            const dataUrl = await new Promise(resolve => {
+              try {
+                chrome.tabs.captureVisibleTab(tab.windowId, { format: 'jpeg', quality: 45 }, url => {
+                  if (chrome.runtime.lastError || !url) resolve('');
+                  else resolve(url);
+                });
+              } catch (_) { resolve(''); }
+            });
+            if (dataUrl) {
+              payload.screenshot = {
+                mime: 'image/jpeg',
+                // Keep the request bounded. The dev server stores only a tiny preview marker in
+                // pja_last_apply_failure; the full image is used only for the live LLM call.
+                dataUrl: dataUrl.length > 600000 ? dataUrl.slice(0, 600000) : dataUrl,
+                truncated: dataUrl.length > 600000,
+              };
+            }
+          }
+        } catch (_) {}
+        let lastErr = null;
+        for (let attempt = 0; attempt < 3; attempt++) {
+          try {
+            if (attempt > 0) await new Promise(r => setTimeout(r, 1500));
+            const resp = await fetch(`${DEV_SERVER}/apply-help`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify(payload)
+            });
+            const data = await resp.json().catch(() => ({}));
+            if (!resp.ok) throw new Error(data.error || `Dev server ${resp.status}`);
+            sendResponse(data && typeof data === 'object' ? data : { success: true, raw: data });
+            return;
+          } catch (e) {
+            lastErr = e;
+            console.warn(`PJA: apply-help attempt ${attempt + 1}/3 failed:`, e.message);
+          }
+        }
+        sendResponse({ success: false, error: lastErr ? lastErr.message : 'apply-help failed' });
+      } catch (e) {
+        sendResponse({ success: false, error: e.message });
+      }
     })();
     return true;
   }
@@ -2713,7 +3231,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
       }
 
       // ── Path 1: dev server ────────────────────────────────────────────────────
-      // The dev server routes to the local Claude CLI, which can take 15-40s and
+      // The dev server routes to the selected local AI CLI, which can take 15-40s and
       // occasionally drops a request under load — a SINGLE failure used to fall straight
       // through to the direct-API path (whose key is often invalid → "invalid x-api-key",
       // leaving screening questions unanswered → form skipped). Retry a few times before
@@ -2735,12 +3253,16 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
             return;
           } catch (devErr) {
             console.warn(`PJA: Dev server answer-questions attempt ${attempt + 1}/3 failed:`, devErr.message);
-            // retry; after the last attempt fall through to API fallback below
+            // retry; after the last attempt, preserve the selected engine boundary below
           }
         }
+        // DEV_MODE is an explicit local-engine contract. Never silently switch from Codex
+        // (or the selected local Claude CLI) to a direct Anthropic API call.
+        sendResponse({ success: false, error: 'local AI engine unavailable after retries' });
+        return;
       }
 
-      // ── Path 2: direct Anthropic API fallback ────────────────────────────────
+      // ── Path 2: direct Anthropic API (only when DEV_MODE is explicitly disabled) ──
       try {
         const apiKey = await getApiKey();
         if (!apiKey) {
@@ -2754,14 +3276,14 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
 
         const p = profile || {};
         const fullName    = [p.firstName, p.lastName].filter(Boolean).join(' ') || 'the candidate';
-        const currentRole = [p.currentTitle, p.currentCompany].filter(Boolean).join(' at ') || 'Senior Inspection Metrology Tech at a medical-device employer';
+        const currentRole = [p.currentTitle, p.currentCompany].filter(Boolean).join(' at ') || 'not provided';
         const prevRole    = p.prevTitle && p.prevCompany
           ? `${p.prevTitle} at ${p.prevCompany}`
-          : 'Operation Associate II at a medical-device employer (May 2022–Aug 2024)';
-        const yearsExp    = p.yearsExperience || '6';
-        const locationLine = [p.city, p.state].filter(Boolean).join(', ') || 'Santa Clara, CA';
-        const visaLine    = p.visa || 'Canadian citizen, TN Visa (USMCA) — no sponsorship needed';
-        const skillsLine  = p.skills || 'wafer inspection (~2,500/day), thin film metrology, photolithography, GMP, SPC, quality management, 5S, root cause analysis, EH&S, defect detection, yield improvement, clean room operations, data management, Lean Six Sigma White Belt';
+          : 'not provided';
+        const yearsExp    = p.yearsExperience || 'not provided';
+        const locationLine = [p.city, p.state, p.country].filter(Boolean).join(', ') || 'not provided';
+        const visaLine    = p.visaStatus || p.visa || p.workAuth || 'not provided';
+        const skillsLine  = p.skills || p.summary || 'not provided';
 
         const ANSWER_SYSTEM_PROMPT =
 `You are filling out a job application for ${fullName}.
@@ -2769,17 +3291,17 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
 PROFILE:
 - Current: ${currentRole}
 - Previous: ${prevRole}
-- Total work experience: ${yearsExp} years; semiconductor/medtech quality/metrology experience: ~4 years
+- Total work experience: ${yearsExp}
 - Skills: ${skillsLine}
-- Does NOT have (flag as aspirational or "actively learning" if asked): FMEA, 8D, ISO 13485, optical metrology, supplier audits, Python, CAD
+- Known gaps: ${p.honestGaps || 'not provided'}
 - Visa: ${visaLine}
-- Location: ${locationLine} (willing to relocate in Bay Area)
+- Location: ${locationLine}
 
 ANSWERING RULES:
 1. Always write in first person ("I have…", "My experience includes…")
 2. For "years of experience" questions: answer with the numeric value only (e.g. "6") unless it is a text field, in which case write one short sentence
 3. For yes/no questions: answer with just "Yes" or "No" (with one brief reason if it is a textarea)
-4. For "describe your experience" or knowledge questions: write 2–4 sentences, specific to ${fullName}'s actual resume, mentioning named tools/standards she actually used (SPC, GMP, KLA tools, photolithography, clean room). Do NOT claim skills she lacks.
+4. For "describe your experience" or knowledge questions: write 2–4 sentences grounded only in supplied profile/resume facts. Do NOT claim skills that are not supplied.
 5. For "are you open to / willing to" questions: answer "Yes" with a brief enthusiastic line
 6. For contract/temp work questions: answer "Yes, I am open to contract and contract-to-hire opportunities"
 7. Keep answers proportional to maxLength — if maxLength ≤ 100, use 1–2 sentences max; if ≤ 300, use 2–3 sentences; if > 300, up to 4 sentences
@@ -2951,6 +3473,292 @@ ${questionList}`;
         }
       }, r));
       sendResponse({ ok: true, gmailTabId: tab.id });
+    })();
+    return true;
+  }
+
+  if (msg.type === 'CAPTURE_APPLY_DIAGNOSTIC') {
+    (async () => {
+      try {
+        const snapshot = Object.assign({}, msg.snapshot || {});
+        const tab = _sender.tab || null;
+        let screenshot = null;
+        if (tab && tab.windowId != null) {
+          const dataUrl = await new Promise(resolve => {
+            try {
+              chrome.tabs.captureVisibleTab(tab.windowId, { format: 'jpeg', quality: 45 }, url => {
+                if (chrome.runtime.lastError || !url) resolve('');
+                else resolve(url);
+              });
+            } catch (_) { resolve(''); }
+          });
+          if (dataUrl) {
+            screenshot = {
+              mime: 'image/jpeg',
+              dataUrl: dataUrl.length > 650000 ? dataUrl.slice(0, 650000) : dataUrl,
+              truncated: dataUrl.length > 650000,
+            };
+          }
+        }
+        const diagnostic = {
+          ...snapshot,
+          senderTab: tab ? { id: tab.id, url: tab.url, title: tab.title, windowId: tab.windowId } : null,
+          screenshot,
+          capturedAt: Date.now(),
+        };
+        const compact = {
+          reason: diagnostic.reason,
+          company: diagnostic.company,
+          title: diagnostic.title,
+          applyUrl: diagnostic.applyUrl,
+          runId: diagnostic.runId,
+          phase: diagnostic.phase,
+          page: diagnostic.page ? {
+            url: diagnostic.page.url,
+            title: diagnostic.page.title,
+            successDetected: diagnostic.page.successDetected,
+            errors: diagnostic.page.errors,
+            controls: Array.isArray(diagnostic.page.controls) ? diagnostic.page.controls.slice(0, 20) : [],
+            textTail: diagnostic.page.textTail,
+          } : null,
+          extra: diagnostic.extra,
+          senderTab: diagnostic.senderTab,
+          screenshot: screenshot ? { mime: screenshot.mime, truncated: screenshot.truncated, bytes: screenshot.dataUrl.length } : null,
+          capturedAt: diagnostic.capturedAt,
+        };
+        const existing = await chrome.storage.local.get(['pja_post_click_diagnostics', 'pja_dbg']);
+        const diagnostics = (existing.pja_post_click_diagnostics || []).slice(-4);
+        diagnostics.push(compact);
+        const dbg = (existing.pja_dbg || []).slice(-39);
+        dbg.push('[diag] captured post-click ' + String(snapshot.reason || 'unknown') + ' screenshot=' + (screenshot ? 'yes' : 'no'));
+        await chrome.storage.local.set({
+          pja_last_post_click_diagnostic: diagnostic,
+          pja_post_click_diagnostics: diagnostics,
+          pja_dbg: dbg,
+        });
+        sendResponse({ ok: true, screenshot: !!screenshot, controls: compact.page?.controls?.length || 0, errors: compact.page?.errors?.length || 0 });
+      } catch (e) {
+        try {
+          const d = await chrome.storage.local.get('pja_dbg');
+          const dbg = (d.pja_dbg || []).slice(-39);
+          dbg.push('[diag] post-click capture failed: ' + e.message);
+          await chrome.storage.local.set({ pja_dbg: dbg });
+        } catch (_) {}
+        sendResponse({ ok: false, error: e.message });
+      }
+    })();
+    return true;
+  }
+
+  if (msg.type === 'OPEN_GMAIL_CODE_TAB') {
+    (async () => {
+      const { pja_email_code_session: existing } = await new Promise(r =>
+        chrome.storage.local.get('pja_email_code_session', r)
+      );
+      const applyTabId = _sender.tab?.id;
+      if (existing && Date.now() - existing.startedAt < 120000) {
+        const sameApplyTab = existing.applyTabId === applyTabId;
+        const sameJob = String(existing.company || '') === String(msg.company || '') &&
+          String(existing.title || '') === String(msg.title || '');
+        const applyTabAlive = existing.applyTabId ? await pjaRankedTabExists(existing.applyTabId) : false;
+        if (sameApplyTab && sameJob && applyTabAlive) {
+          sendResponse({ ok: false, reason: 'gmail_code_flow_in_progress' });
+          return;
+        }
+        if (existing.gmailTabId) chrome.tabs.remove(existing.gmailTabId).catch(() => {});
+        await chrome.storage.local.remove('pja_email_code_session');
+      }
+      const { pja_gmail_account_index: gmailIdx } = await new Promise(r =>
+        chrome.storage.local.get('pja_gmail_account_index', r)
+      );
+      const acctPath = `u/${gmailIdx ?? 3}`;
+      const query = String(msg.searchQuery || '(security code OR verification code OR "confirm you are human" OR "confirm your email") newer_than:30m');
+      const gmailUrl = `https://mail.google.com/mail/${acctPath}/#search/${encodeURIComponent(query)}`;
+      console.log('PJA bg: opening Gmail for code', gmailUrl);
+      await new Promise(r => chrome.storage.local.remove(['pja_email_code_result', 'pja_navigate_to'], r));
+      const existingTabs = await new Promise(r => chrome.tabs.query({ url: `https://mail.google.com/mail/${acctPath}/*` }, r));
+      let tab = existingTabs && existingTabs[0];
+      const reusedGmailTab = !!tab;
+      if (!tab) {
+        // Create a blank tab first, store the session, then navigate. If Gmail loads before the
+        // session exists, the top-level onUpdated injector misses the tab and the code flow hangs.
+        tab = await new Promise(r => chrome.tabs.create({ url: 'about:blank', active: true }, r));
+      } else {
+        await chrome.tabs.update(tab.id, { active: true }).catch(() => {});
+      }
+      const session = {
+        mode: 'code',
+        gmailTabId: tab.id,
+        applyTabId,
+        hostname: msg.hostname || '',
+        company: msg.company || '',
+        title: msg.title || '',
+        searchQuery: query,
+        expectedLength: Number(msg.expectedLength || 8),
+        acctPath,
+        reusedGmailTab,
+        startedAt: Date.now()
+      };
+      await new Promise(r => chrome.storage.local.set({
+        pja_email_code_session: {
+          ...session
+        },
+        pja_last_email_code_launch: {
+          ...session,
+          gmailUrl,
+          ts: Date.now()
+        }
+      }, r));
+      chrome.tabs.update(tab.id, { url: gmailUrl }).catch(async e => {
+        await chrome.storage.local.set({
+          pja_email_code_result: { success: false, reason: 'gmail_navigation_failed', ts: Date.now(),
+            hostname: session.hostname, company: session.company, title: session.title }
+        });
+        chrome.storage.local.remove('pja_email_code_session');
+        console.error('PJA bg: Gmail code navigation failed', e.message);
+      });
+      setTimeout(async () => {
+        const d = await new Promise(r => chrome.storage.local.get('pja_email_code_session', r));
+        const live = d.pja_email_code_session;
+        if (!live || live.gmailTabId !== tab.id || Date.now() - live.startedAt > 90000) return;
+        await chrome.scripting.executeScript({
+          target: { tabId: tab.id },
+          func: () => { try { delete window.__pjaGmailVerifyRunning; } catch (_) { window.__pjaGmailVerifyRunning = false; } }
+        }).catch(() => {});
+        chrome.scripting.executeScript({ target: { tabId: tab.id }, files: ['content/gmail-verify.js'] })
+          .catch(() => {});
+      }, 8000);
+      sendResponse({ ok: true, gmailTabId: tab.id });
+    })();
+    return true;
+  }
+
+  if (msg.type === 'CANCEL_EMAIL_CODE_SESSION') {
+    (async () => {
+      const { pja_email_code_session: session } = await new Promise(r =>
+        chrome.storage.local.get('pja_email_code_session', r)
+      );
+      if (session?.gmailTabId && !session.reusedGmailTab) chrome.tabs.remove(session.gmailTabId).catch(() => {});
+      await chrome.storage.local.set({
+        pja_email_code_result: { success: false, reason: msg.reason || 'cancelled', ts: Date.now(),
+          hostname: session?.hostname || '', company: session?.company || '', title: session?.title || '' }
+      });
+      chrome.storage.local.remove('pja_email_code_session');
+      sendResponse({ ok: true });
+    })();
+    return true;
+  }
+
+  if (msg.type === 'EMAIL_CODE_FOUND') {
+    (async () => {
+      const gmailTabId = _sender.tab?.id;
+      const { pja_email_code_session: session } = await new Promise(r =>
+        chrome.storage.local.get('pja_email_code_session', r)
+      );
+      if (!session) { sendResponse({ ok: false, reason: 'no_session' }); return; }
+      if (session.gmailTabId !== gmailTabId) { sendResponse({ ok: false, reason: 'stale_gmail_tab' }); return; }
+      const senderTab = gmailTabId ? await new Promise(r => chrome.tabs.get(gmailTabId, t => r(chrome.runtime.lastError ? null : t))) : null;
+      if (!/mail\.google\.com/i.test(String(senderTab?.url || msg.pageUrl || ''))) {
+        sendResponse({ ok: false, reason: 'sender_not_gmail' });
+        return;
+      }
+      const code = String(msg.code || '').trim().toUpperCase();
+      const expectedLength = Number(session.expectedLength || 8);
+      const evidence = msg.evidence && typeof msg.evidence === 'object' ? msg.evidence : null;
+      const verifiedEvidence = !!evidence && evidence.verified === true &&
+        evidence.sourceMatched === true && evidence.securityMatched === true && evidence.dateFresh !== false;
+      const compactEvidence = evidence ? {
+        verified: !!evidence.verified,
+        sourceMatched: !!evidence.sourceMatched,
+        companyMatched: !!evidence.companyMatched,
+        vendorMatched: !!evidence.vendorMatched,
+        securityMatched: !!evidence.securityMatched,
+        dateFresh: evidence.dateFresh,
+        dateMs: evidence.dateMs || null,
+        subject: String(evidence.subject || '').slice(0, 200),
+        sender: String(evidence.sender || '').slice(0, 180),
+        pageUrl: String(evidence.pageUrl || '').slice(0, 300),
+        pageTitle: String(evidence.pageTitle || '').slice(0, 200),
+        snippet: String(evidence.snippet || '').slice(0, 600),
+      } : null;
+      if (!/^[A-Z0-9]{6,10}$/.test(code) || (expectedLength && code.length !== expectedLength)) {
+        await chrome.storage.local.set({
+          pja_email_code_result: { success: false, reason: 'invalid_code_shape', ts: Date.now(),
+            hostname: session.hostname, company: session.company, evidence: compactEvidence },
+          pja_last_email_code_result: { success: false, reason: 'invalid_code_shape', ts: Date.now(),
+            hostname: session.hostname, company: session.company, title: session.title, evidence: compactEvidence }
+        });
+      } else if (!verifiedEvidence) {
+        const rejectResult = { success: false, reason: 'unverified_email_source', codeLength: code.length,
+          ts: Date.now(), hostname: session.hostname, company: session.company, title: session.title,
+          evidence: compactEvidence };
+        await chrome.storage.local.set({
+          pja_email_code_result: rejectResult,
+          pja_last_email_code_result: rejectResult
+        });
+      } else {
+        const successPublic = { success: true, codeLength: code.length, ts: Date.now(),
+          hostname: session.hostname, company: session.company, title: session.title,
+          evidence: compactEvidence };
+        await chrome.storage.local.set({
+          pja_email_code_result: { success: true, code, codeLength: code.length, ts: Date.now(),
+            hostname: session.hostname, company: session.company, title: session.title, evidence: compactEvidence },
+          pja_last_email_code_result: successPublic
+        });
+      }
+      if (gmailTabId && !session.reusedGmailTab) chrome.tabs.remove(gmailTabId).catch(() => {});
+      if (session.applyTabId) chrome.tabs.update(session.applyTabId, { active: true }).catch(() => {});
+      chrome.storage.local.remove('pja_email_code_session');
+      sendResponse({ ok: true });
+    })();
+    return true;
+  }
+
+  if (msg.type === 'EMAIL_CODE_NOT_FOUND') {
+    (async () => {
+      const gmailTabId = _sender.tab?.id;
+      const { pja_email_code_session: session } = await new Promise(r =>
+        chrome.storage.local.get('pja_email_code_session', r)
+      );
+      if (!session) { sendResponse({ ok: false, reason: 'no_session' }); return; }
+      if (session.gmailTabId !== gmailTabId) { sendResponse({ ok: false, reason: 'stale_gmail_tab' }); return; }
+      const senderTab = gmailTabId ? await new Promise(r => chrome.tabs.get(gmailTabId, t => r(chrome.runtime.lastError ? null : t))) : null;
+      if (!/mail\.google\.com/i.test(String(senderTab?.url || msg.pageUrl || ''))) {
+        await chrome.storage.local.set({
+          pja_last_email_code_result: { success: false, reason: 'sender_not_gmail', ts: Date.now(),
+            hostname: session.hostname, company: session.company, title: session.title,
+            pageUrl: msg.pageUrl || senderTab?.url || '', pageTitle: msg.pageTitle || senderTab?.title || '',
+            hasSearchInput: !!msg.hasSearchInput, hash: msg.hash || '' }
+        });
+        sendResponse({ ok: false, reason: 'sender_not_gmail' });
+        return;
+      }
+      const failureResult = { success: false, reason: msg.reason || 'code_not_found', ts: Date.now(),
+          hostname: session.hostname, company: session.company, title: session.title,
+          pageUrl: msg.pageUrl || '', pageTitle: msg.pageTitle || '', hasSearchInput: !!msg.hasSearchInput,
+          hash: msg.hash || '',
+          evidence: msg.evidence && typeof msg.evidence === 'object' ? {
+            verified: !!msg.evidence.verified,
+            sourceMatched: !!msg.evidence.sourceMatched,
+            companyMatched: !!msg.evidence.companyMatched,
+            vendorMatched: !!msg.evidence.vendorMatched,
+            securityMatched: !!msg.evidence.securityMatched,
+            dateFresh: msg.evidence.dateFresh,
+            dateMs: msg.evidence.dateMs || null,
+            subject: String(msg.evidence.subject || '').slice(0, 200),
+            sender: String(msg.evidence.sender || '').slice(0, 180),
+            pageUrl: String(msg.evidence.pageUrl || '').slice(0, 300),
+            pageTitle: String(msg.evidence.pageTitle || '').slice(0, 200),
+            snippet: String(msg.evidence.snippet || '').slice(0, 600),
+          } : null };
+      await chrome.storage.local.set({
+        pja_email_code_result: failureResult,
+        pja_last_email_code_result: failureResult
+      });
+      if (gmailTabId && !session.reusedGmailTab) chrome.tabs.remove(gmailTabId).catch(() => {});
+      if (session.applyTabId) chrome.tabs.update(session.applyTabId, { active: true }).catch(() => {});
+      chrome.storage.local.remove('pja_email_code_session');
+      sendResponse({ ok: true });
     })();
     return true;
   }

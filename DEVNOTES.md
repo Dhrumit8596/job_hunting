@@ -1,103 +1,165 @@
-# Dev Workflow — the candidate Job Extension
+# Dev Workflow — Job Application Assistant
 
-## Dev server + hot-reload
+This file is for developers working on the unpacked Chrome extension.
 
-The dev server (`dev-server.js`) runs an HTTP + WebSocket server on **port 6174**.
+## Dev server
 
-When `DEV_MODE = true` (background.js line 7), the extension:
-- Connects a WebSocket to `ws://localhost:6174` on startup
-- Pings every 20s to keep the MV3 service worker alive
-- Listens for a `reload` message → calls `chrome.runtime.reload()` (full extension restart)
+The dev server (`dev-server.js`) runs HTTP + WebSocket on port **6174**.
 
-### One-time setup
+Start in Claude mode:
 
 ```bash
-# In a terminal, keep this running:
-node dev-server.js
+npm start
 ```
 
-### After changing any file
+Start in Codex mode:
+
+```bash
+npm run start:codex
+```
+
+Equivalent explicit commands:
+
+```bash
+node dev-server.js --engine claude
+node dev-server.js --engine codex
+PJA_AI_ENGINE=codex node dev-server.js
+```
+
+Only run one server on port `6174`.
+
+## Extension reload
+
+After file changes:
 
 ```bash
 curl -X POST http://localhost:6174/reload
-# Then refresh any open job page tab — new content script loads automatically
+curl -X POST http://localhost:6174/inject
 ```
 
-### Verify the extension is connected before reloading
+Then refresh any open job/ATS tab.
+
+Check connection:
 
 ```bash
 curl http://localhost:6174/health
-# {"clients":1}   ← good to go
-# {"clients":0}   ← extension not connected — check chrome://extensions/
-#                   click the reload icon on "the candidate Job Assistant"
 ```
 
-If `clients` is 0, go to `chrome://extensions/`, find "the candidate Job Assistant" (ID: `lpojofmpdljggmdmoamdggapnabfkham`), and click the circular reload arrow. The extension will reconnect and `clients` will become 1.
+Expected:
 
----
-
-## Test pages
-
-```
-# Local test form (requires `node dev-server.js` running on port 8765 or use any static server):
-http://localhost:8765/test/test-apply-form.html
-
-# Or open directly in Chrome from the filesystem via chrome://extensions/ → service worker → console
+```json
+{"ok":true,"engine":"codex-cli","clients":1}
 ```
 
----
+or:
+
+```json
+{"ok":true,"engine":"claude-cli","clients":1}
+```
+
+If `clients` is `0`, open `chrome://extensions`, enable Developer mode, reload the unpacked extension, and refresh a supported page.
+
+## Loading in Chrome
+
+1. Open `chrome://extensions`.
+2. Enable **Developer mode**.
+3. Click **Load unpacked**.
+4. Select the repository folder containing `manifest.json`.
+
+The extension ID is installation-specific. Do not assume another developer has the same ID.
 
 ## Dev server endpoints
 
 | Endpoint | Method | Description |
-|----------|--------|-------------|
-| `/health` | GET | Returns `{"clients": N}` — N=1 means extension connected |
-| `/reload` | POST | Broadcasts 'reload' to all WebSocket clients → triggers extension restart |
-| `/inject` | POST | Tells background to re-inject content scripts into existing tabs |
-| `/analyze` | POST | Scores a single job `{title, company, description}` → returns fitScore, skills, etc. |
-| `/batch-score` | POST | Scores up to 10 jobs in one batch |
-| `/outreach` | POST | Generates DM + email for a job + target person |
-| `/launch-queue` | POST | Seeds `pja_ext_queue` from `test/test-jobs.json` and opens the first job tab. Body: `{"startIndex":0,"jobIds":["id1",...]}` (optional filters). |
+| --- | --- | --- |
+| `/health` | GET | Server health, AI engine, and connected extension client count. |
+| `/reload` | POST | Broadcasts reload to extension clients. |
+| `/inject` | POST | Re-injects content scripts into existing supported tabs. |
+| `/analyze` | POST | Scores one job `{title, company, description}`. |
+| `/batch-score` | POST | Scores up to 10 jobs in one request. |
+| `/answer-questions` | POST | Generates truthful answers for required form questions. |
+| `/outreach` | POST | Generates outreach copy for a job/person. |
+| `/source-v2` | POST | Builds/imports the normalized sourced job corpus. |
+| `/apply-run` | POST | Starts a ranked application run from the corpus. |
+| `/inspect-apply` | GET | Returns sanitized active application diagnostics. |
+| `/get-storage` | POST | Reads selected extension storage keys through the WebSocket bridge. |
+| `/set-storage` | POST | Writes selected extension storage keys. Body is passed flat. |
+| `/launch-queue` | POST | Seeds `pja_ext_queue` from `test/test-jobs.json` and opens the first job. |
 
----
+`/set-storage` example:
 
-## Extension architecture
-
+```json
+{"pja_ext_queue":{"status":"aborted"}}
 ```
-background.js          ← service worker, all AI scoring, storage CRUD
+
+Do not wrap the payload in a `data` property.
+
+## Architecture
+
+```text
+background.js          Service worker: AI routing, storage, queue dispatch, CDP/scripting.
 content/
-  extractors/          ← site-specific job data extractors (LinkedIn, Indeed, Glassdoor, generic)
-  autofill.js          ← PJA_FIELD_RULES, pjaFillForm, pjaFillSelect, pjaClickRadio
-  auto-apply.js        ← LinkedIn Easy Apply modal step-through
-  external-apply.js    ← ATS form filler (Greenhouse, Lever, Workday, etc.)
-  job-scraper.js       ← floating widget, LinkedIn scan + batch scoring
-  content.js           ← sidebar shadow DOM, message router, profile widget
-popup/                 ← Pipeline / Search / Contacts tabs
-shortlist/             ← scanner results review page
-settings/              ← profile, answer bank, templates, API key
+  extractors/          LinkedIn, Indeed, Glassdoor, generic job-data extraction.
+  autofill.js          Field rules, text/select/radio/combobox fill helpers.
+  auto-apply.js        LinkedIn Easy Apply modal automation.
+  external-apply.js    External ATS automation and recovery.
+  gmail-verify.js      Gmail verification-code/link helper.
+  workday-auth.js      Workday auth/account/email-verification flow.
+  job-scraper.js       LinkedIn scanner widget.
+  content.js           Sidebar and message router.
+popup/                 Pipeline, Search, Contacts tabs.
+shortlist/             Scanner review page.
+settings/              Profile, answer bank, templates, resume, preferences.
+sourcing/              Job sourcing, dedupe, ATS adapters, scoring pipeline.
+test/                  Offline syntax/privacy/unit/browser fixtures.
 ```
 
-## Storage keys (chrome.storage.local)
+## Storage keys
 
 | Key | Purpose |
-|-----|---------|
-| `pja_profile` | User profile overrides |
-| `pja_answers` | Answer bank (learned form answers) |
-| `pja_jobs` | Job pipeline (Needs Info → … → Offer/Rejected) |
-| `pja_shortlist` | Scanner results with fit scores |
-| `pja_contacts` | Recruiter/HM tracker |
-| `pja_templates` | DM + email templates |
-| `pja_missing_questions` | Fields autofill couldn't fill |
-| `pja_site_log` | Per-domain apply log |
-| `pja_custom_domains` | User-added ATS domains |
-| `ext_queue` | In-flight external apply context |
+| --- | --- |
+| `pja_profile` | User profile fields from Settings. |
+| `pja_answers` | Answer bank keyed by raw question label. |
+| `pja_jobs` | Pipeline jobs. |
+| `pja_shortlist` | Scanner/review results. |
+| `pja_contacts` | Recruiter/contact tracking. |
+| `pja_templates` | Outreach templates. |
+| `pja_ext_queue` | Active external apply queue. |
+| `pja_ext_current` | Current external apply job. |
+| `pja_ranked_apply` | Serialized ranked application run. |
+| `pja_application_ledger` | Durable application event ledger. |
+| `pja_missing_questions` | Missing/manual questions to answer in Settings. |
+| `pja_dbg` | Rolling debug log. |
+| `pja_last_apply_failure` | Last failure diagnostic snapshot. |
+| `pja_last_email_code_result` | Sanitized Gmail code recovery result. |
 
----
+## Tests
 
-## Known bugs
+Run all offline checks:
 
-See `BUGS.md` for 10 documented bugs. Critical ones:
-- **BUG 1** (autofill.js:172): sponsorship noMatch conditions INVERTED — selects YES-sponsorship for No-sponsorship profile
-- **BUG 3** (autofill.js:368): pjaClickRadio missing `input` event — React radios appear checked but submit empty
-- **BUG 5** (background.js:801,893): BATCH_SCORE_JOBS always hits dev server, no DEV_MODE guard
-- **BUG 6** (background.js:7): DEV_MODE hardcoded true — Gemini Nano permanently disabled
+```bash
+npm test
+```
+
+Run profile merge check:
+
+```bash
+npm run check:profile
+```
+
+Before pushing:
+
+```bash
+npm test
+git diff --check
+```
+
+## Known external blockers
+
+- CAPTCHA and anti-bot pages.
+- LinkedIn/Indeed rate limits.
+- Workday tenant auth/account restrictions.
+- Gmail account sign-in state.
+- Legal/export-control/citizenship questions without explicit profile data.
+
+The extension should record these as terminal/manual states rather than guessing or bypassing them.
