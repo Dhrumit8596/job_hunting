@@ -4,6 +4,37 @@ A Chrome MV3 extension for job searching, job-fit scoring, profile-based form fi
 
 The extension is meant to be reusable for any user/profile. The repository should not contain real resume data, personal profile data, passwords, one-time codes, or browser session data. Real user data lives locally in that user's Chrome profile via `chrome.storage.local`.
 
+## Fastest setup: ask your AI CLI to do it
+
+If you are giving this repo to someone who uses Claude Code or Codex, they can paste one of these prompts after cloning the repo. The AI assistant should install npm dependencies, run checks, start the right server, and then tell the user the few Chrome clicks it cannot perform from the terminal.
+
+Claude CLI prompt:
+
+```text
+I cloned this repo. Read README.md, CLAUDE.md, package.json, and DEVNOTES.md. Set up everything needed to run it locally with Claude CLI. Install npm dependencies, run tests, start the dev server in Claude mode, verify /health, and tell me the exact Chrome extension loading steps I need to do manually. Do not put any personal profile data, resume, password, API key, Gmail content, or one-time code into git.
+```
+
+Codex CLI prompt:
+
+```text
+I cloned this repo. Read README.md, AGENTS.md, package.json, and DEVNOTES.md. Set up everything needed to run it locally with Codex CLI. Install npm dependencies, run tests, start the dev server in Codex mode, verify /health, and tell me the exact Chrome extension loading steps I need to do manually. Do not put any personal profile data, resume, password, API key, Gmail content, or one-time code into git.
+```
+
+After the AI assistant finishes, the user usually still needs to do the Chrome UI step:
+
+1. Open `chrome://extensions`.
+2. Enable **Developer mode**.
+3. Click **Load unpacked**.
+4. Select this repository folder.
+5. Open extension Settings and fill the user's profile/resume locally.
+
+The AI assistant can verify the setup with:
+
+```bash
+npm test
+curl http://localhost:6174/health
+```
+
 ## What this does
 
 - Scans/searches LinkedIn and Indeed job pages.
