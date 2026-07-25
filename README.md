@@ -14,6 +14,14 @@ Claude CLI prompt:
 I cloned this repo. Read README.md, CLAUDE.md, package.json, and DEVNOTES.md. Set up everything needed to run it locally with Claude CLI. Install npm dependencies, run tests, start the dev server in Claude mode, verify /health, and tell me the exact Chrome extension loading steps I need to do manually. Do not put any personal profile data, resume, password, API key, Gmail content, or one-time code into git.
 ```
 
+Optional hands-off Claude mode, for a trusted disposable clone only:
+
+```bash
+claude --dangerously-skip-permissions
+```
+
+Some Claude CLI installs may expose this as `claude-cli --dangerously-skip-permission` or a similar flag. Use the exact flag supported by the installed CLI. This makes setup smoother because Claude can run install/test/server commands without repeated approval prompts, but it should only be used inside this repository folder, not from a home directory or any folder containing unrelated private files.
+
 Codex CLI prompt:
 
 ```text
