@@ -178,6 +178,153 @@ Basic flow:
 
 For safer testing, enable any stop-before-submit/review option available in Settings before running against real jobs.
 
+## Example prompts and workflows
+
+These are example prompts a user can give to Claude Code, Codex, or another local coding assistant while working in this repository. Start the companion server first and keep Chrome open with the unpacked extension loaded.
+
+### Setup and verification prompts
+
+```text
+Check that my local job extension is ready to use. Verify npm tests, dev-server health, Chrome extension connection, and tell me what I still need to configure in Settings.
+```
+
+```text
+Start this repo in Codex CLI mode, reload the Chrome extension, and confirm /health shows one connected client.
+```
+
+```text
+Start this repo in Claude CLI mode, reload the Chrome extension, and confirm /health shows one connected client.
+```
+
+```text
+Review my extension Settings completeness. Tell me which profile, resume, work authorization, citizenship/export-control, and answer-bank fields are missing before I run real applications.
+```
+
+### LinkedIn / Indeed search prompts
+
+```text
+Open LinkedIn Jobs, scan Easy Apply jobs that match my profile, score them against my resume, and show me the shortlist before applying.
+```
+
+```text
+Find LinkedIn Easy Apply jobs for my target titles and location. Score by resume match, not just title match. Do not submit anything until I approve the shortlist.
+```
+
+```text
+Search Indeed for jobs matching my profile, collect candidates, score them, and stop at review. Do not apply yet.
+```
+
+```text
+Refresh the job corpus from LinkedIn/Indeed/ATS sources, dedupe against already-applied jobs, and show the top 25 matches with evidence and gaps.
+```
+
+### Application prompts
+
+```text
+Apply to reviewed LinkedIn Easy Apply jobs only. Stop on CAPTCHA, login, missing legal/work-authorization facts, or unclear questions. Do not fabricate answers.
+```
+
+```text
+Apply to the top 10 reviewed external ATS jobs. Use my profile, resume, and answer bank. Skip CAPTCHA jobs. Record each result as confirmed, skipped, needs_manual, or failed with reason.
+```
+
+```text
+Run an E2E test for 5 jobs from the current shortlist. Use stop-before-submit if available, and report which forms filled successfully, which hit CAPTCHA, and which need more profile answers.
+```
+
+```text
+Continue the active application run. If a job is stuck, inspect /inspect-apply, capture the page status, ask the local AI helper for recovery, and either recover or record a terminal reason.
+```
+
+### Greenhouse / Workday recovery prompts
+
+```text
+Test one Greenhouse job end to end. If Greenhouse asks for an email security code, open the configured Gmail account, find the fresh matching Greenhouse email, fill the code, and resubmit. Reject stale or wrong-company codes.
+```
+
+```text
+Test one Workday job end to end. If Workday requires an account, create or recover it using the configured job email/password, verify through Gmail if needed, then resume the application. Stop on CAPTCHA or account lock.
+```
+
+```text
+Inspect the last failed Greenhouse application. Tell me whether it failed because of CAPTCHA, missing required profile data, email verification, no submit button, or unclear confirmation. Then propose the smallest code or profile fix.
+```
+
+### Debugging prompts
+
+```text
+What is currently pending in the application queue? Use /inspect-apply and storage diagnostics. Do not start a new run.
+```
+
+```text
+Why did the last 10 applications fail? Group failures by reason and identify which are code fixes versus expected external blockers.
+```
+
+```text
+Check whether any profile-specific personal data is committed. Run the privacy scan and grep for names, emails, phone numbers, LinkedIn profile URLs, passwords, and one-time codes.
+```
+
+```text
+Make the repo ready to share with a non-technical friend. Update docs, remove personal defaults, run tests, commit, and push.
+```
+
+### Direct command examples
+
+Start Codex mode:
+
+```bash
+npm run start:codex
+```
+
+Start Claude mode:
+
+```bash
+npm start
+```
+
+Check extension connection:
+
+```bash
+curl http://localhost:6174/health
+```
+
+Reload after code changes:
+
+```bash
+curl -X POST http://localhost:6174/reload
+curl -X POST http://localhost:6174/inject
+```
+
+Inspect an active application run:
+
+```bash
+curl http://localhost:6174/inspect-apply
+```
+
+Plan a Greenhouse-only dry run without submitting:
+
+```bash
+curl -s -X POST http://localhost:6174/apply-run \
+  -H 'Content-Type: application/json' \
+  --data '{"dryRun":true,"atsAllow":["greenhouse"],"threshold":70,"targetConfirmed":1,"previewLimit":10}' | jq .
+```
+
+Start a bounded reviewed application run:
+
+```bash
+curl -s -X POST http://localhost:6174/apply-run \
+  -H 'Content-Type: application/json' \
+  --data '{"rescore":true,"threshold":75,"targetConfirmed":3,"attemptCap":10,"requireEvidence":true,"includeAssisted":false}' | jq .
+```
+
+Abort a stuck manual test queue:
+
+```bash
+curl -s -X POST http://localhost:6174/set-storage \
+  -H 'Content-Type: application/json' \
+  --data '{"pja_ext_queue":{"status":"aborted","jobs":[],"currentIndex":0,"results":{"applied":[],"skipped":[],"errors":[]}},"pja_ext_current":null,"pja_navigate_to":null}'
+```
+
 ## Codex vs Claude mode
 
 The dev server supports both engines:
