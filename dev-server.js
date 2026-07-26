@@ -109,6 +109,36 @@ const CORS = {
   'Content-Type': 'application/json'
 };
 
+function gateScoredApplyJobs(inputJobs, opts = {}) {
+  const jobs = Array.isArray(inputJobs) ? inputJobs.filter(Boolean) : [];
+  const rawThreshold = opts.threshold == null ? 55 : Number(opts.threshold);
+  const threshold = Number.isFinite(rawThreshold) ? Math.max(0, Math.min(100, rawThreshold)) : 55;
+  const requireScored = opts.requireScored !== false;
+  const requireEvidence = opts.requireEvidence === true;
+  const skipped = [];
+  const kept = [];
+  for (const job of jobs) {
+    const rawScore = job.fitScore != null ? job.fitScore : job.score;
+    const score = Number(rawScore);
+    const hasScore = Number.isFinite(score);
+    const evidence = Array.isArray(job.matchEvidence) ? job.matchEvidence
+      : Array.isArray(job.matchedSkills) ? job.matchedSkills : [];
+    const conflicts = Array.isArray(job.conflicts) ? job.conflicts : [];
+    let reason = '';
+    if (requireScored && !hasScore) reason = 'missing_fit_score';
+    else if (hasScore && score < threshold) reason = `fit_score_below_${threshold}`;
+    else if (requireEvidence && evidence.length < 3) reason = 'insufficient_match_evidence';
+    else if (requireEvidence && conflicts.length) reason = 'match_conflicts';
+    if (reason) {
+      skipped.push({ jobId: job.jobId || job.id || job.sourceJobId || null,
+        company: job.company || '', title: job.title || '', fitScore: hasScore ? score : null, reason });
+      continue;
+    }
+    kept.push(hasScore ? { ...job, fitScore: score } : job);
+  }
+  return { jobs: kept, skipped, threshold, requireScored, requireEvidence };
+}
+
 // ── Sourcing pipeline wiring ────────────────────────────────────────────────
 const { runPipeline } = require('./sourcing/pipeline');
 
@@ -307,39 +337,48 @@ async function handleRequest(req, res) {
   }
 
   // ── /start-ea: backend-trigger the extension's Easy-Apply auto-loop ──────────
-  // body: { jobs: [{jobId, title, company}] }. Sends a WS command so background opens the first
-  // job, seeds the EA queue, and the extension auto-applies via its OWN CDP (no claude-in-chrome).
+  // body: { jobs: [{jobId, title, company, fitScore}], threshold=55 }.
+  // Sends a WS command so background opens the first job, seeds the EA queue, and the extension
+  // auto-applies via its OWN CDP (no claude-in-chrome). Apply jobs must be resume-scored by
+  // default; pass requireScored:false only for diagnostic dry testing.
   if (req.method === 'POST' && req.url === '/start-ea') {
     let body = '';
     req.on('data', d => body += d);
     req.on('end', () => {
-      let jobs = [];
-      try { jobs = (JSON.parse(body || '{}').jobs) || []; } catch (_) {}
+      let parsed = {};
+      try { parsed = JSON.parse(body || '{}') || {}; } catch (_) {}
+      const gate = gateScoredApplyJobs(parsed.jobs || [], parsed);
+      const jobs = gate.jobs;
       let pushed = 0;
       for (const client of wsClients) {
         if (client.readyState === 1) { client.send(JSON.stringify({ cmd: 'startEasyApply', jobs })); pushed++; }
       }
       res.writeHead(200, CORS);
-      res.end(JSON.stringify({ ok: true, pushed, queued: jobs.length }));
-      console.log(`[PJA] /start-ea → ${jobs.length} jobs to ${pushed} client(s)`);
+      res.end(JSON.stringify({ ok: true, pushed, queued: jobs.length,
+        skipped: gate.skipped, threshold: gate.threshold, requireScored: gate.requireScored }));
+      console.log(`[PJA] /start-ea → ${jobs.length} queued, ${gate.skipped.length} skipped, threshold=${gate.threshold} to ${pushed} client(s)`);
     });
     return;
   }
 
-  // ── /start-indeed-apply: backend-trigger the Indeed Apply queue (body {jobs:[{jobId,title,company}]}) ──
+  // ── /start-indeed-apply: backend-trigger the Indeed Apply queue
+  // body: { jobs: [{jobId, title, company, fitScore}], threshold=55 }.
   if (req.method === 'POST' && req.url === '/start-indeed-apply') {
     let body = '';
     req.on('data', d => body += d);
     req.on('end', () => {
-      let jobs = [];
-      try { jobs = JSON.parse(body || '{}').jobs || []; } catch (_) {}
+      let parsed = {};
+      try { parsed = JSON.parse(body || '{}') || {}; } catch (_) {}
+      const gate = gateScoredApplyJobs(parsed.jobs || [], parsed);
+      const jobs = gate.jobs;
       let pushed = 0;
       for (const client of wsClients) {
         if (client.readyState === 1) { client.send(JSON.stringify({ cmd: 'startIndeedApply', jobs })); pushed++; }
       }
       res.writeHead(200, CORS);
-      res.end(JSON.stringify({ ok: true, pushed, queued: jobs.length }));
-      console.log(`[PJA] /start-indeed-apply → ${jobs.length} jobs to ${pushed} client(s)`);
+      res.end(JSON.stringify({ ok: true, pushed, queued: jobs.length,
+        skipped: gate.skipped, threshold: gate.threshold, requireScored: gate.requireScored }));
+      console.log(`[PJA] /start-indeed-apply → ${jobs.length} queued, ${gate.skipped.length} skipped, threshold=${gate.threshold} to ${pushed} client(s)`);
     });
     return;
   }
