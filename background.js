@@ -1090,18 +1090,26 @@ if (DEV_MODE) {
                   // /apply/ page → Next reloads → loop). pjaFillForm is now scoped to the modal so
                   // it no longer pollutes the page search bar (which used to close the modal).
                   const firstUrl = 'https://www.linkedin.com/jobs/search/?f_AL=true&currentJobId=' + eaJobs[0].jobId;
-                  chrome.tabs.create({ url: firstUrl, active: true }, tab => {
-                    const onUpd = (tid, info) => {
-                      if (tid === tab.id && info.status === 'complete') {
-                        chrome.tabs.onUpdated.removeListener(onUpd);
-                        chrome.scripting.executeScript({
-                          target: { tabId: tab.id },
-                          func: q => { try { sessionStorage.setItem('pja_apply_queue', JSON.stringify(q)); location.reload(); } catch (e) {} },
-                          args: [queue],
-                        }).catch(() => {});
-                      }
-                    };
-                    chrome.tabs.onUpdated.addListener(onUpd);
+                  chrome.tabs.query({ url: ['*://www.linkedin.com/jobs/*'] }, tabs => {
+                    for (const oldTab of (tabs || [])) {
+                      chrome.scripting.executeScript({
+                        target: { tabId: oldTab.id },
+                        func: () => { try { sessionStorage.removeItem('pja_apply_queue'); } catch (_) {} },
+                      }).catch(() => {});
+                    }
+                    chrome.tabs.create({ url: firstUrl, active: true }, tab => {
+                      const onUpd = (tid, info) => {
+                        if (tid === tab.id && info.status === 'complete') {
+                          chrome.tabs.onUpdated.removeListener(onUpd);
+                          chrome.scripting.executeScript({
+                            target: { tabId: tab.id },
+                            func: q => { try { sessionStorage.setItem('pja_apply_queue', JSON.stringify(q)); location.reload(); } catch (e) {} },
+                            args: [queue],
+                          }).catch(() => {});
+                        }
+                      };
+                      chrome.tabs.onUpdated.addListener(onUpd);
+                    });
                   });
                 });
               }

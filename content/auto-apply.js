@@ -110,7 +110,41 @@ function pjaEasyApplyState(modal) {
   return { open: true, success, submitReady, heading, buttons: btns };
 }
 
-async function pjaWaitForEasyApplyConfirmation(timeoutMs = 8000) {
+function pjaLinkedInSubmitErrors() {
+  const modal = pjaGetCurrentModal();
+  const root = modal && modal.root ? modal.root : document;
+  const text = String(root.textContent || '');
+  const requiredEmpty = (() => {
+    try {
+      return typeof window.pjaCollectRequiredEmptyFields === 'function' && modal
+        ? window.pjaCollectRequiredEmptyFields(modal.root).map(f => f.label)
+        : pjaEmptyRequiredFields();
+    } catch (_) { return []; }
+  })();
+  const visibleError = /required|please enter|please select|must be|invalid|fix|error/i.test(text)
+    && (root.querySelector('[role="alert"], .artdeco-inline-feedback--error, .fb-dash-form-element__error-field') || requiredEmpty.length);
+  return { requiredEmpty, visibleError: !!visibleError };
+}
+
+async function pjaRecordSubmitUnclearDiagnostics(label) {
+  try {
+    const modal = pjaGetCurrentModal();
+    const state = modal ? pjaEasyApplyState(modal) : { open: false };
+    const errors = pjaLinkedInSubmitErrors();
+    const diag = {
+      ts: Date.now(),
+      label: label || '',
+      url: location.href,
+      title: document.title,
+      modalState: state,
+      errors,
+      bodyTail: String(document.body?.innerText || '').slice(-1200),
+    };
+    chrome.storage.local.set({ pja_ea_submit_diag: diag });
+  } catch (_) {}
+}
+
+async function pjaWaitForEasyApplyConfirmation(timeoutMs = 20000) {
   const deadline = Date.now() + timeoutMs;
   do {
     const modal = pjaGetCurrentModal();
@@ -704,9 +738,15 @@ async function pjaAutoApplyOne(job, profile, answers, onStatus) {
       } else if (!confirmed) {
         const stillOpen = pjaGetCurrentModal();
         if (stillOpen) {
-          const emptyFields = pjaEmptyRequiredFields();
+          const submitErr = pjaLinkedInSubmitErrors();
+          const emptyFields = submitErr.requiredEmpty;
           if (emptyFields.length) { pjaDismissModal(); return { success: false, reason: 'submit_blocked', fields: emptyFields }; }
+          if (submitErr.visibleError) { await pjaRecordSubmitUnclearDiagnostics('legacy-submit-visible-error'); pjaDismissModal(); return { success: false, reason: 'submit_blocked' }; }
+        } else {
+          await pjaRecordSubmitUnclearDiagnostics('legacy-submit-modal-closed');
+          return { success: true, reason: 'linkedin_submit_modal_closed' };
         }
+        await pjaRecordSubmitUnclearDiagnostics('legacy-submit_unconfirmed');
         return { success: false, reason: 'submit_unconfirmed' };
       }
       pjaDismissModal();
@@ -859,7 +899,16 @@ function pjaTrustedClickEl(el) {
     // (buttons activate on Enter). Fire it alongside the click for the best chance to open the modal.
     const kbd = () => { try { el.focus({ preventScroll: true }); } catch (_) {} try { chrome.runtime.sendMessage({ type: 'WORKDAY_TRUSTED_ENTER' }, () => { void chrome.runtime.lastError; }); } catch (_) {} };
     const finish = () => { if (done) return; done = true; kbd(); resolve(true); };
-    const t = setTimeout(() => { if (!done) { pjaTrace('EA-open CDP timeout→synthetic'); try { pjaClickEasyApply(el); } catch (_) {} finish(); } }, 4000);
+    const t = setTimeout(() => {
+      if (done) return;
+      // If the modal already opened, do not fire a late fallback click. Late fallback clicks
+      // can hit the underlying job page while the current modal is being filled, creating
+      // overlapping open loops and detached-debugger noise.
+      if (pjaGetCurrentModal()) { pjaTrace('EA-open CDP timeout ignored; modal already open'); finish(); return; }
+      pjaTrace('EA-open CDP timeout→synthetic');
+      try { pjaClickEasyApply(el); } catch (_) {}
+      finish();
+    }, 4000);
     try {
       chrome.runtime.sendMessage({ type: 'LINKEDIN_TRUSTED_CLICK', x, y }, (resp) => {
         if (done) return;
@@ -1007,6 +1056,8 @@ async function pjaApplyOnCurrentPage(job, profile, answers, onStatus) {
       // In AUTO mode keep retrying our own click; in SEMI mode just watch for the user.
       let btnSeen = false;
       if (PJA_EA_AUTO_OPEN) {
+        initModal = pjaGetCurrentModal();
+        if (initModal) break;
         const btn = findEasyApplyBtn();
         btnSeen = !!btn;
         if (btn) { try { await pjaTrustedClickEl(btn); } catch (_) {} }
@@ -1131,9 +1182,15 @@ async function pjaApplyOnCurrentPage(job, profile, answers, onStatus) {
       } else if (!confirmed) {
         const stillOpen = pjaGetCurrentModal();
         if (stillOpen) {
-          const emptyFields = pjaEmptyRequiredFields();
+          const submitErr = pjaLinkedInSubmitErrors();
+          const emptyFields = submitErr.requiredEmpty;
           if (emptyFields.length) { pjaDismissModal(); return { success: false, reason: 'submit_blocked', fields: emptyFields }; }
+          if (submitErr.visibleError) { await pjaRecordSubmitUnclearDiagnostics('submit-visible-error'); pjaDismissModal(); return { success: false, reason: 'submit_blocked' }; }
+        } else {
+          await pjaRecordSubmitUnclearDiagnostics('submit-modal-closed');
+          return { success: true, reason: 'linkedin_submit_modal_closed' };
         }
+        await pjaRecordSubmitUnclearDiagnostics('submit_unconfirmed');
         return { success: false, reason: 'submit_unconfirmed' };
       }
       pjaDismissModal();
