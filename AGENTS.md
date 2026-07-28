@@ -55,7 +55,8 @@ This seeds `pja_ext_queue` + `pja_ext_current` into storage and opens the first 
 | `/set-storage` | POST | `chrome.storage.local.set(body)` — body is passed **flat**, not nested |
 
 Use `/apply-all` for “apply N jobs” requests. Use `/start-ea` only for a deliberately
-LinkedIn-Easy-Apply-only batch.
+LinkedIn-Easy-Apply-only batch. Pass `queries:[...]` to `/apply-all` or `/source-v2` for a
+targeted sourcing run; those query terms are forwarded to discovery adapters before ranking.
 
 **`/set-storage` gotcha:** the body JSON is passed directly to `chrome.storage.local.set()`. Send `{"pja_ext_queue": {...}}`, NOT `{"data": {"pja_ext_queue": {...}}}`.
 

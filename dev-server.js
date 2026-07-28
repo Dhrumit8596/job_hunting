@@ -1029,6 +1029,9 @@ ${(description || '').slice(0, 6000)}`;
           target: sourceTarget,
           write: o.sourceWrite !== false,
         };
+        if (Array.isArray(o.queries) && o.queries.length) {
+          sourceBody.queries = o.queries.map(q => String(q || '').trim()).filter(Boolean);
+        }
         if (o.maxBrowserAgeMs != null) sourceBody.maxBrowserAgeMs = Number(o.maxBrowserAgeMs);
         const applyBody = Object.assign({}, o, {
           targetConfirmed,
@@ -1044,6 +1047,7 @@ ${(description || '').slice(0, 6000)}`;
         delete applyBody.sourceTarget;
         delete applyBody.sourceWrite;
         delete applyBody.maxBrowserAgeMs;
+        delete applyBody.queries;
 
         let sourceResp = { ok: true, skipped: true, status: 200, data: { note: 'source:false' } };
         if (o.source !== false) {
@@ -1089,7 +1093,9 @@ ${(description || '').slice(0, 6000)}`;
 
         const { sourceAll } = require('./sourcing/source-run');
         const willing = /^(yes|true|1)$/i.test(String((st.pja_profile || {}).willingToRelocate || ''));
+        const queries = Array.isArray(o.queries) ? o.queries.map(q => String(q || '').trim()).filter(Boolean) : undefined;
         const { store, report } = await sourceAll({ appliedIdentity: applied, target: o.target || 200, nationwideUS: willing,
+          queries: queries && queries.length ? queries : undefined,
           browserJobs: Array.isArray(st.pja_shortlist) ? st.pja_shortlist : [],
           maxBrowserAgeMs: o.maxBrowserAgeMs != null ? Number(o.maxBrowserAgeMs) : 48 * 60 * 60 * 1000 });
 

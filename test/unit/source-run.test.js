@@ -6,7 +6,9 @@ const { makeJob } = require('../../sourcing/normalize');
 module.exports = async (t) => {
   const discoveryAdapters = {
     mock: {
-      async fetchJobs() {
+      async fetchJobs(_source, opts = {}) {
+        t.eq((opts.queries || []).join('|'), 'wafer process engineer|quality validation engineer',
+          'source-run: forwards caller-provided discovery queries');
         return [makeJob({ id: 'ats-1', title: 'Process Engineer', company: 'Acme',
           location: 'Fremont, CA', ats: 'greenhouse',
           applyUrl: 'https://job-boards.greenhouse.io/acme/jobs/ats-1',
@@ -26,7 +28,8 @@ module.exports = async (t) => {
     indeedApply: true, description: '',
   }];
 
-  const { store, report } = await sourceAll({ sources: [], discoveryAdapters, browserJobs, target: 1 });
+  const { store, report } = await sourceAll({ sources: [], discoveryAdapters, browserJobs, target: 1,
+    queries: ['wafer process engineer', 'quality validation engineer'] });
   const records = Object.values(store.index);
   t.eq(records.length, 2, 'source-run: browser captures enter the normalized corpus');
   const acme = records.find(j => j.company === 'Acme');

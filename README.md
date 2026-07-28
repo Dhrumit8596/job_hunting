@@ -358,6 +358,27 @@ Use `/apply-all` for normal batches. It runs `/source-v2` first, then `/apply-ru
 eligible jobs through LinkedIn Easy Apply, Indeed Apply, and external ATS/company-site flows. Use
 `/start-ea` only when you explicitly want LinkedIn Easy Apply only.
 
+For targeted searches, pass `queries`; these are forwarded into the discovery sources before the
+ranked apply plan is built:
+
+```bash
+curl -s -X POST http://localhost:6174/apply-all \
+  -H 'Content-Type: application/json' \
+  --data '{
+    "dryRun":true,
+    "targetConfirmed":30,
+    "threshold":60,
+    "queries":[
+      "quality engineer medical device",
+      "manufacturing quality engineer medical device",
+      "process engineer semiconductor",
+      "metrology engineer",
+      "failure analysis engineer",
+      "supplier quality engineer"
+    ]
+  }' | jq .
+```
+
 Plan a Greenhouse-only dry run without submitting:
 
 ```bash
