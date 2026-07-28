@@ -3972,6 +3972,9 @@
     );
     for (const el of allInputs) {
       if (/^iti-\d+__search-input$/i.test(el.id || '') ||
+          el.type === 'search' ||
+          el.getAttribute('role') === 'combobox' ||
+          el.getAttribute('aria-autocomplete') ||
           (el.type === 'search' && el.closest('[class*="iti"]'))) continue;
       if (!el.offsetParent || el.value.trim()) continue;
       const label = getLabelFor(el);

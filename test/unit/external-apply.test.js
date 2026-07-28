@@ -76,6 +76,9 @@ module.exports = (t) => {
     externalSource.includes("el.name || ''") &&
     externalSource.includes("(phone\\s*)?extension"),
   'external-apply: Workday retry phone fill recognizes name/id=phoneNumber and excludes extension controls');
+  t.ok(externalSource.includes("el.getAttribute('role') === 'combobox'") &&
+    externalSource.includes("el.getAttribute('aria-autocomplete')"),
+  'external-apply: retry phone fill skips country-code/search comboboxes');
   t.ok(externalSource.includes('function forceWorkdayPhoneNumberCommit') &&
     externalSource.includes('phoneNumber(?:--phoneNumber)?') &&
     externalSource.includes('never extension') &&
