@@ -912,8 +912,12 @@
             // SPA rendered the form — fill it directly
             await sleep(800);
             if (typeof pjaFillForm === 'function') {
+              window._pjaComboChain = Promise.resolve();
               pjaFillForm(profile, answers);
-            if (!/workday\.com|myworkdayjobs\.com/i.test(location.hostname)) retryPhoneFill(profile);
+              if (window._pjaComboChain && typeof window._pjaComboChain.then === 'function') {
+                await Promise.race([window._pjaComboChain.catch(() => {}), sleep(30000)]);
+              }
+              if (!/workday\.com|myworkdayjobs\.com/i.test(location.hostname)) retryPhoneFill(profile);
             }
             if (typeof pjaFillUnknownTextFields === 'function') {
               const jobCtx = { title: job.title || '', company: job.company || '' };
@@ -955,6 +959,43 @@
               if (pjaIsSubmitSuccess({ text: document.body?.innerText || '', title: document.title,
                 url: location.href, preSubmitUrl: preSubmitUrl2, hasSubmitButton, hasFormFields,
                 iterations: wait })) { success2 = true; break; }
+            }
+            if (!success2) {
+              const help = await maybeRequestApplyHelp('submit_unclear', {
+                formSummary: 'SPA form still present after submit click',
+                visibleErrors: collectApplyDomSummary().errors || [],
+              });
+              const recovery = await executeRecoveryActions(help, 'submit_unclear');
+              if (recovery.advanceReason) {
+                await recordResult(job, { success: false, reason: recovery.advanceReason });
+                navigateBack(job);
+                return;
+              }
+              if (recovery.retrySubmit) {
+                if (typeof pjaFillForm === 'function') {
+                  window._pjaComboChain = Promise.resolve();
+                  pjaFillForm(profile, answers);
+                  if (window._pjaComboChain && typeof window._pjaComboChain.then === 'function') {
+                    await Promise.race([window._pjaComboChain.catch(() => {}), sleep(30000)]);
+                  }
+                }
+                if (typeof pjaForceAllPolicyReactSelects === 'function') await withTimeout(pjaForceAllPolicyReactSelects(profile), 20000, 'spa-recover-gh-policy');
+                await sleep(600);
+                const retryBtn = findButton(/submit.*application|submit.*app|apply now|send application|complete application/i);
+                if (retryBtn) {
+                  retryBtn.click();
+                  for (let wait = 0; wait < 25; wait++) {
+                    await sleep(400);
+                    const hasSubmitButton = pjaQueryAllExt('button[type=submit], input[type=submit]')
+                      .some(b => /submit/i.test((b.textContent || '') + (b.value || '')));
+                    const hasFormFields = pjaQueryAllExt('form input, form select, form textarea')
+                      .some(el => el.type !== 'hidden');
+                    if (pjaIsSubmitSuccess({ text: document.body?.innerText || '', title: document.title,
+                      url: location.href, preSubmitUrl: preSubmitUrl2, hasSubmitButton, hasFormFields,
+                      iterations: wait })) { success2 = true; break; }
+                  }
+                }
+              }
             }
             await recordResult(job, { success: success2, reason: success2 ? 'applied' : 'submit_unclear' });
             navigateBack(job);

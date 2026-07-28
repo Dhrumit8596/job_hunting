@@ -2046,7 +2046,11 @@ function pjaWithCdpTabLock(tabId, work) {
   const next = prior.catch(() => {}).then(() => {
     let timer;
     const bounded = new Promise((resolve, reject) => {
-      timer = setTimeout(() => reject(new Error('cdp-tab-lock-timeout')), 8000);
+      // Greenhouse/SmartRecruiters option menus can take several seconds to hydrate while the
+      // content script is also uploading a resume and running late required-field sweeps. If this
+      // lock times out too aggressively the queued promise advances while the old debugger work is
+      // still alive, and the next operation can detach it mid-send ("Debugger is not attached").
+      timer = setTimeout(() => reject(new Error('cdp-tab-lock-timeout')), 30000);
       Promise.resolve().then(work).then(resolve, reject);
     });
     return bounded.finally(() => clearTimeout(timer));

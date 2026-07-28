@@ -64,6 +64,20 @@ module.exports = async (t) => {
     autofillSource.includes("new CustomEvent('selectionChange'") &&
     autofillSource.includes("detail: { value: selectedText, label: selectedText }"),
   'combobox: SmartRecruiters spl-select falls back to host value/selectionChange after trusted click');
+  t.ok(autofillSource.includes('spl-checkbox[required], spl-checkbox[aria-required="true"], spl-checkbox.ng-invalid') &&
+    autofillSource.includes('privacy spl-checkbox checked') &&
+    autofillSource.includes('detail: { checked: true, value: true }'),
+  'combobox: SmartRecruiters required privacy spl-checkbox consent is checked');
+  t.ok(autofillSource.includes('spl-input[required], spl-input[aria-required="true"], spl-input.ng-invalid, spl-phone-field[required]') &&
+    autofillSource.includes('setSplTextHost') &&
+    autofillSource.includes('country/region-autocomplete'),
+  'combobox: SmartRecruiters custom spl-input, spl-phone-field, and country autocomplete fields are filled');
+  t.ok(autofillSource.includes('if yes[\\s\\S]{0,30}(visa|status)') &&
+    autofillSource.includes('ans = profile.visaStatus || null'),
+  'combobox: Greenhouse policy react-select sweep commits conditional visa type/status fields');
+  t.ok(autofillSource.includes('const visaLead = lv.match') &&
+    autofillSource.includes("visaLead[1].replace(/-/g, '-?')"),
+  'combobox: Greenhouse visa react-select matches short options like TN for TN Visa');
   t.ok(autofillSource.includes('phoneCountryCode already committed US; skip reopen') &&
     autofillSource.includes("const shouldPressEnter = key === 'referralSource'") &&
     autofillSource.includes('observed: Albania +355'),

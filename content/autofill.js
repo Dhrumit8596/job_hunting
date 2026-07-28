@@ -1167,6 +1167,70 @@ async function pjaFillSmartRecruitersCustomFields(profile) {
   const state = profile.state || '';
   if (!city) return 0;
   let filled = 0;
+  const setSplTextHost = async (host, value, name) => {
+    if (!host || value == null || value === '') return false;
+    const text = String(value);
+    const inner = host.shadowRoot?.querySelector('input,textarea,[contenteditable="true"]') ||
+      host.querySelector?.('input,textarea,[contenteditable="true"]');
+    const target = inner || host;
+    try {
+      target.focus?.();
+      const setter = target instanceof HTMLInputElement
+        ? Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value')?.set
+        : target instanceof HTMLTextAreaElement
+          ? Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value')?.set
+          : null;
+      if (setter) setter.call(target, '');
+      else if ('value' in target) target.value = '';
+      target.dispatchEvent(new InputEvent('input', { bubbles: true, composed: true, inputType: 'deleteContentBackward' }));
+    } catch (_) {}
+    await sleep(80);
+    await cdpTypeAt(target, text);
+    await sleep(120);
+    try {
+      const setter = target instanceof HTMLInputElement
+        ? Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value')?.set
+        : target instanceof HTMLTextAreaElement
+          ? Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value')?.set
+          : null;
+      if (setter) setter.call(target, text);
+      else if ('value' in target) target.value = text;
+      target.setAttribute?.('data-pja-value', text);
+      target.dispatchEvent(new InputEvent('input', { bubbles: true, composed: true, data: text, inputType: 'insertText' }));
+      target.dispatchEvent(new Event('change', { bubbles: true, composed: true }));
+      target.dispatchEvent(new Event('blur', { bubbles: true, composed: true }));
+      host.value = text;
+      host.setAttribute?.('value', text);
+      host.setAttribute?.('data-pja-value', text);
+      host.dispatchEvent(new InputEvent('input', { bubbles: true, composed: true, data: text, inputType: 'insertText' }));
+      host.dispatchEvent(new Event('change', { bubbles: true, composed: true }));
+      host.dispatchEvent(new Event('blur', { bubbles: true, composed: true }));
+    } catch (_) {}
+    dbg(name + ' spl-text value="' + String(target.value || host.value || '').slice(0, 30) + '" valid=' + committed(host));
+    return true;
+  };
+  const textHosts = pjaQueryAll('spl-input[required], spl-input[aria-required="true"], spl-input.ng-invalid, spl-phone-field[required], spl-phone-field[aria-required="true"], spl-phone-field.ng-invalid')
+    .filter(el => {
+      const r = el.getBoundingClientRect();
+      return r.width > 0 && r.height > 0 && !committed(el);
+    });
+  for (const host of textHosts) {
+    const label = [
+      typeof pjaGetLabel === 'function' ? pjaGetLabel(host) : '',
+      labelText(host),
+      host.textContent || '',
+      host.id || '',
+    ].join(' ').replace(/\s+/g, ' ').trim();
+    let key = /spl-phone-field/i.test(host.tagName || '') ? 'phone' : (typeof pjaClassify === 'function' ? pjaClassify(label) : null);
+    if (!key && /first/i.test(label) && /name/i.test(label)) key = 'firstName';
+    if (!key && /last/i.test(label) && /name/i.test(label)) key = 'lastName';
+    if (!key && /confirm/i.test(label) && /email/i.test(label)) key = 'email';
+    if (!key && /\bemail\b/i.test(label)) key = 'email';
+    if (!key && /city|location/i.test(label)) key = 'city';
+    const value = key === 'phone' && profile.phone ? String(profile.phone).replace(/\D/g, '') :
+      key === 'city' ? city : key ? profile[key] : null;
+    if (value && await setSplTextHost(host, value, key || 'required')) filled++;
+  }
   const countryHosts = pjaQueryAll('spl-select[required], spl-select.ng-invalid, spl-select')
     .filter(el => {
       const r = el.getBoundingClientRect();
@@ -1174,6 +1238,15 @@ async function pjaFillSmartRecruitersCustomFields(profile) {
     });
   for (const host of countryHosts) {
     if (await selectSplOption(host, /^United States\b/i, 'country/region')) filled++;
+  }
+  const countryAutocompleteHosts = pjaQueryAll('spl-autocomplete[required], spl-autocomplete[aria-required="true"], spl-autocomplete.ng-invalid')
+    .filter(el => {
+      const r = el.getBoundingClientRect();
+      const label = (labelText(el) + ' ' + (el.textContent || '') + ' ' + (el.id || '')).replace(/\s+/g, ' ');
+      return r.width > 0 && r.height > 0 && /country|region/i.test(label) && !committed(el);
+    });
+  for (const host of countryAutocompleteHosts) {
+    if (await selectSplOption(host, /^United States\b/i, 'country/region-autocomplete')) filled++;
   }
   // SmartRecruiters phone country code is its own spl-select and often has no useful label; the
   // option list text starts with country dial codes. Commit United States +1 before typing phone.
@@ -1276,6 +1349,57 @@ async function pjaFillSmartRecruitersCustomFields(profile) {
         } catch (_) {}
       }
     });
+  const privacyHosts = pjaQueryAll('spl-checkbox[required], spl-checkbox[aria-required="true"], spl-checkbox.ng-invalid')
+    .filter(host => {
+      const r = host.getBoundingClientRect();
+      const label = [
+        typeof pjaGetLabel === 'function' ? pjaGetLabel(host) : '',
+        labelText(host),
+        host.textContent || '',
+      ].join(' ').replace(/\s+/g, ' ');
+      const checked = /ng-valid/.test(host.getAttribute('class') || '') ||
+        host.getAttribute('checked') === 'true' ||
+        host.getAttribute('aria-checked') === 'true';
+      return r.width > 0 && r.height > 0 && !checked &&
+        /privacy notice|privacy policy|read and agree|declare that you have read|terms/i.test(label);
+    });
+  const markSplCheckbox = async (host) => {
+    const inner = host.shadowRoot?.querySelector('input[type="checkbox"], [role="checkbox"]') ||
+      host.querySelector?.('input[type="checkbox"], [role="checkbox"]');
+    const clickTargets = [
+      inner,
+      host.shadowRoot?.querySelector('label,[part*="control"],[class*="checkbox"],[class*="control"]'),
+      host
+    ].filter(Boolean);
+    try { host.checked = true; } catch (_) {}
+    try { host.value = true; } catch (_) {}
+    try { host.setAttribute('checked', ''); } catch (_) {}
+    try { host.setAttribute('aria-checked', 'true'); } catch (_) {}
+    if (inner && 'checked' in inner) {
+      try {
+        const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'checked')?.set;
+        if (setter && inner instanceof HTMLInputElement) setter.call(inner, true); else inner.checked = true;
+      } catch (_) {}
+      inner.dispatchEvent(new Event('input', { bubbles: true, composed: true }));
+      inner.dispatchEvent(new Event('change', { bubbles: true, composed: true }));
+    }
+    for (const target of clickTargets) {
+      try { target.click?.(); } catch (_) {}
+      try { await pjaCdpClickEl(target); } catch (_) {}
+      await sleep(120);
+    }
+    for (const ev of ['input', 'change', 'click', 'valueChange', 'checkedChange', 'ngModelChange', 'modelChange']) {
+      try { host.dispatchEvent(new CustomEvent(ev, { bubbles: true, composed: true, detail: { checked: true, value: true } })); } catch (_) {}
+    }
+    return inner || host;
+  };
+  for (const host of privacyHosts) {
+    try {
+      await markSplCheckbox(host);
+      filled++;
+      dbg('privacy spl-checkbox checked');
+    } catch (_) {}
+  }
   const countryInputs = pjaQueryAll('input[required][role="combobox"], input[aria-required="true"][role="combobox"]')
     .filter(el => {
       const r = el.getBoundingClientRect();
@@ -3211,6 +3335,7 @@ async function pjaForceAllPolicyReactSelects(profile) {
       if (/\bdegree\b/.test(L)) { ans = profile.degree; isEdu = true; eduKind = 'degree'; }
       else if (/discipline|field of study|\bmajor\b/.test(L)) { ans = profile.major; isEdu = true; eduKind = 'discipline'; }
       else if (/\bschool\b|university|college|institution/.test(L)) { ans = profile.university; isEdu = true; eduKind = 'school'; }
+      else if (/visa (type|status)|immigration status|if yes[\s\S]{0,30}(visa|status)/.test(L)) ans = profile.visaStatus || null;
     }
     { const _pmsg = '[psweep] id='+String(inp.id||'').slice(0,18)+' ans="'+String(ans==null?'null':ans).slice(0,5)+'" remix='+/remix-css/.test(ctrl.className||'')+' cc='+(ctrl.className||'').slice(0,40); pjaRDbg(_pmsg); try { chrome.storage.local.get('pja_dbg', d => { const a=(d.pja_dbg||[]).slice(-160); a.push(_pmsg); chrome.storage.local.set({pja_dbg:a}); }); } catch(_){} }
     if (!ans) continue;                                                       // fixed-truth policy + education
@@ -3295,8 +3420,10 @@ async function pjaForceReactSelectCommit(input, value, opts) {
       });
     }
     const lead = lv.match(/^(yes|no)\b/);
+    const visaLead = lv.match(/^(tn|h-?1b|h-?4|f-?1|j-?1|opt|cpt|o-?1|l-?1)\b/i);
     return opts.find(o => (o.textContent || '').trim().toLowerCase() === lv)
       || (lead && opts.find(o => new RegExp('^' + lead[1] + '\\b', 'i').test((o.textContent || '').trim())))
+      || (visaLead && opts.find(o => new RegExp('^' + visaLead[1].replace(/-/g, '-?') + '\\b', 'i').test((o.textContent || '').trim())))
       || (lv.length > 2 && opts.find(o => (o.textContent || '').toLowerCase().includes(lv)))
       || null;
   };
