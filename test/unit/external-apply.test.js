@@ -120,6 +120,13 @@ module.exports = (t) => {
     externalSource.includes("if (/^[\\s🔬]+$/.test(txt)) return false") &&
     externalSource.includes("! /next|continue|submit|apply|save|review|upload|attach|manual|done|finish/i.test(txt)".replace('! ', '!')),
   'external-apply: SmartRecruiters decorative buttons do not count as hydrated application controls');
+  t.ok(externalSource.includes('spl-input, spl-autocomplete, spl-phone-field, spl-checkbox, spl-select') &&
+    externalSource.includes('visibleApplicationControls'),
+  'external-apply: SmartRecruiters custom elements count as hydrated application controls');
+  t.ok(externalSource.includes('function trustedPointClick(el)') &&
+    externalSource.includes('isSmartRecruitersHost') &&
+    externalSource.includes('[SR] trusted Next click='),
+  'external-apply: SmartRecruiters step buttons use trusted clicks before synthetic fallback');
   t.ok(externalSource.includes('recoverEmailVerificationCode') &&
     externalSource.includes("type: 'OPEN_GMAIL_CODE_TAB'") &&
     externalSource.includes('retrying submit after gmail code') &&

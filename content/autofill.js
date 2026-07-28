@@ -1075,8 +1075,8 @@ async function pjaFillSmartRecruitersCustomFields(profile) {
     }
     return [...new Set(opts)];
   };
-  const selectSplOption = async (host, want, name) => {
-    if (!host || committed(host)) return false;
+  const selectSplOption = async (host, want, name, opts = {}) => {
+    if (!host || (!opts.force && committed(host))) return false;
     const fallbackText = /united states/i.test(String(want)) ? 'United States' : String(want || '');
     const commitFallback = async (source) => {
       if (!fallbackText) return false;
@@ -1212,24 +1212,30 @@ async function pjaFillSmartRecruitersCustomFields(profile) {
   const textHosts = pjaQueryAll('spl-input[required], spl-input[aria-required="true"], spl-input.ng-invalid, spl-phone-field[required], spl-phone-field[aria-required="true"], spl-phone-field.ng-invalid')
     .filter(el => {
       const r = el.getBoundingClientRect();
-      return r.width > 0 && r.height > 0 && !committed(el);
+      return r.width > 0 && r.height > 0;
     });
+  const personalOrder = ['firstName', 'lastName', 'email', 'email'];
+  let personalIdx = 0;
   for (const host of textHosts) {
     const label = [
       typeof pjaGetLabel === 'function' ? pjaGetLabel(host) : '',
       labelText(host),
       host.textContent || '',
       host.id || '',
+      host.closest?.('spl-form-element, oc-form-field, [class*="form"], [class*="field"]')?.textContent || '',
     ].join(' ').replace(/\s+/g, ' ').trim();
     let key = /spl-phone-field/i.test(host.tagName || '') ? 'phone' : (typeof pjaClassify === 'function' ? pjaClassify(label) : null);
+    if (!key && /spl-input/i.test(host.tagName || '') && personalIdx < personalOrder.length) key = personalOrder[personalIdx];
     if (!key && /first/i.test(label) && /name/i.test(label)) key = 'firstName';
     if (!key && /last/i.test(label) && /name/i.test(label)) key = 'lastName';
     if (!key && /confirm/i.test(label) && /email/i.test(label)) key = 'email';
     if (!key && /\bemail\b/i.test(label)) key = 'email';
     if (!key && /city|location/i.test(label)) key = 'city';
+    if (/spl-input/i.test(host.tagName || '')) personalIdx++;
     const value = key === 'phone' && profile.phone ? String(profile.phone).replace(/\D/g, '') :
       key === 'city' ? city : key ? profile[key] : null;
     if (value && await setSplTextHost(host, value, key || 'required')) filled++;
+    else dbg('spl-text no value key=' + String(key || 'null') + ' label=' + label.slice(0, 60));
   }
   const countryHosts = pjaQueryAll('spl-select[required], spl-select.ng-invalid, spl-select')
     .filter(el => {
@@ -1239,14 +1245,31 @@ async function pjaFillSmartRecruitersCustomFields(profile) {
   for (const host of countryHosts) {
     if (await selectSplOption(host, /^United States\b/i, 'country/region')) filled++;
   }
-  const countryAutocompleteHosts = pjaQueryAll('spl-autocomplete[required], spl-autocomplete[aria-required="true"], spl-autocomplete.ng-invalid')
+  const allRequiredAutocompletes = pjaQueryAll('spl-autocomplete[required], spl-autocomplete[aria-required="true"], spl-autocomplete.ng-invalid')
     .filter(el => {
       const r = el.getBoundingClientRect();
+      return r.width > 0 && r.height > 0;
+    });
+  const countryAutocompleteHosts = allRequiredAutocompletes
+    .filter((el, idx) => {
       const label = (labelText(el) + ' ' + (el.textContent || '') + ' ' + (el.id || '')).replace(/\s+/g, ' ');
-      return r.width > 0 && r.height > 0 && /country|region/i.test(label) && !committed(el);
+      // Some SmartRecruiters tenants render the Country/Region field with no discoverable label,
+      // before City/Location fields. Prefer United States for that first required autocomplete
+      // instead of letting the generic location filler commit Santa Clara.
+      return /country|region/i.test(label) || idx === 0;
     });
   for (const host of countryAutocompleteHosts) {
-    if (await selectSplOption(host, /^United States\b/i, 'country/region-autocomplete')) filled++;
+    try { host.value = ''; host.removeAttribute('value'); host.removeAttribute('data-pja-value'); } catch (_) {}
+    const inner = host.shadowRoot?.querySelector('input,[role="combobox"]');
+    if (inner) {
+      try {
+        const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value')?.set;
+        if (setter && inner instanceof HTMLInputElement) setter.call(inner, '');
+        else if ('value' in inner) inner.value = '';
+        inner.dispatchEvent(new InputEvent('input', { bubbles: true, composed: true, inputType: 'deleteContentBackward' }));
+      } catch (_) {}
+    }
+    if (await selectSplOption(host, /^United States\b/i, 'country/region-autocomplete', { force: true })) filled++;
   }
   // SmartRecruiters phone country code is its own spl-select and often has no useful label; the
   // option list text starts with country dial codes. Commit United States +1 before typing phone.
@@ -1433,6 +1456,7 @@ async function pjaFillSmartRecruitersCustomFields(profile) {
   }
   const hosts = pjaQueryAll('spl-autocomplete[required], oc-location-autocomplete.ng-invalid spl-autocomplete, oc-location-autocomplete spl-autocomplete')
     .filter(el => {
+      if (countryAutocompleteHosts.includes(el)) return false;
       const r = el.getBoundingClientRect();
       const label = el.getAttribute('label') || el.getAttribute('aria-label') || el.id || '';
       return r.width > 0 && r.height > 0 && /city|location/i.test(label + ' ' + (el.id || ''));

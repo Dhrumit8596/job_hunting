@@ -393,7 +393,7 @@
     ]);
     const isSmartRecruitersHost = /smartrecruiters\.com/i.test(location.hostname);
     const visibleApplicationControls = () => pjaQueryAllExt(
-      'input:not([type=hidden]), textarea, select, spl-select, [role="combobox"], [role="textbox"], ' +
+      'input:not([type=hidden]), textarea, select, spl-input, spl-autocomplete, spl-phone-field, spl-checkbox, spl-select, [role="combobox"], [role="textbox"], ' +
       'button, input[type=submit], [role=button]'
     ).filter(el => {
       try {
@@ -1931,6 +1931,15 @@
         : '';
       if (isWorkdayHost) {
         const clicked = await trustedWorkdayClick(nextBtn, nextBtnAid || nextBtnText || 'next');
+        if (!clicked) {
+          ['pointerdown','mousedown','pointerup','mouseup','click'].forEach(evtType => {
+            const evt = new MouseEvent(evtType, { bubbles: true, cancelable: true, view: window });
+            nextBtn.dispatchEvent(evt);
+          });
+        }
+      } else if (isSmartRecruitersHost) {
+        const clicked = await trustedPointClick(nextBtn);
+        await addDbg('[SR] trusted Next click=' + clicked);
         if (!clicked) {
           ['pointerdown','mousedown','pointerup','mouseup','click'].forEach(evtType => {
             const evt = new MouseEvent(evtType, { bubbles: true, cancelable: true, view: window });
@@ -3930,6 +3939,25 @@
   function findButton(pattern) {
     return pjaQueryAllExt('button[type=submit], button[type=button], input[type=submit], button, [role=button], [data-automation-id="click_filter"], spl-button, oc-button')
       .find(b => !b.disabled && pattern.test((b.textContent || b.value || b.getAttribute('aria-label') || '').trim()));
+  }
+  function trustedPointClick(el) {
+    return new Promise(resolve => {
+      if (!el) return resolve(false);
+      try { el.scrollIntoView({ block: 'center', behavior: 'instant' }); } catch (_) {}
+      const r = el.getBoundingClientRect();
+      let done = false;
+      const timer = setTimeout(() => { if (!done) { done = true; resolve(false); } }, 5000);
+      try {
+        chrome.runtime.sendMessage({ type: 'LINKEDIN_TRUSTED_CLICK', x: r.left + r.width / 2, y: r.top + r.height / 2 }, resp => {
+          if (done) return;
+          done = true;
+          clearTimeout(timer);
+          resolve(!(chrome.runtime.lastError || resp?.error));
+        });
+      } catch (_) {
+        if (!done) { done = true; clearTimeout(timer); resolve(false); }
+      }
+    });
   }
 
   // Phone fields on some ATS (e.g. Greenhouse) use type="text" not type="tel",
