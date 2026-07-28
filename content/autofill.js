@@ -2059,10 +2059,11 @@ function pjaFillCombobox(input, value, key) {
         setTimeout(async () => {
           const selectAttempt = async (label) => {
             const clicked = doSelectWorkday();
-            // For Workday phone-code, doSelectWorkday schedules a trusted click on the exact US
-            // option. Pressing Enter immediately afterward can commit the currently highlighted
-            // first row (observed: Albania +355) before the trusted click lands.
-      const shouldPressEnter = key === 'referralSource';
+            // For Workday phone-code/referral-source, doSelectWorkday schedules a trusted click
+            // on the chosen option. Pressing Enter immediately afterward can commit the currently
+            // highlighted parent row before the click lands (observed: referral "Social Media"
+            // instead of child option "LinkedIn (Social Media)").
+            const shouldPressEnter = key === 'referralSource' && !clicked;
             if (shouldPressEnter && await pressWorkdayEnter()) {
               try { chrome.storage.local.get('pja_dbg', d => {
                 const arr = (d.pja_dbg || []).slice(-160);

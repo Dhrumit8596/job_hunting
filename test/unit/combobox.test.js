@@ -79,8 +79,8 @@ module.exports = async (t) => {
     autofillSource.includes("visaLead[1].replace(/-/g, '-?')"),
   'combobox: Greenhouse visa react-select matches short options like TN for TN Visa');
   t.ok(autofillSource.includes('phoneCountryCode already committed US; skip reopen') &&
-    autofillSource.includes("const shouldPressEnter = key === 'referralSource'") &&
-    autofillSource.includes('observed: Albania +355'),
+    autofillSource.includes("const shouldPressEnter = key === 'referralSource' && !clicked") &&
+    autofillSource.includes('observed: referral "Social Media"'),
   'combobox: Workday phone-code does not press Enter after scheduling the exact US option click');
   t.ok(autofillSource.includes("const filterValue = key === 'phoneCountryCode' ? 'United States'") &&
     autofillSource.includes("if (key === 'phoneCountryCode' || key === 'referralSource') return workdaySelectionCommitted()"),
@@ -128,6 +128,9 @@ module.exports = async (t) => {
   t.ok(autofillSource.includes("key === 'phoneCountryCode' || key === 'referralSource'") &&
     autofillSource.includes('selected chip before resolving'),
   'combobox: Workday referral-source requires a committed selected chip, not just a scheduled click');
+  t.ok(autofillSource.includes("key === 'referralSource' && !clicked") &&
+    autofillSource.includes('highlighted parent row'),
+  'combobox: Workday referral-source does not press Enter after scheduling an option click');
   t.ok(autofillSource.includes("key === 'referralSource' && /workday-fail|synthetic|fail/i") &&
     autofillSource.includes("'+cdp-' + fallback"),
   'combobox: Workday referral-source falls back to CDP option click after trusted click failure');
