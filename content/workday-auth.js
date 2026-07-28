@@ -100,12 +100,13 @@ function findEmailSignInButton() {
   return Array.from(document.querySelectorAll('a,button,[role=button],[data-automation-id]')).find(el => {
     const aid = el.getAttribute('data-automation-id') || '';
     if (/signInWithEmail|emailSignIn/i.test(aid)) return true;
-    if (/^(utilityButtonSignIn|signInLink)$/i.test(aid)) return true;
     const t = (el.textContent || '').trim();
     if (!t || t.length > 40) return false;
     if (/apple|google|linkedin|facebook|microsoft/i.test(t)) return false;
-    return /^sign.?in$/i.test(t) ||
-      /sign.?in with email|continue with email|use email|sign.?in with your email/i.test(t);
+    // Generic Workday header buttons (`utilityButtonSignIn` / `signInLink`) usually just say
+    // "Sign In" and can appear on job posting pages before the Apply flow. Treat only explicit
+    // email-path labels as the auth-choice step; otherwise job_apply_start should click Apply.
+    return /sign.?in with email|continue with email|use email|sign.?in with your email|email me a link/i.test(t);
   });
 }
 

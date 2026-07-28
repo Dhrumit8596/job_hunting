@@ -121,4 +121,14 @@ module.exports = async (t) => {
   `);
   t.eq(signedInContinuePosting.pjaWorkdayAuth._detectScreen(), 'job_apply_start',
     'workday auth: signed-in job posting with Continue Application is classified as job_apply_start');
+
+  const klaPosting = loadWorkdayAuthDom(`
+    <body>
+      <button data-automation-id="utilityButtonSignIn">Sign In</button>
+      <a data-automation-id="adventureButton">Apply</a>
+      <main>KLA Careers Search for Jobs Introduce Yourself</main>
+    </body>
+  `);
+  t.eq(klaPosting.pjaWorkdayAuth._detectScreen(), 'job_apply_start',
+    'workday auth: generic KLA header Sign In does not masquerade as email_button_step');
 };
