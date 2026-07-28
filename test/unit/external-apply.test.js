@@ -225,6 +225,8 @@ module.exports = (t) => {
   t.eq(a('Are you 18 years of age or older?'), 'Yes', '18+ -> Yes');
   t.eq(a('Are you currently or have you within the last 12 months worked at the company?'), 'No', 'worked-here -> No');
   t.eq(a('How did you hear about us?'), 'LinkedIn', 'Workday source question -> referral source');
+  t.eq(a('State and federal law require Abbott to track and report certain payments and transfers of value provided to certain health care professionals (HCPs). Are you: (A) A physician - MD, DO, Dentist, DDS, Podiatrist, Optometrist or Chiropractor - with an active license to practice in the US; (B) a Massachusetts-licensed prescriber; or (C) None of the above?'), 'C', 'Workday HCP disclosure -> C / none of the above');
+  t.eq(w.pjaPickAnswerOption('C', ['Select One', 'A', 'B', 'C'], P), 'C', 'Workday HCP disclosure option C selected exactly');
   t.eq(a('What is your favorite color?'), null, 'unknown question -> null');
 
   // --- sponsorship flips to Yes if profile requires it (synthetic) ---

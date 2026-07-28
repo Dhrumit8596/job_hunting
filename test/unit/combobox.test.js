@@ -110,6 +110,11 @@ module.exports = async (t) => {
     autofillSource.includes('country must precede state') &&
     autofillSource.includes('[WD] prompt no commit key='),
   'combobox: Workday prompt-button filler commits country before state and verifies selected button text');
+  t.ok(autofillSource.includes('hcpCompliance') &&
+    autofillSource.includes('payments and transfers of value') &&
+    autofillSource.includes("t === 'c'") &&
+    autofillSource.indexOf('hcpCompliance') < autofillSource.indexOf('} else if (/^degree'),
+  'combobox: Workday HCP legal disclosure is answered as C before generic state prompts');
   t.ok(autofillSource.includes('selectedWithoutLabel') &&
     autofillSource.includes('State California Required') &&
     autofillSource.includes('reopen already-committed prompt buttons'),

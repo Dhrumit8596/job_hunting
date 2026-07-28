@@ -2559,7 +2559,12 @@ async function pjaFillWorkdayPromptButtons(profile) {
       return (!!stateFull && (t === stateFull || t.startsWith(stateFull + ' ') || t.includes(' ' + stateFull + ' '))) ||
         (!!stateAbbr && new RegExp('(^|\\s|[-(])' + stateAbbr.toLowerCase() + '(?:\\s|[-)]|$)').test(t));
     })();
-    if (/^degree\b/i.test(label) && unresolved) {
+    if (/state and federal law[\s\S]{0,160}(health care professional|hcp|physician|prescriber|payments and transfers of value)|payments and transfers of value[\s\S]{0,120}(physician|prescriber|health care professional|hcp)|massachusetts-licensed prescriber|none of the above/i.test(label) && unresolved) {
+      specs.push({ button, key: 'hcpCompliance', match: txt => {
+        const t = txt.toLowerCase().replace(/\s+/g, ' ').trim();
+        return t === 'c' || /none of the above/.test(t);
+      } });
+    } else if (/^degree\b/i.test(label) && unresolved) {
       const wantsBachelor = /bachelor|b\.\s*e\.?|undergraduate/i.test(degree);
       specs.push({ button, key: 'degree', match: txt => {
         const t = txt.toLowerCase().replace(/[’']/g, '');
@@ -2596,8 +2601,8 @@ async function pjaFillWorkdayPromptButtons(profile) {
   // Address fields first, but country must precede state. Workday clears/resets the state picker
   // when country is selected, so selecting state first creates a false success followed by a
   // validation failure ("State Select One Required").
-  specs.sort((a, b) => ({ degree: 0, country: 1, state: 2, phoneCountryCode: 3, phoneType: 4 }[a.key] ?? 9) -
-    ({ degree: 0, country: 1, state: 2, phoneCountryCode: 3, phoneType: 4 }[b.key] ?? 9));
+  specs.sort((a, b) => ({ degree: 0, country: 1, state: 2, phoneCountryCode: 3, phoneType: 4, hcpCompliance: 5 }[a.key] ?? 9) -
+    ({ degree: 0, country: 1, state: 2, phoneCountryCode: 3, phoneType: 4, hcpCompliance: 5 }[b.key] ?? 9));
   let committed = 0;
   try { chrome.storage.local.get('pja_dbg', d => { const a=(d.pja_dbg||[]).slice(-160); a.push('[WD] prompt specs='+specs.map(s=>s.key).join('|')); chrome.storage.local.set({pja_dbg:a}); }); } catch (_) {}
   for (const spec of specs) {

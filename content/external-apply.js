@@ -3004,7 +3004,9 @@
     profile = profile || {};
     // OPT/CPT/F-1 MUST come before the workAuth /eligible/ check, else
     // "Are you eligible for a 24-month OPT extension?" wrongly matches workAuth -> Yes.
-    if (/optional practical training|opt extension|\bopt\b|curricular practical|\bcpt\b|f-1 visa|f1 visa|j-1 visa/i.test(label)) {
+    if (/state and federal law[\s\S]{0,160}(health care professional|hcp|physician|prescriber|payments and transfers of value)|payments and transfers of value[\s\S]{0,120}(physician|prescriber|health care professional|hcp)|massachusetts-licensed prescriber|none of the above/i.test(label)) {
+      return 'C';    // Abbott HCP tracking disclosure: C = none of the listed HCP/prescriber categories.
+    } else if (/optional practical training|opt extension|\bopt\b|curricular practical|\bcpt\b|f-1 visa|f1 visa|j-1 visa/i.test(label)) {
       return 'No';   // Canadian on TN — not on OPT/CPT/F-1
     } else if (/authoriz|eligible|legally|legal right/i.test(label)) {
       return profile.workAuth === 'Yes' ? 'Yes' : 'No';
@@ -3080,7 +3082,8 @@
       return hit || texts.find(txt => /\d/.test(txt)) || null;
     }
     const al = String(answer).toLowerCase();
-    return texts.find(txt => { const ot = txt.toLowerCase(); return ot === al || ot.includes(al) || al.includes(ot); }) || null;
+    const candidates = texts.filter(txt => !/^(select one|select|choose|--|-)?$/i.test(txt));
+    return candidates.find(txt => { const ot = txt.toLowerCase(); return ot === al || ot.includes(al) || al.includes(ot); }) || null;
   }
 
   if (typeof window !== 'undefined') {
