@@ -498,7 +498,7 @@
             if (typeof pjaForceCountryField === 'function') await pjaForceCountryField('United States');
           } else if (type === 'retry_greenhouse_react_selects') {
             if (/greenhouse\.io/i.test(location.hostname) && typeof pjaFillGreenhouseEducation === 'function') await withTimeout(pjaFillGreenhouseEducation(profile), 45000, 'recover-gh-edu');
-            if (typeof pjaForceAllPolicyReactSelects === 'function') await withTimeout(pjaForceAllPolicyReactSelects(job.profile || profile), 12000, 'recover-policy-rs');
+            if (typeof pjaForceAllPolicyReactSelects === 'function') await withTimeout(pjaForceAllPolicyReactSelects(profile), 30000, 'recover-policy-rs');
           } else if (type === 'retry_smartrecruiters_custom_fields') {
             if (/smartrecruiters\.com/i.test(location.hostname) && typeof pjaFillSmartRecruitersCustomFields === 'function') await withTimeout(pjaFillSmartRecruitersCustomFields(profile), 25000, 'recover-sr-fields');
           } else if (type === 'retry_answer_required') {
@@ -2299,7 +2299,7 @@
     // Force-commit all required policy react-selects (sponsorship/work-auth/onsite/ack) via the
     // proven fiber bridge — the collect→answer flow intermittently missed them, failing submit.
     if (typeof pjaForceAllPolicyReactSelects === 'function') {
-      try { const pn = await pjaForceAllPolicyReactSelects(job.profile); if (pn) { await addDbg('[policy-rs] committed n=' + pn); await sleep(300); } } catch (_) {}
+      try { const pn = await pjaForceAllPolicyReactSelects(profile); if (pn) { await addDbg('[policy-rs] committed n=' + pn); await sleep(300); } } catch (_) {}
     }
     let missing = findMissingRequired();
     let hardMissing = missing.filter(m => m.type !== 'wd_selectinput');
@@ -2329,7 +2329,7 @@
         try { await finalizeWorkdayMyInformation('postfill'); } catch (_) {}
       }
       if (typeof pjaForceAllPolicyReactSelects === 'function') {
-        try { const pn = await withTimeout(pjaForceAllPolicyReactSelects(job.profile), 8000, 'policy-postfill'); if (pn) await addDbg('[policy-rs] post-AI committed n=' + pn); } catch (_) {}
+        try { const pn = await withTimeout(pjaForceAllPolicyReactSelects(profile), 30000, 'policy-postfill'); if (pn) await addDbg('[policy-rs] post-AI committed n=' + pn); } catch (_) {}
       }
       missing = findMissingRequired();
       hardMissing = missing.filter(m => m.type !== 'wd_selectinput');
