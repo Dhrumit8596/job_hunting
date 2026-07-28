@@ -4300,6 +4300,8 @@
     // the sponsorship/authorization rules above answer, and open-ended prompts.
     if (/^\s*(?:i )?(?:have read|acknowledge(?:\/confirm)?|certify|understand|agree|consent)\b|i have read and (understand|agree)|acknowledge (that i|and (agree|understand))|i certify that/i.test(t) &&
         !/how many|describe|explain|please (provide|list|specify)/i.test(t)) return 'Yes';
+    if (/export control|u\.?s\.? export|itar\b|ear\b|export administration regulation/i.test(t) &&
+        !/have read|read and understand|acknowledge|certify|agree|consent|statement/i.test(t)) return 'No';
     // Yes/No experience-screening — answer ONLY from her actual resume domains (honest, no
     // fabrication): Yes for documented skills, No for documented gaps, else defer to the AI.
     // Only fires on yes/no framings; excludes open-ended ("describe/explain/what") and numeric
