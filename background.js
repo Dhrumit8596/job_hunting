@@ -854,15 +854,25 @@ if (DEV_MODE) {
               // alters applied/dead postings and only touches caller-supplied canonical IDs.
               (async () => {
                 let reset = 0;
+                const errors = [];
+                const bounded = (p, ms, label) => Promise.race([
+                  p,
+                  new Promise((_, reject) => setTimeout(() => reject(new Error(label + ' timed out')), ms))
+                ]);
                 try {
                   if (self.PJAIdb) for (const id of (msg.ids || [])) {
-                    const cur = id && await self.PJAIdb.getJob(id);
-                    if (!cur || /^(applied|dead)$/i.test(String(cur.state && cur.state.status || ''))) continue;
-                    await self.PJAIdb.updateState(id, { status: 'sourced', reason: '', attempts: 0, updatedAt: Date.now() });
-                    reset++;
+                    try {
+                      const cur = id && await bounded(self.PJAIdb.getJob(id), 5000, 'getJob ' + id);
+                      if (!cur || /^(applied|dead)$/i.test(String(cur.state && cur.state.status || ''))) continue;
+                      await bounded(self.PJAIdb.updateState(id, { status: 'sourced', reason: '', attempts: 0, updatedAt: Date.now() }), 5000, 'updateState ' + id);
+                      reset++;
+                    } catch (e) {
+                      errors.push({ id, error: e.message || String(e) });
+                    }
                   }
                 } catch (e) { console.error('PJA: resetCorpusJobs failed', e); }
-                _wsReloadSocket.send(JSON.stringify({ cmd: 'resetCorpusJobsReply', reqId: msg.reqId, data: { reset } }));
+                if (errors.length) chrome.storage.local.set({ pja_reset_corpus_jobs_error: { errors, ts: Date.now() } });
+                _wsReloadSocket.send(JSON.stringify({ cmd: 'resetCorpusJobsReply', reqId: msg.reqId, data: { reset, errors } }));
               })();
             } else if (msg.cmd === 'openTab') {
               chrome.tabs.create({ url: msg.url });

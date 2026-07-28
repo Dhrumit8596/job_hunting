@@ -48,6 +48,16 @@ if (!window.__pjaMsgListenerAdded) {
     return /linkedin\.com\/in\/[^\/]+/.test(location.href);
   }
 
+  function isExternalAtsPage() {
+    return /(?:^|\.)(workday\.com|myworkdayjobs\.com)$/i.test(location.hostname) ||
+      /(?:^|\.)(greenhouse\.io|lever\.co|jobvite\.com|icims\.com|ashbyhq\.com|smartrecruiters\.com|bamboohr\.com|rippling\.com)$/i.test(location.hostname);
+  }
+
+  function maybeAutoOpenSidebar() {
+    if (!isExternalAtsPage()) openSidebar();
+    else closeSidebar();
+  }
+
   function extractLinkedInProfile() {
     const name =
       document.querySelector('h1.text-heading-xlarge')?.textContent.trim() ||
@@ -229,7 +239,7 @@ select.pcw-input{cursor:pointer}
       }
       currentJobData = jobData;
       injectUI();
-      openSidebar();
+      maybeAutoOpenSidebar();
       showPreAnalyze(jobData);
       initAppTools();
     });
@@ -273,7 +283,7 @@ select.pcw-input{cursor:pointer}
 
     currentJobData = jobData;
     if (!document.getElementById('pja-host')) injectUI();
-    openSidebar();
+    maybeAutoOpenSidebar();
     resetSidebar(jobData);
     initAppTools();
 
@@ -315,7 +325,7 @@ select.pcw-input{cursor:pointer}
     // Shadow host
     const host = document.createElement('div');
     host.id = 'pja-host';
-    host.style.cssText = 'position:fixed;top:0;right:0;width:0;height:0;z-index:2147483647;';
+    host.style.cssText = 'position:fixed;top:0;right:0;width:0;height:0;z-index:auto;pointer-events:none;';
     document.documentElement.appendChild(host);
 
     shadow = host.attachShadow({ mode: 'open' });
@@ -358,7 +368,7 @@ select.pcw-input{cursor:pointer}
     const fab = document.getElementById('pja-fab');
     if (!sidebar) return;
     sidebar.classList.add('open');
-    if (host) host.style.width = '0';
+    if (host) host.style.zIndex = '2147483647';
     if (fab) fab.style.display = 'none';
     sidebarOpen = true;
   }
@@ -368,6 +378,8 @@ select.pcw-input{cursor:pointer}
     const fab = document.getElementById('pja-fab');
     if (!sidebar) return;
     sidebar.classList.remove('open');
+    const host = document.getElementById('pja-host');
+    if (host) host.style.zIndex = 'auto';
     if (fab) fab.style.display = 'flex';
     sidebarOpen = false;
   }
@@ -1929,6 +1941,7 @@ select.pcw-input{cursor:pointer}
   z-index: 2147483647;
   transition: right .3s cubic-bezier(.4,0,.2,1);
   border-left: 1px solid #e5e7eb;
+  pointer-events: auto;
 }
 
 #pja-sidebar.open { right: 0; }

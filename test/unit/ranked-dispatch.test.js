@@ -51,6 +51,13 @@ module.exports = async (t) => {
     source.includes('dataUrl.length > 600000'),
   'background: apply-help captures a bounded screenshot for LLM recovery mode');
 
+  t.ok(source.includes("msg.cmd === 'resetCorpusJobs'") &&
+    source.includes("new Error(label + ' timed out')") &&
+    source.includes('pja_reset_corpus_jobs_error') &&
+    source.includes('resetCorpusJobsReply') &&
+    source.includes('{ reset, errors }'),
+  'background: reset-corpus-jobs is bounded and returns diagnostics instead of hanging');
+
   t.ok(source.includes("msg.type === 'CAPTURE_APPLY_DIAGNOSTIC'") &&
     source.includes('pja_last_post_click_diagnostic') &&
     source.includes('pja_post_click_diagnostics') &&

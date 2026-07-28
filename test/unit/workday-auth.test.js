@@ -110,4 +110,15 @@ module.exports = async (t) => {
   `);
   t.eq(signedInPosting.pjaWorkdayAuth._detectScreen(), 'job_apply_start',
     'workday auth: signed-in job posting with Apply button is classified as job_apply_start, not logged_in_home');
+
+  const signedInContinuePosting = loadWorkdayAuthDom(`
+    <body>
+      <button data-automation-id="utilityMenuButton">candidate@example.test</button>
+      <button data-automation-id="navigationItem-Candidate Home">Candidate Home</button>
+      <a role="button">Continue Application</a>
+      <main>Senior Quality Engineer page is loaded</main>
+    </body>
+  `);
+  t.eq(signedInContinuePosting.pjaWorkdayAuth._detectScreen(), 'job_apply_start',
+    'workday auth: signed-in job posting with Continue Application is classified as job_apply_start');
 };

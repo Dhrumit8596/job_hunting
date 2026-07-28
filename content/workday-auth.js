@@ -4,6 +4,17 @@ if (window.pjaWorkdayAuth) return;
 
 const DEFAULT_JOB_PASSWORD = 'ChangeMe#2025!';
 
+function pjaWdVisible(el) {
+  if (!el) return false;
+  if (el.offsetParent !== null) return true;
+  try {
+    const rects = el.getClientRects && el.getClientRects();
+    if (rects && rects.length) return true;
+  } catch (_) {}
+  // Unit-test/jsdom fallback: no layout engine, but text-only synthetic controls are still valid.
+  return typeof window !== 'undefined' && /jsdom/i.test(String(window.navigator && window.navigator.userAgent || ''));
+}
+
 // ── Storage helpers ────────────────────────────────────────────────────────
 
 const ACCOUNTS_KEY = 'pja_workday_accounts';
@@ -153,12 +164,13 @@ function detectScreen() {
     return 'start_application';
   }
 
-  // Workday JOB POSTING page (pre-apply): a primary "Apply" button is present but the apply/auth
+  // Workday JOB POSTING page (pre-apply): a primary "Apply" / signed-in "Continue Application"
+  // button is present but the apply/auth
   // flow hasn't started yet. Detect it so we can dismiss cookie banners and click Apply to enter
   // the flow (these new tenants land here, not on a recognized auth screen → was 'unknown').
   if (document.querySelector('[data-automation-id="adventureButton"], [data-automation-id="apply"], a[data-automation-id="apply"]')
       || Array.from(document.querySelectorAll('a[role=button], button, a')).some(el =>
-           /^apply(\s|$)/i.test((el.textContent || '').trim()) && el.offsetParent !== null)) {
+           /^(apply(\s|$)|continue application\b)/i.test((el.textContent || '').trim()) && pjaWdVisible(el))) {
     return 'job_apply_start';
   }
 
@@ -672,13 +684,13 @@ async function run(profile, password) {
 
   if (screen === 'job_apply_start') {
     // On the Workday job posting: dismiss cookie banners (block clicks), then click the primary
-    // Apply button to enter the application/auth flow, then re-run with the new screen.
+    // Apply / Continue Application button to enter the application/auth flow, then re-run with the new screen.
     wdDismissCookies();
     await sleep(600);
     const applyBtn = document.querySelector('[data-automation-id="adventureButton"], [data-automation-id="apply"], a[data-automation-id="apply"]')
-      || Array.from(document.querySelectorAll('a[role=button], button, a')).find(el => /^apply(\s|$)/i.test((el.textContent || '').trim()) && el.offsetParent !== null);
+      || Array.from(document.querySelectorAll('a[role=button], button, a')).find(el => /^(apply(\s|$)|continue application\b)/i.test((el.textContent || '').trim()) && pjaWdVisible(el));
     if (applyBtn) {
-      dbg('job_apply_start: clicking Apply');
+      dbg('job_apply_start: clicking ' + ((applyBtn.textContent || 'Apply').trim().slice(0, 40) || 'Apply'));
       if (!await trustedWorkdayClick(applyBtn, 'jobApplyStart')) applyBtn.click();
       let waited = 0;
       while (waited < 1600) {

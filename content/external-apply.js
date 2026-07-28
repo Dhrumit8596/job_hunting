@@ -485,8 +485,12 @@
         try {
           await addDbg('[recover] exec ' + type + ' reason=' + String(contextReason || '').slice(0, 24));
           if (type === 'retry_fill_phone') {
-            if (typeof pjaForcePhoneField === 'function') await pjaForcePhoneField(profile.phone || job.profile?.phone || '');
-            retryPhoneFill(profile);
+            if (/workday\.com|myworkdayjobs\.com/i.test(location.hostname) && typeof forceWorkdayPhoneNumberTrustedCommit === 'function') {
+              await forceWorkdayPhoneNumberTrustedCommit(profile, 'recover');
+            } else if (typeof pjaForcePhoneField === 'function') {
+              await pjaForcePhoneField(profile.phone || job.profile?.phone || '');
+            }
+            if (!/workday\.com|myworkdayjobs\.com/i.test(location.hostname)) retryPhoneFill(profile);
           } else if (type === 'retry_fill_country') {
             if (typeof pjaForceCountryField === 'function') await pjaForceCountryField((job.profile && job.profile.country) || profile.country || 'United States');
           } else if (type === 'retry_fill_phone_country_code') {
@@ -802,7 +806,7 @@
         .filter(el => el.offsetParent !== null)
         .map(el => (el.textContent || el.getAttribute('aria-label') || '').trim())
         .filter(Boolean);
-      const hasApplyEntry = pageControls.some(txt => /^apply$/i.test(txt) || /apply now|start application|sign in/i.test(txt));
+      const hasApplyEntry = pageControls.some(txt => /^apply$/i.test(txt) || /apply now|start application|continue application|sign in/i.test(txt));
       if (hasApplyEntry) {
         const sourceUrl = String(job.applyUrl || location.href || '').trim();
         const cleanUrl = sourceUrl.replace(/[?#].*$/, '').replace(/\/+$/, '');
@@ -909,7 +913,7 @@
             await sleep(800);
             if (typeof pjaFillForm === 'function') {
               pjaFillForm(profile, answers);
-              retryPhoneFill(profile);
+            if (!/workday\.com|myworkdayjobs\.com/i.test(location.hostname)) retryPhoneFill(profile);
             }
             if (typeof pjaFillUnknownTextFields === 'function') {
               const jobCtx = { title: job.title || '', company: job.company || '' };
@@ -1257,7 +1261,7 @@
       if (window._pjaComboChain) await withTimeout(window._pjaComboChain, 30000, 'comboChain1');
       await sleep(300);
       // Phone retry: fill any still-empty phone fields (uses label-classification, not just type/id)
-      retryPhoneFill(profile);
+      if (!/workday\.com|myworkdayjobs\.com/i.test(location.hostname)) retryPhoneFill(profile);
       await sleep(200);
       // SECOND PASS — Greenhouse (and others) render sections like Education AFTER the
       // initial fill, so their comboboxes (School/Degree/Discipline) were absent the first
@@ -1291,6 +1295,7 @@
 
     // --- Workday Work Experience subsection (My Experience step) ---
     await withTimeout(pjaFillWorkdayWorkExperience(profile), 45000, 'wd-workexp');
+    await withTimeout(pjaFillWorkdaySelfIdentifyDate(profile), 20000, 'wd-selfid-date');
 
     // --- Fallback fills ---
     const forceWorkdayPhoneCountryCode = async () => {
@@ -1343,9 +1348,31 @@
         if (!priorId && el.id === tempId) el.removeAttribute('id');
       }
     };
+    const trustedWorkdayEnter = async (el, label) => {
+      if (!/workday\.com|myworkdayjobs\.com/i.test(location.hostname)) return false;
+      try {
+        if (el) {
+          el.scrollIntoView({ block: 'center', behavior: 'instant' });
+          try { el.focus(); } catch (_) {}
+        }
+        const resp = await new Promise(resolve => {
+          chrome.runtime.sendMessage({ type: 'WORKDAY_TRUSTED_ENTER' }, r => {
+            resolve(chrome.runtime.lastError ? { error: chrome.runtime.lastError.message } : (r || {}));
+          });
+        });
+        await addDbg('[WD] trusted Enter ' + (label || '') + ' ok=' + !!resp.ok + (resp.error ? ' err=' + String(resp.error).slice(0, 60) : ''));
+        return !!resp.ok;
+      } catch (e) {
+        await addDbg('[WD] trusted Enter ' + (label || '') + ' threw=' + String(e && e.message || e).slice(0, 60));
+        return false;
+      }
+    };
     const forceWorkdayReferralSource = async () => {
       if (!/workday\.com|myworkdayjobs\.com/i.test(location.hostname)) return 0;
       let filled = 0;
+      const referralCommitted = text =>
+        /linkedin|careers? website|company website|career site|indeed|facebook|social media|job board|online|internet/i.test(String(text || '')) &&
+        !/select one|select\.\.\.|required only/i.test(String(text || ''));
       if (typeof pjaFillCombobox === 'function') {
         const inputs = pjaQueryAllExt('input[data-uxi-widget-type="selectinput"], input[role="combobox"]').filter(el => {
           const id = el.id || el.name || el.getAttribute('data-automation-id') || '';
@@ -1357,7 +1384,7 @@
           const selected = (el.closest('[data-uxi-widget-type="multiselect"]')
             ?.querySelector('[data-automation-id="selectedItemList"], [data-automation-id="selectedItem"], [data-automation-id="promptOption"]')
             ?.textContent || '').trim();
-          return !/linkedin|job board|social media|online|internet|career/i.test(selected);
+          return !referralCommitted(selected) && !referralCommitted(fieldText);
         });
         for (const el of inputs) {
           pjaFillCombobox(el, profile.referralSource || 'LinkedIn', 'referralSource');
@@ -1372,14 +1399,14 @@
         const label = (typeof getLabelFor === 'function' ? getLabelFor(btn) : '') || btn.getAttribute('aria-label') || id || btn.textContent || '';
         if (!/source--source/i.test(id) && !/how did you hear|referral source|source/i.test(label)) return false;
         const selected = (btn.textContent || btn.getAttribute('aria-label') || '').trim();
-        return btn.getAttribute('aria-invalid') === 'true' || !selected || /select one|select\.\.\.|required/i.test(selected);
+        return btn.getAttribute('aria-invalid') === 'true' || !selected || /select one|select\.\.\./i.test(selected) || !referralCommitted(selected);
       });
       const ownText = opt => {
         const clone = opt.cloneNode(true);
         clone.querySelectorAll('[role="option"]').forEach(child => child.remove());
         return (clone.textContent || '').trim().replace(/\s+/g, ' ');
       };
-      const fallbacks = ['LinkedIn', 'LinkedIn Connection', 'Job Board or Social Media', 'Social Media', 'Job Board', 'Online Job Board', 'Internet', 'Online', 'Career Site'];
+      const fallbacks = ['LinkedIn', 'LinkedIn Connection', 'Careers Website', 'Career Website', 'Company Website', 'Career Site', 'Indeed', 'Job Board or Social Media', 'Social Media', 'Job Board', 'Online Job Board', 'Internet', 'Online'];
       for (const btn of buttons) {
         document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
         await sleep(150);
@@ -1415,8 +1442,52 @@
           await addDbg('[WD] forced referralSource no option for ' + (btn.id || btn.getAttribute('aria-label') || '').slice(0, 40));
         }
       }
+      await closeWorkdayTransientMenus();
       if (filled) await addDbg('[WD] forced referralSource n=' + filled);
       return filled;
+    };
+    const workdayPhoneNumberDigits = (sourceProfile) => {
+      const raw = String(sourceProfile?.phone || job.profile?.phone || '').replace(/\D/g, '');
+      if (/^(?:1)?\d{10}$/.test(raw)) return raw.slice(-10);
+      return raw;
+    };
+    const forceWorkdayPhoneNumberTrustedCommit = async (sourceProfile, label) => {
+      if (!/workday\.com|myworkdayjobs\.com/i.test(location.hostname)) return 0;
+      const digits = workdayPhoneNumberDigits(sourceProfile);
+      if (!digits) return 0;
+      const inputs = pjaQueryAllExt('input:not([type=hidden]):not([type=file]):not([type=submit]):not([type=button]):not([type=checkbox]):not([type=radio])')
+        .filter(el => {
+          const r = el.getBoundingClientRect();
+          if ((!el.offsetParent && r.width === 0) || r.height === 0) return false;
+          const text = [getLabelFor(el), el.id, el.name].join(' ');
+          if (/\b(phone\s*)?extension\b|--extension\b/i.test(text)) return false;
+          if (el.getAttribute('data-uxi-widget-type') === 'selectinput' || el.getAttribute('role') === 'combobox') return false;
+          return /^phoneNumber(?:--phoneNumber)?$/i.test(el.id || '') ||
+            /^phoneNumber(?:--phoneNumber)?$/i.test(el.name || '');
+        });
+      let committed = 0;
+      for (const el of inputs) {
+        const priorId = el.id;
+        const tempId = priorId || ('__pja_wd_phone_' + Date.now() + '_' + Math.random().toString(36).slice(2, 7));
+        if (!priorId) el.id = tempId;
+        try {
+          const resp = await new Promise(resolve => {
+            chrome.runtime.sendMessage({ type: 'WORKDAY_SET_SID', selector: '#' + CSS.escape(tempId), text: digits }, r => {
+              resolve(chrome.runtime.lastError ? { ok: false, error: chrome.runtime.lastError.message } : (r || {}));
+            });
+          });
+          await sleep(250);
+          const valDigits = String(el.value || '').replace(/\D/g, '');
+          if (valDigits.includes(digits.slice(-7))) committed++;
+          await addDbg('[WD-MYINFO] trusted phoneNumber insertText ' + (label || '') +
+            ' ok=' + !!resp.ok + ' valLen=' + valDigits.length + (resp.error ? ' err=' + String(resp.error).slice(0, 50) : ''));
+        } catch (e) {
+          await addDbg('[WD-MYINFO] trusted phoneNumber insertText error=' + String(e && e.message || e).slice(0, 80));
+        } finally {
+          if (!priorId && el.id === tempId) el.removeAttribute('id');
+        }
+      }
+      return committed;
     };
     const summarizeWorkdayCriticalSelects = async (label) => {
       if (!/workday\.com|myworkdayjobs\.com/i.test(location.hostname)) return;
@@ -1427,7 +1498,9 @@
             const rawLabel = (typeof getLabelFor === 'function' ? getLabelFor(el) : '') ||
               el.getAttribute('aria-label') || id || '';
             const text = (el.textContent || el.getAttribute('aria-label') || '').trim().replace(/\s+/g, ' ');
-            const root = el.closest('[data-automation-id^="formField"], [data-uxi-widget-type="multiselect"], fieldset, div') || el.parentElement;
+          const root = el.closest('[data-uxi-widget-type="multiselect"]') ||
+            el.closest('[data-automation-id^="formField"], fieldset') ||
+            el.parentElement;
             const selected = (root?.querySelector('[data-automation-id="selectedItemList"], [data-automation-id="selectedItem"], [data-automation-id="promptOption"]')?.textContent || '').trim().replace(/\s+/g, ' ');
             return { id, rawLabel, text, selected, invalid: el.getAttribute('aria-invalid') === 'true', valuePresent: 'value' in el ? !!String(el.value || '').trim() : undefined };
           })
@@ -1448,10 +1521,106 @@
         await addDbg('[WD-DIAG] ' + label + ' error=' + String(e && e.message || e).slice(0, 80));
       }
     };
+    const closeWorkdayTransientMenus = async () => {
+      if (!/workday\.com|myworkdayjobs\.com/i.test(location.hostname)) return;
+      for (let i = 0; i < 2; i++) {
+        try {
+          const esc = new KeyboardEvent('keydown', {
+            key: 'Escape', code: 'Escape', keyCode: 27, which: 27,
+            bubbles: true, cancelable: true
+          });
+          (document.activeElement || document).dispatchEvent(esc);
+          document.dispatchEvent(esc);
+          if (document.activeElement && typeof document.activeElement.blur === 'function') {
+            document.activeElement.blur();
+          }
+        } catch (_) {}
+        await sleep(150);
+      }
+    };
+    const workdayFieldText = (fieldPattern) => {
+      const fields = pjaQueryAllExt('[data-automation-id^="formField"], fieldset')
+        .filter(el => fieldPattern.test((el.textContent || '').replace(/\s+/g, ' ')));
+      for (const field of fields) {
+        const selected = field.querySelector(
+          '[data-automation-id="selectedItemList"], [data-automation-id="selectedItem"], [data-automation-id="promptOption"]'
+        );
+        const button = Array.from(field.querySelectorAll('button,[role="button"]'))
+          .find(btn => !btn.disabled && !/^errors found$/i.test((btn.textContent || '').trim()));
+        const input = Array.from(field.querySelectorAll('input:not([type=hidden]):not([type=file]), textarea'))
+          .find(el => el.getAttribute('data-uxi-widget-type') !== 'selectinput' && (el.value || '').trim());
+        return [
+          selected?.textContent || '',
+          button?.textContent || button?.getAttribute('aria-label') || '',
+          input?.value || '',
+        ].join(' ').replace(/\s+/g, ' ').trim();
+      }
+      return '';
+    };
+    const workdayMyInfoCommitGaps = () => {
+      if (!/workday\.com|myworkdayjobs\.com/i.test(location.hostname)) return [];
+      const bodyText = (document.body?.innerText || '').replace(/\s+/g, ' ');
+      const looksLikeMyInfo = /my information|contact information|address|phone device type|country\s*\/\s*territory phone code/i.test(bodyText);
+      if (!looksLikeMyInfo) return [];
+      const gaps = [];
+      const unresolved = txt => !txt || /select one|required|choose|select\.\.\./i.test(txt);
+      const stateWanted = String(profile.state || '').trim();
+      const phoneWanted = workdayPhoneNumberDigits(profile);
+      const countryTxt = workdayFieldText(/^country\b(?!.*phone)/i);
+      const stateTxt = workdayFieldText(/^(state|state\/region|administrative area)\b/i);
+      const phoneTypeTxt = workdayFieldText(/^phone device type\b/i);
+      const phoneCodeTxt = workdayFieldText(/(country|territory).{0,60}phone.{0,30}code|phone.{0,30}(country|territory).{0,30}code|dial(?:ing|ling) code/i);
+      const referralTxt = workdayFieldText(/how did you hear|where did you (hear|find)|referral source|source of (this )?application|\bsource\b/i);
+      const phoneInput = pjaQueryAllExt('input:not([type=hidden]):not([type=file])').find(el => {
+        const r = el.getBoundingClientRect();
+        if ((!el.offsetParent && r.width === 0) || r.height === 0) return false;
+        const idName = [el.id || '', el.name || ''].join(' ');
+        return !/\b(phone\s*)?extension\b|--extension\b/i.test(idName) &&
+          /^phoneNumber(?:--phoneNumber)?$/i.test(el.id || el.name || '');
+      });
+      if (countryTxt && unresolved(countryTxt)) gaps.push('country');
+      if (stateWanted && stateTxt && unresolved(stateTxt)) gaps.push('state');
+      if (phoneTypeTxt && !/mobile|cell|home|work/i.test(phoneTypeTxt)) gaps.push('phoneDeviceType');
+      if (phoneCodeTxt && !(/united states/i.test(phoneCodeTxt) && /\+?1\b/.test(phoneCodeTxt))) gaps.push('phoneCountryCode');
+      if (phoneInput && phoneWanted && !String(phoneInput.value || '').replace(/\D/g, '').includes(phoneWanted.slice(-7))) gaps.push('phoneNumber');
+      if (referralTxt && unresolved(referralTxt)) gaps.push('referralSource');
+      return Array.from(new Set(gaps));
+    };
+    const finalizeWorkdayMyInformation = async (label) => {
+      if (!/workday\.com|myworkdayjobs\.com/i.test(location.hostname)) return [];
+      await closeWorkdayTransientMenus();
+      // Country/state prompt commits can trigger Workday to re-render and clear downstream address
+      // fields. My Information values are dependent: country/state prompt commits can re-render and clear
+      // address/city/postal/phone. Do two prompt→text passes, then verify committed display state.
+      for (let pass = 0; pass < 2; pass++) {
+        if (typeof pjaFillWorkdayPromptButtons === 'function') {
+          await withTimeout(pjaFillWorkdayPromptButtons(profile), 20000, 'wd-myinfo-prompts-' + pass);
+          await sleep(250);
+        }
+        if (typeof pjaFillForm === 'function') pjaFillForm(profile, answers);
+        if (window._pjaComboChain && typeof window._pjaComboChain.then === 'function') {
+          await Promise.race([window._pjaComboChain.catch(() => {}), sleep(15000)]);
+        }
+        await withTimeout(forceWorkdayPhoneCountryCode(), 15000, 'wd-myinfo-phone-code-' + pass);
+        await withTimeout(forceWorkdayReferralSource(), 15000, 'wd-myinfo-referral-' + pass);
+        const wdp = forceWorkdayPhoneNumberCommit(profile);
+        if (wdp) await addDbg('[WD-MYINFO] phoneNumber commit n=' + wdp + ' pass=' + pass);
+        await forceWorkdayPhoneNumberTrustedCommit(profile, 'pass=' + pass);
+        // Do not run the generic CDP phone filler on Workday after the dedicated trusted
+        // insertText path. It can contend for the debugger and re-clear the React phone state.
+        await closeWorkdayTransientMenus();
+        const gaps = workdayMyInfoCommitGaps();
+        await addDbg('[WD-MYINFO] ' + (label || 'finalize') + ' pass=' + pass + ' gaps=' + (gaps.join('|') || 'none'));
+        if (!gaps.length) return [];
+      }
+      return workdayMyInfoCommitGaps();
+    };
     const retryWorkdayBlockedAdvance = async (reasonHint) => {
       if (!/workday\.com|myworkdayjobs\.com/i.test(location.hostname)) return { advanced: false };
       const stepBefore = document.body.innerText.match(/current step (\d+)/i)?.[1] || '';
-      const retryKey = 'pja_wd_block_retry_' + (job.id || job.jobId || job.applyUrl || '') + '_' + (stepBefore || 'nostep') + '_' + location.pathname.slice(-32);
+      const retryKey = 'pja_wd_block_retry_' + (job.runId || 'norun') + '_' +
+        (job.id || job.jobId || job.applyUrl || '') + '_' + (reasonHint || 'blocked') + '_' +
+        (stepBefore || 'nostep') + '_' + location.pathname.slice(-32);
       if (sessionStorage.getItem(retryKey) === '1') {
         await addDbg('[WD] blocked advance retry already used step=' + (stepBefore || '?'));
         return { advanced: false };
@@ -1460,34 +1629,15 @@
       await summarizeWorkdayCriticalSelects('before-retry ' + (reasonHint || 'blocked'));
       await addDbg('[WD] blocked advance retry start reason=' + (reasonHint || 'blocked') + ' step=' + (stepBefore || '?'));
       try {
-        if (typeof pjaFillWorkdayPromptButtons === 'function') {
-          await withTimeout(pjaFillWorkdayPromptButtons(profile), 20000, 'wd-prompts-blocked-retry');
-          await sleep(250);
-        }
-        if (typeof pjaFillForm === 'function') pjaFillForm(profile, answers);
-        if (window._pjaComboChain && typeof window._pjaComboChain.then === 'function') {
-          await Promise.race([window._pjaComboChain.catch(() => {}), sleep(20000)]);
-        }
-        await withTimeout(forceWorkdayPhoneCountryCode(), 15000, 'wd-phone-code-blocked-retry');
-        await withTimeout(forceWorkdayReferralSource(), 15000, 'wd-referral-source-blocked-retry');
-        // Workday can clear dependent text fields (address/city/postal/phone) after country/state
-        // prompt commits. Re-fill text inputs after those prompt/selectinput recovery passes.
-        if (typeof pjaFillForm === 'function') {
-          pjaFillForm(profile, answers);
-          if (window._pjaComboChain && typeof window._pjaComboChain.then === 'function') {
-            await Promise.race([window._pjaComboChain.catch(() => {}), sleep(15000)]);
-          }
-          await addDbg('[WD] post-prompt text refill done');
-        }
-        if (typeof pjaForcePhoneField === 'function') {
-          const pf = await pjaForcePhoneField(profile.phone || job.profile?.phone || '');
-          if (pf) await addDbg('[phone] wd-blocked forced via trusted typing n=' + pf);
-        }
+        await withTimeout(forceWorkdayPhoneCountryCode(), 18000, 'wd-phone-code-blocked-retry');
+        await finalizeWorkdayMyInformation('blocked-retry');
+        await addDbg('[WD] post-prompt text refill done');
         if (typeof pjaFillRequiredComboboxFallback === 'function') pjaFillRequiredComboboxFallback(profile, answers);
         if (typeof pjaFillRequiredSelectFallback === 'function') pjaFillRequiredSelectFallback();
         if (typeof pjaFillRequiredRadioFallback === 'function') pjaFillRequiredRadioFallback();
         await sleep(700);
         await summarizeWorkdayCriticalSelects('after-refill ' + (reasonHint || 'blocked'));
+        await closeWorkdayTransientMenus();
         const reNext = Array.from(document.querySelectorAll('[data-automation-id="click_filter"]'))
           .find(el => /^next$|^continue$|save.*continue/i.test(el.getAttribute('aria-label') || ''))
           || document.querySelector('[data-automation-id="bottomNavigationNext"]')
@@ -1520,14 +1670,40 @@
             }
           }, 250);
         });
-        const stepAfter = document.body.innerText.match(/current step (\d+)/i)?.[1] || '';
-        const submitFound = !!document.querySelector('[data-automation-id="bottomNavigationSubmit"]') ||
+        let stepAfter = document.body.innerText.match(/current step (\d+)/i)?.[1] || '';
+        let submitFound = !!document.querySelector('[data-automation-id="bottomNavigationSubmit"]') ||
           Array.from(document.querySelectorAll('[data-automation-id="click_filter"]'))
             .some(el => /submit.*application|apply now|^submit$/i.test(el.getAttribute('aria-label') || '')) ||
           !!findButton(/submit.*application|submit.*app|apply now|send application|complete application|^submit$|^submit application$/i);
-        const completed = /\/completed\/|\/confirmation/i.test(location.pathname) ||
+        let completed = /\/completed\/|\/confirmation/i.test(location.pathname) ||
           /view my applications|your application (has been|was) submitted|thank you for applying|application received/i.test(document.body?.innerText || '');
-        const advanced = completed || submitFound || location.href !== urlBefore || (stepBefore && stepAfter !== stepBefore);
+        let advanced = completed || submitFound || location.href !== urlBefore || (stepBefore && stepAfter !== stepBefore);
+        if (!advanced && await trustedWorkdayEnter(reNext, 'blocked-retry-' + label)) {
+          await new Promise(resolve => {
+            let waited = 0;
+            const poll = setInterval(() => {
+              waited += 250;
+              const stepNow = document.body.innerText.match(/current step (\d+)/i)?.[1] || '';
+              const submitNow = !!document.querySelector('[data-automation-id="bottomNavigationSubmit"]') ||
+                Array.from(document.querySelectorAll('[data-automation-id="click_filter"]'))
+                  .some(el => /submit.*application|apply now|^submit$/i.test(el.getAttribute('aria-label') || ''));
+              const doneNow = /\/completed\/|\/confirmation/i.test(location.pathname) ||
+                /view my applications|your application (has been|was) submitted|thank you for applying|application received/i.test(document.body?.innerText || '');
+              if ((stepBefore && stepNow !== stepBefore) || location.href !== urlBefore || submitNow || doneNow || waited >= 7000) {
+                clearInterval(poll);
+                resolve();
+              }
+            }, 250);
+          });
+          stepAfter = document.body.innerText.match(/current step (\d+)/i)?.[1] || '';
+          submitFound = !!document.querySelector('[data-automation-id="bottomNavigationSubmit"]') ||
+            Array.from(document.querySelectorAll('[data-automation-id="click_filter"]'))
+              .some(el => /submit.*application|apply now|^submit$/i.test(el.getAttribute('aria-label') || '')) ||
+            !!findButton(/submit.*application|submit.*app|apply now|send application|complete application|^submit$|^submit application$/i);
+          completed = /\/completed\/|\/confirmation/i.test(location.pathname) ||
+            /view my applications|your application (has been|was) submitted|thank you for applying|application received/i.test(document.body?.innerText || '');
+          advanced = completed || submitFound || location.href !== urlBefore || (stepBefore && stepAfter !== stepBefore);
+        }
         await addDbg('[WD] blocked advance retry result advanced=' + !!advanced + ' submit=' + !!submitFound + ' completed=' + !!completed + ' step=' + (stepBefore || '?') + '→' + (stepAfter || '?'));
         return { advanced, submitFound, completed };
       } catch (e) {
@@ -1537,8 +1713,8 @@
     };
     await withTimeout(forceWorkdayPhoneCountryCode(), 15000, 'wd-phone-code');
     await withTimeout(forceWorkdayReferralSource(), 15000, 'wd-referral-source');
-    if (typeof pjaForcePhoneField === 'function') {
-      const pf0 = await pjaForcePhoneField(profile.phone || job.profile?.phone || '');
+    if (typeof pjaForcePhoneField === 'function' && !/workday\.com|myworkdayjobs\.com/i.test(location.hostname)) {
+      const pf0 = await pjaForcePhoneField(/workday\.com|myworkdayjobs\.com/i.test(location.hostname) ? workdayPhoneNumberDigits(profile) : (profile.phone || job.profile?.phone || ''));
       if (pf0) { await addDbg('[phone] pre-step forced via trusted typing n=' + pf0); await sleep(300); }
     }
     // These helpers are best-effort and shared with Easy Apply. A site-specific DOM edge case in
@@ -1571,10 +1747,11 @@
     }
     await withTimeout(forceWorkdayPhoneCountryCode(), 15000, 'wd-phone-code-post');
     await withTimeout(forceWorkdayReferralSource(), 15000, 'wd-referral-source-post');
-    if (typeof pjaForcePhoneField === 'function') {
-      const pf1 = await pjaForcePhoneField(profile.phone || job.profile?.phone || '');
+    if (typeof pjaForcePhoneField === 'function' && !/workday\.com|myworkdayjobs\.com/i.test(location.hostname)) {
+      const pf1 = await pjaForcePhoneField(/workday\.com|myworkdayjobs\.com/i.test(location.hostname) ? workdayPhoneNumberDigits(profile) : (profile.phone || job.profile?.phone || ''));
       if (pf1) { await addDbg('[phone] wd-post forced via trusted typing n=' + pf1); await sleep(250); }
     }
+    await finalizeWorkdayMyInformation('pre-loop');
 
     // --- Multi-step: handle Next button if needed ---
     let steps = 0;
@@ -1601,10 +1778,11 @@
           await sleep(800);
           continue;
         }
-        // Workday can occasionally land on a shell route after account auth: it says
-        // "current step 1", exposes top navigation + "Back to Job Posting", but no form inputs
-        // and no Next/Submit footer. Recover once by going back to the posting and restarting the
-        // apply flow instead of classifying the application as no_submit_btn.
+        // Workday can temporarily unmount the step body during SPA transitions after Save/Continue:
+        // it says "current step 1", exposes top navigation + "Back to Job Posting", but no form
+        // inputs and no Next/Submit footer. Do not immediately click Back — that can undo a valid
+        // transition. Wait for hydration first; only reload the apply route once if the shell stays
+        // empty.
         const isWorkdayDeadEnd = /workday\.com|myworkdayjobs\.com/i.test(location.hostname)
           && /current step \d+/i.test(document.body.innerText || '')
           && pjaQueryAllExt('input, textarea, select').filter(el => {
@@ -1615,18 +1793,30 @@
           const deadEndRetryKey = 'pja_wd_deadend_retry_' + (job.id || job.jobId || job.applyUrl || '');
           if (sessionStorage.getItem(deadEndRetryKey) !== '1') {
             sessionStorage.setItem(deadEndRetryKey, '1');
-            const backBtn = findButton(/^back to job posting$/i);
-            await addDbg('[WD] empty step-1 dead-end; restarting from job posting backBtn=' + !!backBtn);
-            if (backBtn) {
-              if (!(await trustedWorkdayClick(backBtn, 'back-to-job-posting'))) backBtn.click();
-              await sleep(4000);
-            } else if (job.applyUrl) {
-              location.assign(job.applyUrl);
-              await sleep(4000);
+            await addDbg('[WD] empty step shell; waiting for hydration before recovery');
+            let hydrated = false;
+            for (let w = 0; w < 40 && !hydrated; w++) {
+              await sleep(500);
+              const visibleInputs = pjaQueryAllExt('input, textarea, select').filter(el => {
+                const r = el.getBoundingClientRect();
+                return r.width > 0 && r.height > 0;
+              }).length;
+              const nextNow = !!document.querySelector('[data-automation-id="pageFooterNextButton"],[data-automation-id="bottomNavigationNext"],[data-automation-id="bottomNavigationSubmit"]') ||
+                Array.from(document.querySelectorAll('[data-automation-id="click_filter"]'))
+                  .some(el => /next|continue|submit|apply now/i.test(el.getAttribute('aria-label') || ''));
+              const stepNow = document.body.innerText.match(/current step (\d+)/i)?.[1] || '';
+              hydrated = visibleInputs > 0 || nextNow || (stepNow && stepNow !== '1');
             }
+            if (hydrated) {
+              await addDbg('[WD] empty step shell hydrated; re-entering fill path');
+              return runExternalApply(job, rawAnswers);
+            }
+            await addDbg('[WD] empty step shell persisted; reloading apply route once');
+            location.assign(location.href);
+            await sleep(5000);
             return runExternalApply(job, rawAnswers);
           }
-          await addDbg('[WD] empty step-1 dead-end already retried once');
+          await addDbg('[WD] empty step shell already retried once');
         }
         const diagBtns = Array.from(document.querySelectorAll('button')).map(b => (b.textContent||b.getAttribute('aria-label')||'').trim().slice(0,20)).filter(Boolean).slice(0,8);
         const diagCFs = Array.from(document.querySelectorAll('[data-automation-id="click_filter"]')).map(cf => cf.getAttribute('aria-label')||'noLabel').slice(0,5);
@@ -1640,19 +1830,9 @@
       // Fill Workday Work Experience fields at the top of each iteration — they render
       // late (after step transition) so the initial fill pass misses them. Idempotent.
       if (typeof pjaFillWorkdayWorkExperience === 'function') { await pjaFillWorkdayWorkExperience(profile); await sleep(300); }
-      if (typeof pjaFillWorkdayPromptButtons === 'function') {
-        await withTimeout(pjaFillWorkdayPromptButtons(profile), 20000, 'wd-prompts-step');
-        await sleep(200);
-      }
-      // Country/state prompt commits can trigger Workday to re-render and clear downstream address
-      // and phone fields. Restore normal text inputs before computing missing-required fields.
-      if (typeof pjaFillForm === 'function') {
-        pjaFillForm(profile, answers);
-        if (window._pjaComboChain && typeof window._pjaComboChain.then === 'function') {
-          await Promise.race([window._pjaComboChain.catch(() => {}), sleep(15000)]);
-        }
-        await addDbg('[WD] post-prompt step text refill done');
-      }
+      if (typeof pjaFillWorkdaySelfIdentifyDate === 'function') { await pjaFillWorkdaySelfIdentifyDate(profile); await sleep(150); }
+      await finalizeWorkdayMyInformation('step-' + steps);
+      await addDbg('[WD] post-prompt step text refill done');
       const missing = findMissingRequired();
       // Workday selectinput fields can't be opened via JS — try Next anyway and let Workday validate.
       let hardMissing = missing.filter(m => m.type !== 'wd_selectinput');
@@ -1662,21 +1842,13 @@
         // Re-run the fillers once and re-check before bailing.
         await addDbg('[ext] hardMissing=' + hardMissing.map(m=>m.label).join('|') + ' — re-filling late fields');
         if (typeof pjaFillWorkdayWorkExperience === 'function') await pjaFillWorkdayWorkExperience(profile);
+        if (typeof pjaFillWorkdaySelfIdentifyDate === 'function') await pjaFillWorkdaySelfIdentifyDate(profile);
         pjaFillForm(profile, answers);
         if (window._pjaComboChain && typeof window._pjaComboChain.then === 'function') {
           await Promise.race([window._pjaComboChain.catch(() => {}), sleep(30000)]);
         }
         await sleep(300);
-        if (typeof pjaFillWorkdayPromptButtons === 'function') {
-          await withTimeout(pjaFillWorkdayPromptButtons(profile), 20000, 'wd-prompts-refill');
-          await sleep(200);
-        }
-        await withTimeout(forceWorkdayPhoneCountryCode(), 15000, 'wd-phone-code-refill');
-        await withTimeout(forceWorkdayReferralSource(), 15000, 'wd-referral-source-refill');
-        if (typeof pjaForcePhoneField === 'function') {
-          const pf2 = await pjaForcePhoneField(profile.phone || job.profile?.phone || '');
-          if (pf2) { await addDbg('[phone] wd-refill forced via trusted typing n=' + pf2); await sleep(250); }
-        }
+        await finalizeWorkdayMyInformation('hardMissing-refill');
         pjaFillRequiredComboboxFallback(profile, answers);
         await sleep(400);
         hardMissing = findMissingRequired().filter(m => m.type !== 'wd_selectinput');
@@ -1702,6 +1874,7 @@
         !!document.querySelector('[data-automation-id="formField-disabilityStatus"]')
       );
       await addDbg('[ext] step ' + steps + ' clicking Next step=' + stepTextBefore + ' wdMissing=' + wdSelectMissing.map(m=>m.label).join('|') + ' btn=' + nextBtnAid + '/' + nextBtnText + (nextBtnDisabled ? '[DISABLED]' : '') + (isWorkdaySidStep ? '[SID-CDP]' : ''));
+      if (isWorkdayHost) await finalizeWorkdayMyInformation('pre-click-' + steps);
       // If THIS click is the final Submit (Workday multi-step forms submit via the footer/bottom
       // Submit button in the step loop), record a PERSISTENT per-job "submitted this run" flag so
       // the early-confirmation on the next /completed/ load records APPLIED — not already_applied.
@@ -1812,22 +1985,14 @@
         // combobox/radio fallbacks) then retry Next. Handles late-rendered required fields
         // and values that didn't commit before the first Next click.
         await pjaFillWorkdayWorkExperience(profile);
+        await pjaFillWorkdaySelfIdentifyDate(profile);
         if (typeof pjaFillForm === 'function') pjaFillForm(profile, answers);
         if (window._pjaComboChain && typeof window._pjaComboChain.then === 'function') {
           await Promise.race([window._pjaComboChain.catch(() => {}), sleep(30000)]);
         }
         await sleep(300);
-        if (typeof pjaFillWorkdayPromptButtons === 'function') {
-          await withTimeout(pjaFillWorkdayPromptButtons(profile), 20000, 'wd-prompts-error-recovery');
-          await sleep(250);
-        }
+        await finalizeWorkdayMyInformation('validation-error-' + steps);
         await pjaFillWorkdayAppQuestions(profile);
-        await withTimeout(forceWorkdayPhoneCountryCode(), 15000, 'wd-phone-code-error-recovery');
-        await withTimeout(forceWorkdayReferralSource(), 15000, 'wd-referral-source-error-recovery');
-        if (typeof pjaForcePhoneField === 'function') {
-          const pf3 = await pjaForcePhoneField(profile.phone || job.profile?.phone || '');
-          if (pf3) { await addDbg('[phone] wd-error forced via trusted typing n=' + pf3); await sleep(250); }
-        }
         pjaFillRequiredComboboxFallback(profile, answers);
         if (typeof pjaFillRequiredRadioFallback === 'function') pjaFillRequiredRadioFallback();
         await sleep(700);
@@ -1837,7 +2002,8 @@
             || document.querySelector('[data-automation-id="bottomNavigationNext"]')
             || findButton(/save and continue|^continue$|^next$/i);
           if (reNext) {
-            reNext.click();
+            await closeWorkdayTransientMenus();
+            if (!(await trustedWorkdayClick(reNext, 'validation-retry'))) reNext.click();
             await new Promise(resolve => { let w=0; const p=setInterval(()=>{ w+=250;
               const err=Array.from(document.querySelectorAll('button')).some(b=>/^errors found$/i.test(b.textContent.trim()));
               const sn=document.body.innerText.match(/current step (\d+)/i)?.[1]||'';
@@ -1866,7 +2032,8 @@
           await addDbg('[ext] SID retry: nameField=' + !!nameFieldR + ' val="' + (nameFieldR?.value||'').slice(0,15) + '" fullName=' + !!fullNameR);
         }
         if (didRetryName || nameFieldR?.value) {
-          nextBtn.click();
+          await closeWorkdayTransientMenus();
+          if (!(await trustedWorkdayClick(nextBtn, 'sid-name-retry'))) nextBtn.click();
           await new Promise(resolve => {
             let w2 = 0;
             const p2 = setInterval(() => {
@@ -2037,8 +2204,8 @@
       const cf = await pjaForceCountryField((job.profile && job.profile.country) || 'United States');
       if (cf) { await addDbg('[country] forced via fiber n=' + cf); await sleep(300); }
     }
-    if (typeof pjaForcePhoneField === 'function') {
-      const pf = await pjaForcePhoneField(profile.phone || job.profile?.phone || '');
+    if (typeof pjaForcePhoneField === 'function' && !/workday\.com|myworkdayjobs\.com/i.test(location.hostname)) {
+      const pf = await pjaForcePhoneField(/workday\.com|myworkdayjobs\.com/i.test(location.hostname) ? workdayPhoneNumberDigits(profile) : (profile.phone || job.profile?.phone || ''));
       if (pf) { await addDbg('[phone] forced via trusted typing n=' + pf); await sleep(300); }
     }
     if (/workday\.com|myworkdayjobs\.com/i.test(location.hostname)) {
@@ -2099,8 +2266,8 @@
       if (typeof pjaForceCountryField === "function") {
         try { await withTimeout(pjaForceCountryField((job.profile && job.profile.country) || 'United States'), 8000, 'country-postfill'); } catch (_) {}
       }
-      if (typeof pjaForcePhoneField === 'function') {
-        try { await withTimeout(pjaForcePhoneField(profile.phone || job.profile?.phone || ''), 8000, 'phone-postfill'); } catch (_) {}
+      if (typeof pjaForcePhoneField === 'function' && !/workday\.com|myworkdayjobs\.com/i.test(location.hostname)) {
+        try { await withTimeout(pjaForcePhoneField(/workday\.com|myworkdayjobs\.com/i.test(location.hostname) ? workdayPhoneNumberDigits(profile) : (profile.phone || job.profile?.phone || '')), 8000, 'phone-postfill'); } catch (_) {}
       }
       if (/workday\.com|myworkdayjobs\.com/i.test(location.hostname)) {
         const wdp = forceWorkdayPhoneNumberCommit(profile);
@@ -2108,6 +2275,8 @@
       }
       if (/workday\.com|myworkdayjobs\.com/i.test(location.hostname)) {
         try { await withTimeout(forceWorkdayPhoneCountryCode(), 15000, 'wd-phone-code-postfill'); } catch (_) {}
+        try { await withTimeout(forceWorkdayReferralSource(), 15000, 'wd-referral-source-postfill'); } catch (_) {}
+        try { await finalizeWorkdayMyInformation('postfill'); } catch (_) {}
       }
       if (typeof pjaForceAllPolicyReactSelects === 'function') {
         try { const pn = await withTimeout(pjaForceAllPolicyReactSelects(job.profile), 8000, 'policy-postfill'); if (pn) await addDbg('[policy-rs] post-AI committed n=' + pn); } catch (_) {}
@@ -2669,13 +2838,20 @@
   async function pjaFillWorkdayWorkExperience(profile) {
     if (!/workday\.com|myworkdayjobs\.com/i.test(location.hostname)) return 0;
     const qAll = (sel) => (typeof pjaQueryAll === 'function' ? pjaQueryAll(sel) : Array.from(document.querySelectorAll(sel)));
+    const hasUsefulTextValue = (el) => {
+      const v = String(el?.value || '').trim();
+      return !!v && !/^(mm|m{1,2}|dd|d{1,2}|yyyy|yy)$/i.test(v);
+    };
     const setText = (el, val) => {
-      if (!el || !val || el.value) return false;
+      if (!el || !val || hasUsefulTextValue(el)) return false;
       if (typeof pjaFillTextViaFiber === 'function') { try { pjaFillTextViaFiber(el, val); return true; } catch (_) {} }
       if (typeof pjaSetNative === 'function') { pjaSetNative(el, val); return true; }
       el.value = val; el.dispatchEvent(new Event('input', { bubbles: true })); return true;
     };
     const loc = profile.currentLocation || ((profile.city && profile.state) ? profile.city + ', ' + profile.state : '');
+    const hasWorkExperienceSection = Array.from(qAll('[data-automation-id]')).some(el =>
+      /^workExperience-/i.test(el.getAttribute('data-automation-id') || '')
+    ) || /\bWork Experience\b/i.test(document.body?.innerText || '');
 
     // Diagnostic: log every work-experience + date input so we can map exact automation-ids.
     const diag = Array.from(qAll('input,textarea,button')).filter(el => {
@@ -2713,19 +2889,59 @@
     });
     if (curCb && !curCb.checked) { curCb.click(); filled++; }
 
-    // From-date (and To-date if not "currently work here"): Workday renders MM + YYYY
-    // spinbutton inputs (dateSectionMonth-input / dateSectionYear-input). Fill the
-    // first pair = "From" date with the current job's start.
-    const startMonth = profile.currentStartMonth || '09';
-    const startYear  = profile.currentStartYear  || '2024';
-    const monthInputs = Array.from(qAll('input[data-automation-id="dateSectionMonth-input"]'));
-    const yearInputs  = Array.from(qAll('input[data-automation-id="dateSectionYear-input"]'));
-    if (monthInputs[0] && !monthInputs[0].value) { if (setText(monthInputs[0], startMonth)) filled++; }
-    if (yearInputs[0]  && !yearInputs[0].value)  { if (setText(yearInputs[0],  startYear))  filled++; }
+    // From-date (and To-date if not "currently work here"): Workday renders MM + DD + YYYY
+    // spinbutton inputs (dateSectionMonth-input / dateSectionDay-input / dateSectionYear-input).
+    // Fill the first set = "From" date with the current job's start. Workday may expose
+    // placeholders ("MM", "DD", "YYYY") as .value, so setText treats those as empty.
+    if (hasWorkExperienceSection) {
+      const startMonth = profile.currentStartMonth || '09';
+      const startDay = profile.currentStartDay || '01';
+      const startYear  = profile.currentStartYear  || '2024';
+      const monthInputs = Array.from(qAll('input[data-automation-id="dateSectionMonth-input"]'));
+      const dayInputs = Array.from(qAll('input[data-automation-id="dateSectionDay-input"]'));
+      const yearInputs  = Array.from(qAll('input[data-automation-id="dateSectionYear-input"]'));
+      if (monthInputs[0]) { if (setText(monthInputs[0], startMonth)) filled++; }
+      if (dayInputs[0]) { if (setText(dayInputs[0], startDay)) filled++; }
+      if (yearInputs[0])  { if (setText(yearInputs[0],  startYear))  filled++; }
+    }
 
     if (filled) {
       await new Promise(r => chrome.storage.local.get('pja_dbg', d => {
         const arr = (d.pja_dbg || []).slice(-19); arr.push('[WD] workExperience filled=' + filled); chrome.storage.local.set({ pja_dbg: arr }, r);
+      }));
+    }
+    return filled;
+  }
+
+  async function pjaFillWorkdaySelfIdentifyDate(profile) {
+    if (!/workday\.com|myworkdayjobs\.com/i.test(location.hostname)) return 0;
+    const pageTxt = document.body?.innerText || '';
+    if (!/self identify|self-identif|disability|public burden statement|omb control number/i.test(pageTxt)) return 0;
+    const qAll = (sel) => (typeof pjaQueryAll === 'function' ? pjaQueryAll(sel) : Array.from(document.querySelectorAll(sel)));
+    const monthInputs = Array.from(qAll('input[data-automation-id="dateSectionMonth-input"]'));
+    const dayInputs = Array.from(qAll('input[data-automation-id="dateSectionDay-input"]'));
+    const yearInputs = Array.from(qAll('input[data-automation-id="dateSectionYear-input"]'));
+    if (!monthInputs[0] && !dayInputs[0] && !yearInputs[0]) return 0;
+    const now = profile?.signatureDate ? new Date(profile.signatureDate) : new Date();
+    const mm = String(now.getMonth() + 1);
+    const dd = String(now.getDate());
+    const yyyy = String(now.getFullYear());
+    const setTextForce = (el, val) => {
+      if (!el || !val || String(el.value || '').trim() === String(val)) return false;
+      try { el.focus(); } catch (_) {}
+      if (typeof pjaFillTextViaFiber === 'function') { try { pjaFillTextViaFiber(el, val); return true; } catch (_) {} }
+      if (typeof pjaSetNative === 'function') { pjaSetNative(el, val); return true; }
+      el.value = val; el.dispatchEvent(new Event('input', { bubbles: true })); el.dispatchEvent(new Event('change', { bubbles: true })); return true;
+    };
+    let filled = 0;
+    if (monthInputs[0] && setTextForce(monthInputs[0], mm)) filled++;
+    if (dayInputs[0] && setTextForce(dayInputs[0], dd)) filled++;
+    if (yearInputs[0] && setTextForce(yearInputs[0], yyyy)) filled++;
+    if (filled) {
+      await new Promise(r => chrome.storage.local.get('pja_dbg', d => {
+        const arr = (d.pja_dbg || []).slice(-19);
+        arr.push('[WD] self-identify date filled=' + filled + ' value=' + mm + '/' + dd + '/' + yyyy);
+        chrome.storage.local.set({ pja_dbg: arr }, r);
       }));
     }
     return filled;
@@ -3712,7 +3928,10 @@
 
   function forceWorkdayPhoneNumberCommit(profile) {
     if (!/workday\.com|myworkdayjobs\.com/i.test(location.hostname)) return 0;
-    const digitsPhone = String(profile && profile.phone || '').replace(/\D/g, '');
+    const rawDigits = String(profile && profile.phone || '').replace(/\D/g, '');
+    // Workday stores country code separately; entering a leading US "1" in Phone Number can be
+    // rejected/cleared by the React validator even though the DOM briefly shows the value.
+    const digitsPhone = /^(?:1)?\d{10}$/.test(rawDigits) ? rawDigits.slice(-10) : rawDigits;
     if (!digitsPhone) return 0;
     let count = 0;
     const targets = pjaQueryAllExt(
@@ -3727,21 +3946,22 @@
     });
     for (const el of targets) {
       try {
-        if (typeof pjaFillTextViaFiber === 'function') pjaFillTextViaFiber(el, digitsPhone, false);
-        else if (typeof pjaSetNative === 'function') pjaSetNative(el, digitsPhone, false);
+        if (typeof pjaFillTextViaFiber === 'function') pjaFillTextViaFiber(el, digitsPhone, true);
+        else if (typeof pjaSetNative === 'function') pjaSetNative(el, digitsPhone, true);
         else {
           const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value')?.set;
           if (setter) setter.call(el, digitsPhone); else el.value = digitsPhone;
           el.dispatchEvent(new InputEvent('input', { bubbles: true, data: digitsPhone, inputType: 'insertText' }));
           el.dispatchEvent(new Event('change', { bubbles: true }));
         }
-        // Workday sometimes keeps the visible DOM value while the validation state remains stale
-        // until the actual field blurs. Do that only for the main phone number, never extension.
+        // Workday phone number rejects/clears valid national digits on blur in some tenants while
+        // never extension: the optional phone extension must not be touched by this helper.
+        // the country code is a separate committed chip. Keep the field focused and let the
+        // trusted insertText path above update React state without an immediate blur.
         try { el.focus(); } catch (_) {}
         el.dispatchEvent(new InputEvent('beforeinput', { bubbles: true, data: digitsPhone, inputType: 'insertText' }));
         el.dispatchEvent(new InputEvent('input', { bubbles: true, data: digitsPhone, inputType: 'insertText' }));
         el.dispatchEvent(new Event('change', { bubbles: true }));
-        try { el.blur(); } catch (_) {}
         count++;
       } catch (_) {}
     }
@@ -4076,6 +4296,15 @@
       '[aria-required="true"]:not([type=hidden]):not([type=file])'
     )) {
       if (!el.offsetParent && el.getBoundingClientRect().width === 0) continue;
+      if (/workday\.com|myworkdayjobs\.com/i.test(location.hostname)) {
+        if (el.closest('[data-automation-id="activeListContainer"], [role="listbox"]')) continue;
+        const wdMs = el.closest('[data-uxi-widget-type="multiselect"]');
+        if (wdMs) {
+          const selectedText = (wdMs.querySelector('[data-automation-id="selectedItemList"], [data-automation-id="selectedItem"], [data-automation-id="promptOption"], [data-automation-id="promptAriaInstruction"]')?.textContent || '')
+            .replace(/\s+/g, ' ').trim();
+          if (selectedText && !/^select one|select\.\.\./i.test(selectedText)) continue;
+        }
+      }
       const tag = el.tagName.toLowerCase();
       const role = (el.getAttribute('role') || '').toLowerCase();
       if (!['input','select','textarea'].includes(tag) && !['combobox','listbox','textbox'].includes(role)) continue;

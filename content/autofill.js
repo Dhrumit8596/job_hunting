@@ -2388,7 +2388,29 @@ async function pjaFillWorkdayPromptButtons(profile) {
     const label = (labelledBy || fieldLabel || ariaLabel.replace(/:\s*select one.*$/i, '') || '')
       .trim().replace(/\s+/g, ' ');
     const selected = (text || ariaLabel).trim();
-    const unresolved = /select one|required/i.test(selected + ' ' + ariaLabel);
+    const selectedWithoutLabel = (selected + ' ' + ariaLabel)
+      .replace(new RegExp(label.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'ig'), ' ')
+      .replace(/\brequired\b/ig, ' ')
+      .replace(/\s+/g, ' ')
+      .trim();
+    // Workday includes "Required" in the accessible text even after a value is committed
+    // ("State California Required"). Treat placeholder text or no value as unresolved; do not
+    // reopen already-committed prompt buttons just because the field is required.
+    const unresolved = /select one|select\.\.\.|choose/i.test(selected + ' ' + ariaLabel) || !selectedWithoutLabel;
+    const selectedLower = selectedWithoutLabel.toLowerCase();
+    const selectedFullLower = (selected + ' ' + ariaLabel).toLowerCase();
+    const selectedCountryOk = (() => {
+      const want = country.toLowerCase();
+      return !country || selectedLower === want ||
+        (/^united states$/i.test(country) && (selectedLower === 'united states of america' ||
+          /\bunited states of america\b/.test(selectedFullLower) || /\bunited states\b/.test(selectedFullLower)));
+    })();
+    const selectedStateOk = (() => {
+      if (!state) return true;
+      const t = selectedLower || selectedFullLower;
+      return (!!stateFull && (t === stateFull || t.startsWith(stateFull + ' ') || t.includes(' ' + stateFull + ' '))) ||
+        (!!stateAbbr && new RegExp('(^|\\s|[-(])' + stateAbbr.toLowerCase() + '(?:\\s|[-)]|$)').test(t));
+    })();
     if (/^degree\b/i.test(label) && unresolved) {
       const wantsBachelor = /bachelor|b\.\s*e\.?|undergraduate/i.test(degree);
       specs.push({ button, key: 'degree', match: txt => {
@@ -2397,7 +2419,7 @@ async function pjaFillWorkdayPromptButtons(profile) {
         const want = degree.toLowerCase().replace(/[’']/g, '');
         return t === want || t.includes(want);
       } });
-    } else if (/^(state|state\/region|administrative area)\b/i.test(label) && unresolved && state) {
+    } else if (/^(state|state\/region|administrative area)\b/i.test(label) && state && (!selectedStateOk || unresolved)) {
       specs.push({ button, key: 'state', match: txt => {
         const t = txt.toLowerCase();
         return (!!stateFull && (t === stateFull || t.startsWith(stateFull + ' ') || t.includes(' ' + stateFull + ' '))) ||
@@ -2409,10 +2431,10 @@ async function pjaFillWorkdayPromptButtons(profile) {
       // opens an unfiltered country list on some tenants and can commit the first row (Albania).
       continue;
     } else if (/how did you hear|where did you (hear|find)|referral source|source of (this )?application|\bsource\b/i.test(label) && unresolved) {
-      specs.push({ button, key: 'referralSource', match: txt => /linkedin|job board or social media|social media|job board|online|internet|external job board/i.test(txt) });
+      specs.push({ button, key: 'referralSource', match: txt => /linkedin|careers? website|company website|career site|indeed|job board or social media|social media|job board|online|internet|external job board/i.test(txt) });
     } else if (/^phone device type\b/i.test(label) && !new RegExp('\\b' + phoneType + '\\b', 'i').test(selected)) {
       specs.push({ button, key: 'phoneType', match: txt => new RegExp('^' + phoneType + '\\b', 'i').test(txt) });
-    } else if (/^country\b/i.test(label) && !/phone code/i.test(label) && unresolved && country) {
+    } else if (/^country\b/i.test(label) && !/phone code/i.test(label) && country && (!selectedCountryOk || unresolved)) {
       specs.push({ button, key: 'country', match: txt => {
         const t = txt.toLowerCase();
         const want = country.toLowerCase();
@@ -2459,12 +2481,28 @@ async function pjaFillWorkdayPromptButtons(profile) {
       const options = lists.flatMap(list => Array.from(list.querySelectorAll('[role="option"], [data-automation-id="promptOption"]')))
         .filter(opt => !opt.querySelector('[role="option"]') && opt.getAttribute('data-automation-id') !== 'selectedItem' &&
           !opt.closest('[data-automation-id="selectedItemList"]'));
+      if ((spec.key === 'country' || spec.key === 'state') && options.length) {
+        const phoneCodeRows = options.filter(opt => /\+\s*\d/.test(ownText(opt))).length;
+        // If a previously opened phone-code flyout is still visible, Workday can leave those
+        // options mounted while a country/state button has focus. Close the stale phone-code menu
+        // and retry the actual prompt instead of matching country/state against dial-code rows.
+        if (phoneCodeRows >= Math.max(2, Math.ceil(options.length * 0.6))) {
+          try {
+            document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', code: 'Escape', keyCode: 27, which: 27, bubbles: true, cancelable: true }));
+            if (document.activeElement && typeof document.activeElement.blur === 'function') document.activeElement.blur();
+          } catch (_) {}
+          await sleep(250);
+          await trustedClick(spec.button);
+          try { chrome.storage.local.get('pja_dbg', d => { const a=(d.pja_dbg||[]).slice(-160); a.push('[WD] prompt stale phone-code list cleared key='+spec.key); chrome.storage.local.set({pja_dbg:a}); }); } catch (_) {}
+          continue;
+        }
+      }
       lastOptions = options;
       match = options.find(opt => spec.match(ownText(opt))) || null;
     }
     if (!match) {
       if (spec.key === 'referralSource') {
-        match = lastOptions.find(opt => /linkedin|job board|social media|career site|company website|website|online|internet|other/i.test(ownText(opt))) ||
+        match = lastOptions.find(opt => /linkedin|careers? website|company website|career site|indeed|job board|social media|website|online|internet|other/i.test(ownText(opt))) ||
           lastOptions.find(opt => {
             const txt = ownText(opt);
             return txt && !/select one|clear|delete|selected/i.test(txt);

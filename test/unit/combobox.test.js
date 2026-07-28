@@ -96,12 +96,27 @@ module.exports = async (t) => {
     autofillSource.includes('country must precede state') &&
     autofillSource.includes('[WD] prompt no commit key='),
   'combobox: Workday prompt-button filler commits country before state and verifies selected button text');
+  t.ok(autofillSource.includes('selectedWithoutLabel') &&
+    autofillSource.includes('State California Required') &&
+    autofillSource.includes('reopen already-committed prompt buttons'),
+  'combobox: Workday prompt-button filler does not treat Required alone as an unresolved value');
+  t.ok(autofillSource.includes('selectedCountryOk') &&
+    autofillSource.includes('selectedStateOk') &&
+    autofillSource.includes('selectedFullLower') &&
+    autofillSource.includes('prompt stale phone-code list cleared key=') &&
+    autofillSource.includes('dial-code rows'),
+  'combobox: Workday prompt-button filler corrects wrong country/state values and ignores stale phone-code flyouts');
   t.ok(autofillSource.includes("key === 'phoneCountryCode' || key === 'referralSource'") &&
     autofillSource.includes('selected chip before resolving'),
   'combobox: Workday referral-source requires a committed selected chip, not just a scheduled click');
   t.ok(autofillSource.includes("key === 'referralSource' && /workday-fail|synthetic|fail/i") &&
     autofillSource.includes("'+cdp-' + fallback"),
   'combobox: Workday referral-source falls back to CDP option click after trusted click failure');
+  t.ok(autofillSource.includes('careers? website') &&
+    autofillSource.includes('company website') &&
+    autofillSource.includes('career site') &&
+    autofillSource.includes('indeed'),
+  'combobox: Workday referral-source can select careers/company-site options when LinkedIn is absent');
   t.ok(autofillSource.includes("key === 'country'") &&
     autofillSource.includes("t === 'united states of america' || t === 'united states'") &&
     autofillSource.includes("key !== 'country' && lv.length > 3"),

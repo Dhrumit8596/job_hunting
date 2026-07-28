@@ -51,6 +51,9 @@ module.exports = (t) => {
     externalSource.includes('[data-automation-id="selectedItemList"], [data-automation-id="selectedItem"], [data-automation-id="promptOption"]') &&
     externalSource.includes('const selected = wdSelectedText(ms)'),
   'external-apply: Workday selected-value checks accept selectedItem/promptOption-only DOMs');
+  t.ok(externalSource.includes("el.closest('[data-uxi-widget-type=\"multiselect\"]') ||") &&
+    externalSource.includes("el.closest('[data-automation-id^=\"formField\"], fieldset')"),
+  'external-apply: Workday diagnostics read selected chips from the multiselect container before shallow wrappers');
   t.ok(externalSource.includes('United States of America (+1)') &&
     externalSource.includes('\\d+\\s*item selected') &&
     externalSource.includes('phone.{0,30}(country|territory).{0,30}code|dial'),
@@ -59,6 +62,16 @@ module.exports = (t) => {
     externalSource.includes('post-prompt text refill done') &&
     externalSource.includes('Country/state prompt commits can trigger Workday to re-render and clear downstream address'),
   'external-apply: Workday re-fills text fields after country/state prompt commits');
+  t.ok(externalSource.includes('const finalizeWorkdayMyInformation = async (label) =>') &&
+    externalSource.includes('[WD-MYINFO]') &&
+    externalSource.includes('wd-myinfo-prompts-') &&
+    externalSource.includes('workdayMyInfoCommitGaps') &&
+    externalSource.includes("await finalizeWorkdayMyInformation('pre-click-' + steps)") &&
+    externalSource.includes("await trustedWorkdayClick(reNext, 'validation-retry')") &&
+    externalSource.includes('const trustedWorkdayEnter = async (el, label) =>') &&
+    externalSource.includes("type: 'WORKDAY_TRUSTED_ENTER'") &&
+    externalSource.includes("trustedWorkdayEnter(reNext, 'blocked-retry-' + label)"),
+  'external-apply: Workday My Information state is finalized and trusted-clicked before Save/Continue retries');
   t.ok(externalSource.includes("const isPhoneById = /^(phone|phoneNumber)$/i") &&
     externalSource.includes("el.name || ''") &&
     externalSource.includes("(phone\\s*)?extension"),
@@ -67,10 +80,33 @@ module.exports = (t) => {
     externalSource.includes('phoneNumber(?:--phoneNumber)?') &&
     externalSource.includes('never extension') &&
     externalSource.includes('postfill phoneNumber commit'),
-  'external-apply: Workday forces/blur-commits the real phone number field without filling phone extension');
+  'external-apply: Workday force-commits the real phone number field without filling phone extension');
+  t.ok(externalSource.includes('const workdayPhoneNumberDigits = (sourceProfile) =>') &&
+    externalSource.includes('raw.slice(-10)') &&
+    externalSource.includes('Workday stores country code separately') &&
+    externalSource.includes('getBoundingClientRect()') &&
+    externalSource.includes('forceWorkdayPhoneNumberTrustedCommit') &&
+    externalSource.includes("type: 'WORKDAY_SET_SID'") &&
+    externalSource.includes('without an immediate blur'),
+  'external-apply: Workday phone-number commit uses national digits, visible input verification, and trusted insertText without blur');
+  t.ok(externalSource.includes('const hasUsefulTextValue = (el) =>') &&
+    externalSource.includes('const hasWorkExperienceSection =') &&
+    externalSource.includes('dateSectionDay-input') &&
+    externalSource.includes("const startDay = profile.currentStartDay || '01'") &&
+    externalSource.includes('placeholders ("MM", "DD", "YYYY")'),
+  'external-apply: Workday work-experience dates fill day, overwrite placeholders, and stay scoped to Work Experience');
+  t.ok(externalSource.includes('async function pjaFillWorkdaySelfIdentifyDate(profile)') &&
+    externalSource.includes('public burden statement|omb control number') &&
+    externalSource.includes("profile?.signatureDate ? new Date(profile.signatureDate) : new Date()") &&
+    externalSource.includes('[WD] self-identify date filled='),
+  'external-apply: Workday Self Identify signature date uses the current date and can overwrite stale values');
   t.ok(externalSource.includes('pjaFillCombobox(el, profile.referralSource') &&
     externalSource.includes('source--source') &&
-    externalSource.includes("window._pjaComboChain.catch"),
+    externalSource.includes("window._pjaComboChain.catch") &&
+    externalSource.includes('Careers Website') &&
+    externalSource.includes('const referralCommitted = text =>') &&
+    externalSource.includes('facebook') &&
+    externalSource.includes('await closeWorkdayTransientMenus()'),
   'external-apply: Workday referral-source force path commits selectinput fields, not only button prompts');
   t.ok(externalSource.includes('recoverSmartRecruitersEmptyStep') &&
     externalSource.includes('[SR] empty SPA step after advance; waiting for hydrated form') &&
@@ -106,10 +142,24 @@ module.exports = (t) => {
   'external-apply: Workday pending-apply context is written before Gmail verification starts');
   t.ok(externalSource.includes('description entry → applyManually nav attempt=') &&
     externalSource.includes("cleanUrl + '/apply/applyManually'") &&
+    externalSource.includes('continue application') &&
     externalSource.includes("pja_wd_desc_manual_nav_") &&
     externalSource.includes('navs < 6') &&
     externalSource.includes('location.replace(retryUrl)'),
-  'external-apply: Workday job-description pages with Apply controls navigate to applyManually before no_submit');
+  'external-apply: Workday job-description pages with Apply/Continue controls navigate to applyManually before no_submit');
+  t.ok(externalSource.includes('empty step shell; waiting for hydration before recovery') &&
+    externalSource.includes('empty step shell hydrated; re-entering fill path') &&
+    externalSource.includes('empty step shell persisted; reloading apply route once') &&
+    !externalSource.includes('back-to-job-posting'),
+  'external-apply: Workday empty step shell waits/reloads instead of immediately clicking Back to Job Posting');
+  t.ok(externalSource.includes("const retryKey = 'pja_wd_block_retry_' + (job.runId || 'norun')") &&
+    externalSource.includes("(reasonHint || 'blocked')") &&
+    externalSource.includes("(stepBefore || 'nostep')"),
+  'external-apply: Workday blocked retry key is scoped by runId and recovery phase so fresh retries are not suppressed');
+  t.ok(externalSource.includes('promptAriaInstruction') &&
+    externalSource.includes("el.closest('[data-automation-id=\"activeListContainer\"], [role=\"listbox\"]')") &&
+    externalSource.includes("el.closest('[data-uxi-widget-type=\"multiselect\"]')"),
+  'external-apply: required-field AI collector skips Workday generated multiselect/listbox search inputs');
   t.ok(externalSource.includes('const workdayComboKeyFor = f =>') &&
     externalSource.includes("return 'phoneCountryCode'") &&
     externalSource.includes("return 'referralSource'") &&
