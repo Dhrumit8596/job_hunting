@@ -60,6 +60,24 @@ h1 { font-size: 22px; font-weight: 700; color: #111827; }
 .btn-sm { padding: 4px 10px; font-size: 12px; }
 .btn:disabled { opacity: .5; cursor: default; }
 
+/* Ranked apply launcher */
+.ranked-apply-panel {
+  background: #fff; border: 1px solid #e5e7eb; border-radius: 12px;
+  padding: 14px; margin: 12px 0 16px; box-shadow: 0 1px 3px rgba(0,0,0,.06);
+}
+.ranked-title { font-size: 14px; font-weight: 800; color: #111827; }
+.ranked-help { font-size: 12px; color: #6b7280; margin-top: 2px; }
+.ranked-controls { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-top: 10px; }
+.ranked-controls label { font-size: 12px; color: #374151; display: flex; align-items: center; gap: 4px; }
+.ranked-controls input { width: 58px; padding: 5px 6px; border: 1px solid #d1d5db; border-radius: 6px; }
+#ranked-queries {
+  width: 100%; margin-top: 10px; padding: 8px; border: 1px solid #d1d5db; border-radius: 8px;
+  font-size: 12px; font-family: inherit; resize: vertical;
+}
+.ranked-status { min-height: 18px; margin-top: 8px; font-size: 12px; color: #4b5563; white-space: pre-wrap; }
+.ranked-status.ok { color: #047857; }
+.ranked-status.err { color: #b91c1c; }
+
 /* Status badge */
 .status-badge { font-size: 11px; padding: 2px 8px; border-radius: 20px; font-weight: 600; }
 .badge-pending  { background: #f3f4f6; color: #6b7280; }

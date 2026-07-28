@@ -350,6 +350,81 @@ function loadCorpusBanner() {
   });
 }
 
+// ── Ranked apply launcher (/apply-all) ───────────────────────────────────────
+function rankedQueries() {
+  const raw = document.getElementById('ranked-queries')?.value || '';
+  return raw.split(/[\n,]+/).map(s => s.trim()).filter(Boolean);
+}
+
+function rankedNumber(id, fallback, min, max) {
+  const n = Number(document.getElementById(id)?.value);
+  if (!Number.isFinite(n)) return fallback;
+  return Math.max(min, Math.min(max, Math.round(n)));
+}
+
+function setRankedStatus(text, cls = '') {
+  const el = document.getElementById('ranked-status');
+  if (!el) return;
+  el.className = 'ranked-status' + (cls ? ' ' + cls : '');
+  el.textContent = text || '';
+}
+
+async function callApplyAll({ dryRun }) {
+  const target = rankedNumber('ranked-target', 30, 1, 200);
+  const batch = rankedNumber('ranked-batch', 5, 1, 25);
+  const threshold = rankedNumber('ranked-threshold', 60, 0, 100);
+  const maxGaps = rankedNumber('ranked-max-gaps', 4, 0, 10);
+  const body = {
+    dryRun,
+    targetConfirmed: target,
+    dailyCap: target,
+    attemptCap: dryRun ? Math.max(batch, target) : batch,
+    threshold,
+    maxGaps,
+    requireEvidence: true,
+    includeAssisted: true,
+    e2eSafe: true,
+    perCompanyCap: 2,
+    sourceTarget: Math.max(120, target * 8),
+    previewLimit: target,
+    queries: rankedQueries(),
+  };
+  const resp = await fetch('http://localhost:6174/apply-all', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  const data = await resp.json();
+  if (!resp.ok || !data.success) throw new Error((data.apply && data.apply.error) || data.error || 'apply-all failed');
+  return data;
+}
+
+function summarizeApplyAll(data) {
+  const a = data.apply || {};
+  const top = (a.top || []).slice(0, 8).map(j => `• ${j.company} — ${j.title} (${j.fit ?? '?'}%)`).join('\n');
+  const counts = a.byChannel ? `external ${a.byChannel.external || 0}, LinkedIn ${a.byChannel.linkedin_easy_apply || 0}, Indeed ${a.byChannel.indeed_apply || 0}` : '';
+  if (a.dryRun) return `Plan ready: ${a.planned || 0} jobs. ${counts}${top ? '\n' + top : ''}`;
+  return `Apply batch started: run ${a.runId || '(unknown)'} · ${a.planned || 0} jobs. ${counts}`;
+}
+
+function wireRankedApplyLauncher() {
+  document.getElementById('btn-ranked-plan')?.addEventListener('click', async () => {
+    try {
+      setRankedStatus('Planning top jobs…');
+      const data = await callApplyAll({ dryRun: true });
+      setRankedStatus(summarizeApplyAll(data), 'ok');
+    } catch (e) { setRankedStatus(e.message || String(e), 'err'); }
+  });
+  document.getElementById('btn-ranked-apply')?.addEventListener('click', async () => {
+    try {
+      setRankedStatus('Starting apply batch…');
+      const data = await callApplyAll({ dryRun: false });
+      setRankedStatus(summarizeApplyAll(data), 'ok');
+    } catch (e) { setRankedStatus(e.message || String(e), 'err'); }
+  });
+}
+
 // ── Init ──────────────────────────────────────────────────────────────────────
 load();
 loadCorpusBanner();
+wireRankedApplyLauncher();
