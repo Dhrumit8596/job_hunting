@@ -340,6 +340,24 @@ Inspect an active application run:
 curl http://localhost:6174/inspect-apply
 ```
 
+Source broadly and apply across all supported channels:
+
+```bash
+curl -s -X POST http://localhost:6174/apply-all \
+  -H 'Content-Type: application/json' \
+  --data '{
+    "targetConfirmed":20,
+    "threshold":70,
+    "perCompanyCap":2,
+    "includeAssisted":true,
+    "e2eSafe":true
+  }' | jq .
+```
+
+Use `/apply-all` for normal batches. It runs `/source-v2` first, then `/apply-run`, so it can route
+eligible jobs through LinkedIn Easy Apply, Indeed Apply, and external ATS/company-site flows. Use
+`/start-ea` only when you explicitly want LinkedIn Easy Apply only.
+
 Plan a Greenhouse-only dry run without submitting:
 
 ```bash
@@ -405,6 +423,7 @@ Common endpoints:
 | `/analyze` | POST | Scores one job. |
 | `/batch-score` | POST | Scores a batch of jobs. |
 | `/answer-questions` | POST | Generates factual answers for application questions. |
+| `/apply-all` | POST | Sources jobs and starts a ranked application run across all supported channels. |
 | `/source-v2` | POST | Builds/imports a sourced job corpus. |
 | `/apply-run` | POST | Starts a ranked application run from the corpus. |
 | `/inspect-apply` | GET | Returns sanitized active-run diagnostics. |

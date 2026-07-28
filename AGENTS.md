@@ -49,7 +49,13 @@ This seeds `pja_ext_queue` + `pja_ext_current` into storage and opens the first 
 | `/analyze` | POST | Single job fit score (`{title, company, description}`) |
 | `/batch-score` | POST | Up to 10 jobs in one Codex call |
 | `/outreach` | POST | Generates DM + email for a job + person |
+| `/apply-all` | POST | Default broad apply command: runs `/source-v2` then `/apply-run` across LinkedIn Easy Apply, Indeed Apply, and external ATS/company-site jobs |
+| `/source-v2` | POST | Builds/imports the normalized sourced job corpus |
+| `/apply-run` | POST | Starts a ranked application run from the corpus |
 | `/set-storage` | POST | `chrome.storage.local.set(body)` — body is passed **flat**, not nested |
+
+Use `/apply-all` for “apply N jobs” requests. Use `/start-ea` only for a deliberately
+LinkedIn-Easy-Apply-only batch.
 
 **`/set-storage` gotcha:** the body JSON is passed directly to `chrome.storage.local.set()`. Send `{"pja_ext_queue": {...}}`, NOT `{"data": {"pja_ext_queue": {...}}}`.
 

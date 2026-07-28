@@ -109,6 +109,25 @@ const CORS = {
   'Content-Type': 'application/json'
 };
 
+async function postLocalJson(pathname, body, timeoutMs = 300000) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const resp = await fetch(`http://127.0.0.1:${PORT}${pathname}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body || {}),
+      signal: controller.signal,
+    });
+    const text = await resp.text();
+    let data;
+    try { data = text ? JSON.parse(text) : {}; } catch (_) { data = { raw: text }; }
+    return { ok: resp.ok, status: resp.status, data };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 function gateScoredApplyJobs(inputJobs, opts = {}) {
   const jobs = Array.isArray(inputJobs) ? inputJobs.filter(Boolean) : [];
   const rawThreshold = opts.threshold == null ? 55 : Number(opts.threshold);
@@ -979,6 +998,72 @@ ${(description || '').slice(0, 6000)}`;
             .map(j => ({ score: j.fitScore, company: j.company, title: j.title, location: j.location })) }));
       } catch (e) {
         console.error('[PJA] /source error:', e.message);
+        res.writeHead(500, CORS);
+        res.end(JSON.stringify({ success: false, error: e.message }));
+      }
+    });
+    return;
+  }
+
+  // ── /apply-all: safe full-flow wrapper for normal use ──────────────────────
+  // Runs broad sourcing first, then the unified ranked driver. Prefer this over
+  // /start-ea for "apply N jobs" because /start-ea is LinkedIn Easy Apply only.
+  // body supports:
+  //   {
+  //     targetConfirmed:20, threshold:70, sourceTarget:160, perCompanyCap:2,
+  //     includeAssisted:true, e2eSafe:true, source:false, dryRun:false, ...
+  //   }
+  // Unrecognized top-level fields are forwarded to /apply-run, so callers can still use
+  // atsAllow, companyDeny, titleDeny, candidateIds, stopBeforeSubmit, force, etc.
+  if (req.method === 'POST' && req.url === '/apply-all') {
+    let body = '';
+    req.on('data', d => body += d);
+    req.on('end', async () => {
+      try {
+        const o = body ? JSON.parse(body) : {};
+        const targetConfirmed = o.targetConfirmed != null ? Math.max(1, Number(o.targetConfirmed) || 1)
+          : (o.dailyCap != null ? Math.max(1, Number(o.dailyCap) || 1) : 20);
+        const sourceTarget = o.sourceTarget != null ? Math.max(1, Number(o.sourceTarget) || 1)
+          : Math.max(120, targetConfirmed * 8);
+        const sourceBody = {
+          target: sourceTarget,
+          write: o.sourceWrite !== false,
+        };
+        if (o.maxBrowserAgeMs != null) sourceBody.maxBrowserAgeMs = Number(o.maxBrowserAgeMs);
+        const applyBody = Object.assign({}, o, {
+          targetConfirmed,
+          dailyCap: o.dailyCap != null ? o.dailyCap : targetConfirmed,
+          threshold: o.threshold != null ? o.threshold : 70,
+          rescore: o.rescore !== false,
+          requireEvidence: o.requireEvidence !== false,
+          includeAssisted: o.includeAssisted !== false,
+          perCompanyCap: o.perCompanyCap != null ? o.perCompanyCap : 2,
+          e2eSafe: o.e2eSafe !== false,
+        });
+        delete applyBody.source;
+        delete applyBody.sourceTarget;
+        delete applyBody.sourceWrite;
+        delete applyBody.maxBrowserAgeMs;
+
+        let sourceResp = { ok: true, skipped: true, status: 200, data: { note: 'source:false' } };
+        if (o.source !== false) {
+          sourceResp = await postLocalJson('/source-v2', sourceBody, Number(o.sourceTimeoutMs) || 300000);
+          if (!sourceResp.ok || sourceResp.data && sourceResp.data.success === false) {
+            res.writeHead(sourceResp.status || 502, CORS);
+            res.end(JSON.stringify({ success: false, stage: 'source-v2', sourceOptions: sourceBody,
+              source: sourceResp.data }));
+            return;
+          }
+        }
+
+        const applyResp = await postLocalJson('/apply-run', applyBody, Number(o.applyTimeoutMs) || 600000);
+        res.writeHead(applyResp.status || (applyResp.ok ? 200 : 502), CORS);
+        res.end(JSON.stringify({ success: !!(applyResp.ok && (!applyResp.data || applyResp.data.success !== false)),
+          sourceOptions: sourceBody, applyOptions: applyBody,
+          source: sourceResp.data, apply: applyResp.data }));
+        console.log(`[PJA] /apply-all: source=${o.source === false ? 'skipped' : 'done'} applyStatus=${applyResp.status}`);
+      } catch (e) {
+        console.error('[PJA] /apply-all error:', e.message);
         res.writeHead(500, CORS);
         res.end(JSON.stringify({ success: false, error: e.message }));
       }
