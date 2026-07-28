@@ -10,7 +10,8 @@
     "activeTab",
     "tabs",
     "debugger",
-    "notifications"
+    "notifications",
+    "unlimitedStorage"
   ],
   "host_permissions": [
     "*://*.linkedin.com/*",

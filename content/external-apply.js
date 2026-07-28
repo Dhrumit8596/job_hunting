@@ -1345,6 +1345,28 @@
     };
     const forceWorkdayReferralSource = async () => {
       if (!/workday\.com|myworkdayjobs\.com/i.test(location.hostname)) return 0;
+      let filled = 0;
+      if (typeof pjaFillCombobox === 'function') {
+        const inputs = pjaQueryAllExt('input[data-uxi-widget-type="selectinput"], input[role="combobox"]').filter(el => {
+          const id = el.id || el.name || el.getAttribute('data-automation-id') || '';
+          const label = (typeof getLabelFor === 'function' ? getLabelFor(el) : '') || el.getAttribute('aria-label') || id || '';
+          const fieldText = (el.closest('[data-automation-id^="formField-"], [data-uxi-widget-type="multiselect"], div')?.textContent || '')
+            .replace(/\s+/g, ' ');
+          const text = [id, label, fieldText].join(' ');
+          if (!/source--source/i.test(id) && !/how did you hear|referral source|source of (this )?application|\bsource\b/i.test(text)) return false;
+          const selected = (el.closest('[data-uxi-widget-type="multiselect"]')
+            ?.querySelector('[data-automation-id="selectedItemList"], [data-automation-id="selectedItem"], [data-automation-id="promptOption"]')
+            ?.textContent || '').trim();
+          return !/linkedin|job board|social media|online|internet|career/i.test(selected);
+        });
+        for (const el of inputs) {
+          pjaFillCombobox(el, profile.referralSource || 'LinkedIn', 'referralSource');
+          filled++;
+        }
+        if (inputs.length && window._pjaComboChain && typeof window._pjaComboChain.then === 'function') {
+          await Promise.race([window._pjaComboChain.catch(() => {}), sleep(12000)]);
+        }
+      }
       const buttons = pjaQueryAllExt('button, [role="button"]').filter(btn => {
         const id = btn.id || btn.getAttribute('data-automation-id') || '';
         const label = (typeof getLabelFor === 'function' ? getLabelFor(btn) : '') || btn.getAttribute('aria-label') || id || btn.textContent || '';
@@ -1352,7 +1374,6 @@
         const selected = (btn.textContent || btn.getAttribute('aria-label') || '').trim();
         return btn.getAttribute('aria-invalid') === 'true' || !selected || /select one|select\.\.\.|required/i.test(selected);
       });
-      let filled = 0;
       const ownText = opt => {
         const clone = opt.cloneNode(true);
         clone.querySelectorAll('[role="option"]').forEach(child => child.remove());
@@ -2020,6 +2041,10 @@
       const pf = await pjaForcePhoneField(profile.phone || job.profile?.phone || '');
       if (pf) { await addDbg('[phone] forced via trusted typing n=' + pf); await sleep(300); }
     }
+    if (/workday\.com|myworkdayjobs\.com/i.test(location.hostname)) {
+      const wdp = forceWorkdayPhoneNumberCommit(profile);
+      if (wdp) { await addDbg('[WD] forced phoneNumber commit n=' + wdp); await sleep(250); }
+    }
     if (/greenhouse\.io/i.test(location.hostname) && typeof pjaFillGreenhouseEducation === 'function') {
       await addDbg('[gh-edu] pre-check pass');
       await withTimeout(pjaFillGreenhouseEducation(profile), 45000, 'gh-edu-precheck');
@@ -2076,6 +2101,10 @@
       }
       if (typeof pjaForcePhoneField === 'function') {
         try { await withTimeout(pjaForcePhoneField(profile.phone || job.profile?.phone || ''), 8000, 'phone-postfill'); } catch (_) {}
+      }
+      if (/workday\.com|myworkdayjobs\.com/i.test(location.hostname)) {
+        const wdp = forceWorkdayPhoneNumberCommit(profile);
+        if (wdp) { await addDbg('[WD] postfill phoneNumber commit n=' + wdp); await sleep(250); }
       }
       if (/workday\.com|myworkdayjobs\.com/i.test(location.hostname)) {
         try { await withTimeout(forceWorkdayPhoneCountryCode(), 15000, 'wd-phone-code-postfill'); } catch (_) {}
@@ -3662,6 +3691,7 @@
       if (!el.offsetParent || el.value.trim()) continue;
       const label = getLabelFor(el);
       if (!label) continue;
+      if (/\b(phone\s*)?extension\b|--extension\b/i.test([label, el.id, el.name].join(' '))) continue;
       const key = typeof pjaClassify === 'function' ? pjaClassify(label) : null;
       const isPhoneById = /^(phone|phoneNumber)$/i.test(el.id || '') || /^(phone|phoneNumber)$/i.test(el.name || '');
       if (key === 'phone' || el.type === 'tel' || isPhoneById) {
@@ -3678,6 +3708,44 @@
         }
       }
     }
+  }
+
+  function forceWorkdayPhoneNumberCommit(profile) {
+    if (!/workday\.com|myworkdayjobs\.com/i.test(location.hostname)) return 0;
+    const digitsPhone = String(profile && profile.phone || '').replace(/\D/g, '');
+    if (!digitsPhone) return 0;
+    let count = 0;
+    const targets = pjaQueryAllExt(
+      'input:not([type=hidden]):not([type=file]):not([type=submit]):not([type=button]):not([type=checkbox]):not([type=radio])'
+    ).filter(el => {
+      if (!el.offsetParent) return false;
+      const text = [getLabelFor(el), el.id, el.name].join(' ');
+      if (/\b(phone\s*)?extension\b|--extension\b/i.test(text)) return false;
+      if (el.getAttribute('data-uxi-widget-type') === 'selectinput' || el.getAttribute('role') === 'combobox') return false;
+      return /^phoneNumber(?:--phoneNumber)?$/i.test(el.id || '') ||
+        /^phoneNumber(?:--phoneNumber)?$/i.test(el.name || '');
+    });
+    for (const el of targets) {
+      try {
+        if (typeof pjaFillTextViaFiber === 'function') pjaFillTextViaFiber(el, digitsPhone, false);
+        else if (typeof pjaSetNative === 'function') pjaSetNative(el, digitsPhone, false);
+        else {
+          const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value')?.set;
+          if (setter) setter.call(el, digitsPhone); else el.value = digitsPhone;
+          el.dispatchEvent(new InputEvent('input', { bubbles: true, data: digitsPhone, inputType: 'insertText' }));
+          el.dispatchEvent(new Event('change', { bubbles: true }));
+        }
+        // Workday sometimes keeps the visible DOM value while the validation state remains stale
+        // until the actual field blurs. Do that only for the main phone number, never extension.
+        try { el.focus(); } catch (_) {}
+        el.dispatchEvent(new InputEvent('beforeinput', { bubbles: true, data: digitsPhone, inputType: 'insertText' }));
+        el.dispatchEvent(new InputEvent('input', { bubbles: true, data: digitsPhone, inputType: 'insertText' }));
+        el.dispatchEvent(new Event('change', { bubbles: true }));
+        try { el.blur(); } catch (_) {}
+        count++;
+      } catch (_) {}
+    }
+    return count;
   }
 
   function findMissingRequired() {

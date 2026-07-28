@@ -2545,6 +2545,10 @@ function pjaFillForm(profile, answers) {
     if (/^iti-\d+__search-input$/i.test(el.id || '') ||
         (el.type === 'search' && el.closest('[class*="iti"]'))) return;
     const rawLabel = pjaGetLabel(el);
+    // Phone extension is optional on common ATSes and must never receive the primary phone number.
+    // Workday wraps extension under the broader "Phone" section, so classify-by-parent-text can
+    // otherwise misclassify it as the main phone field.
+    if (/\b(phone\s*)?extension\b|--extension\b/i.test([rawLabel, el.id, el.name].join(' '))) return;
     let wdForcedKey = null;
     if (/workday\.com|myworkdayjobs\.com/i.test(location.hostname) &&
         el.getAttribute('data-uxi-widget-type') === 'selectinput') {
@@ -3042,6 +3046,7 @@ window.pjaForceCountryField = pjaForceCountryField;
 // and keeps the widget's internal state in sync. Returns the number of phone fields typed.
 function pjaIsPhoneFieldDescriptor(type, id, name, label) {
   const text = [label, name, id].filter(Boolean).join(' ');
+  if (/\b(phone\s*)?extension\b|--extension\b/i.test(text)) return false;
   if (/^phoneNumber$/i.test(String(name || '')) || /^phoneNumber$/i.test(String(id || ''))) return true;
   if (/(country|territory).{0,60}phone.{0,30}code|phone.{0,30}(country|territory).{0,30}code|dial(?:ing|ling) code|phone device type|phone type|phone extension/i.test(text)) {
     return false;

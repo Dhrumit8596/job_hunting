@@ -107,10 +107,11 @@ module.exports = async (t) => {
     autofillSource.includes("key !== 'country' && lv.length > 3"),
   'combobox: country selection uses exact United States matching, not substring matching');
   t.ok(autofillSource.includes('phone device type|phone type|phone extension') &&
+    autofillSource.includes("(phone\\s*)?extension") &&
     autofillSource.includes('^phoneNumber$') &&
     autofillSource.includes("inp.getAttribute('data-uxi-widget-type') === 'selectinput'") &&
     autofillSource.includes("inp.getAttribute('role') === 'combobox'"),
-  'combobox: forced phone-number typing excludes Workday phone-code/type combobox controls');
+  'combobox: forced phone-number typing excludes Workday phone-code/type/extension controls');
   t.ok(autofillSource.includes('Even when DOM digits are visible, React/Greenhouse can keep the validated field state empty') &&
     autofillSource.includes("pjaFillTextViaFiber(inp, digits, true)") &&
     autofillSource.includes("new InputEvent('beforeinput'"),

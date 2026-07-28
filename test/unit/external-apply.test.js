@@ -60,8 +60,18 @@ module.exports = (t) => {
     externalSource.includes('Country/state prompt commits can trigger Workday to re-render and clear downstream address'),
   'external-apply: Workday re-fills text fields after country/state prompt commits');
   t.ok(externalSource.includes("const isPhoneById = /^(phone|phoneNumber)$/i") &&
-    externalSource.includes("el.name || ''"),
-  'external-apply: Workday retry phone fill recognizes name/id=phoneNumber even when surrounding label mentions phone code');
+    externalSource.includes("el.name || ''") &&
+    externalSource.includes("(phone\\s*)?extension"),
+  'external-apply: Workday retry phone fill recognizes name/id=phoneNumber and excludes extension controls');
+  t.ok(externalSource.includes('function forceWorkdayPhoneNumberCommit') &&
+    externalSource.includes('phoneNumber(?:--phoneNumber)?') &&
+    externalSource.includes('never extension') &&
+    externalSource.includes('postfill phoneNumber commit'),
+  'external-apply: Workday forces/blur-commits the real phone number field without filling phone extension');
+  t.ok(externalSource.includes('pjaFillCombobox(el, profile.referralSource') &&
+    externalSource.includes('source--source') &&
+    externalSource.includes("window._pjaComboChain.catch"),
+  'external-apply: Workday referral-source force path commits selectinput fields, not only button prompts');
   t.ok(externalSource.includes('recoverSmartRecruitersEmptyStep') &&
     externalSource.includes('[SR] empty SPA step after advance; waiting for hydrated form') &&
     externalSource.includes("reason: 'no_submit_after_spa', fields: ['smartrecruiters_empty_step']") &&
