@@ -3344,9 +3344,7 @@
       const disInputs = Array.from(disField.querySelectorAll('input[type="checkbox"], input[type="radio"]'));
       for (const cb of disInputs) {
         const lbl = document.querySelector('label[for="'+cb.id+'"]');
-        const fieldText = (disField.innerText || disField.textContent || '').replace(/\s+/g, ' ');
-        const fallbackNoCheckbox = !lbl && /no|do not|don.t/i.test(dis) && disInputs.length === 3 && cb === disInputs[1] &&
-          /yes[\s\S]{0,120}no[\s\S]{0,160}(do not want|not answer)/i.test(fieldText);
+        const fallbackNoCheckbox = !lbl && /no|do not|don.t/i.test(dis) && disInputs.length === 3 && cb === disInputs[1];
         if ((lbl && targetRe.test(lbl.textContent)) || fallbackNoCheckbox) {
           const nativeChecked = Object.getOwnPropertyDescriptor(
             cb instanceof HTMLInputElement ? HTMLInputElement.prototype : Object.getPrototypeOf(cb), 'checked'
@@ -3362,7 +3360,6 @@
             try { nativeChecked ? nativeChecked.call(cb, true) : (cb.checked = true); } catch (_) { cb.checked = true; }
             cb.dispatchEvent(new InputEvent('input', { bubbles: true, composed: true }));
             cb.dispatchEvent(new Event('change', { bubbles: true, composed: true }));
-            cb.dispatchEvent(new MouseEvent('click', { bubbles: true, composed: true, cancelable: true }));
           }
           const labelText = lbl ? lbl.textContent.trim() : 'No disability fallback option 2';
           log.push('disability→' + labelText.slice(0, 35) + (disInvalid ? ' forced-invalid' : ''));

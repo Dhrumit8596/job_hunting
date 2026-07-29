@@ -122,6 +122,9 @@ module.exports = (t) => {
     externalSource.includes('disInputs.length === 3') &&
     externalSource.includes('cb === disInputs[1]'),
   'external-apply: Workday disability group can select standard No option when labels lack for= bindings');
+  t.ok(!externalSource.includes("cb.dispatchEvent(new MouseEvent('click'") &&
+    externalSource.includes("cb.dispatchEvent(new Event('change'"),
+  'external-apply: Workday disability force commit does not toggle checkbox back off with synthetic click');
   t.ok(externalSource.includes('profile.hispanicOrLatino = ans') &&
     externalSource.includes('fallbackHispanicAnswer') &&
     externalSource.includes('not hispanic|not latino') &&
