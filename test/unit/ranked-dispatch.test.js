@@ -87,6 +87,13 @@ module.exports = async (t) => {
     gmailSource.includes('Math.min(rows.length, 10)'),
   'generic Gmail code recovery stores the query, retries search from inbox, and scans enough result rows');
 
+  t.ok(gmailSource.includes('const decodeGmailHref = (href) =>') &&
+    gmailSource.includes("for (const key of ['url', 'q', 'u'])") &&
+    gmailSource.includes('looksVerification') &&
+    gmailSource.includes('looksOnlyApplicationReceipt') &&
+    gmailSource.includes('contextualLink'),
+  'Workday Gmail verification unwraps Gmail redirect links and accepts contextual Workday account links');
+
   t.ok(source.includes("chrome.storage.local.remove(['pja_email_code_result', 'pja_navigate_to']") &&
     source.includes('chrome.tabs.query({ url: `https://mail.google.com/mail/${acctPath}/*` }') &&
     source.includes("chrome.tabs.update(tab.id, { active: true })"),

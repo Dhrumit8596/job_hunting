@@ -248,6 +248,7 @@ module.exports = (t) => {
   t.eq(a('How did you hear about us?'), 'LinkedIn', 'Workday source question -> referral source');
   t.eq(a('State and federal law require Abbott to track and report certain payments and transfers of value provided to certain health care professionals (HCPs). Are you: (A) A physician - MD, DO, Dentist, DDS, Podiatrist, Optometrist or Chiropractor - with an active license to practice in the US; (B) a Massachusetts-licensed prescriber; or (C) None of the above?'), 'C', 'Workday HCP disclosure -> C / none of the above');
   t.eq(w.pjaPickAnswerOption('C', ['Select One', 'A', 'B', 'C'], P), 'C', 'Workday HCP disclosure option C selected exactly');
+  t.eq(a('Are you aware of any ongoing negotiations, RFPs, or other procurements involving Bloom Energy and your current employer?'), 'No', 'Workday current-employer procurement conflict -> No');
   t.eq(a('What is your favorite color?'), null, 'unknown question -> null');
 
   // --- sponsorship flips to Yes if profile requires it (synthetic) ---
@@ -319,6 +320,7 @@ module.exports = (t) => {
   t.eq(w.pjaDeterministicAnswer('Do you have any immediate family that works for HeartFlow?'), 'No', 'det: immediate family employed by company -> No');
   t.eq(w.pjaDeterministicAnswer('Do you have any relatives presently working for Dexcom?'), 'No', 'det: relatives presently working at company -> No');
   t.eq(w.pjaDeterministicAnswer('Do you have any agreements with your current or former employers that could potentially prohibit or limit your employment with Dexcom?'), 'No', 'det: limiting employment agreement -> No');
+  t.eq(w.pjaDeterministicAnswer('Are you aware of any ongoing negotiations, RFPs, or other procurements involving Bloom Energy and your current employer?'), 'No', 'det: current-employer procurement conflict -> No');
   t.eq(w.pjaDeterministicAnswer('Have you ever been or are you currently debarred?'), 'No', 'det: debarment -> No');
   t.eq(w.pjaDeterministicAnswer('How did you hear about us?'), 'LinkedIn', 'det: how-did-you-hear -> LinkedIn');
   t.eq(w.pjaDeterministicAnswer('What is the highest level of education you have completed?'), null, 'det: education -> null (AI handles)');

@@ -75,23 +75,52 @@ async function waitForEmailRows(maxMs = 15000) {
 
 async function findLinkInEmailBody(maxMs = 8000) {
   const t0 = Date.now();
+  const decodeGmailHref = (href) => {
+    const raw = String(href || '');
+    try {
+      const u = new URL(raw, location.href);
+      if (/^https?:\/\/www\.google\./i.test(u.href) || /(^|\.)google\.com$/i.test(u.hostname)) {
+        for (const key of ['url', 'q', 'u']) {
+          const v = u.searchParams.get(key);
+          if (v && /^https?:\/\//i.test(v)) return v;
+        }
+      }
+    } catch (_) {}
+    return raw;
+  };
+  const isWorkdayLink = href => /(^|\/\/|[/.])(myworkdayjobs|workday)\.com\b|\.wd\d+\.myworkdayjobs\.com\b/i.test(String(href || ''));
+  const isLowValueWorkdayLink = (href, text) =>
+    /candidate-home|candidatehome|jobtasks|view.*application|application-status|privacy|unsubscribe|search-for-jobs/i.test(String(href || '') + ' ' + String(text || ''));
   while (Date.now() - t0 < maxMs) {
     await sleep(400);
     const msgBody = document.querySelector('div.a3s.aiL, div.a3s, [data-message-id] div.ii.gt');
     if (!msgBody) continue;
 
     const links = Array.from(msgBody.querySelectorAll('a[href]'));
+    const bodyText = normalizeText(msgBody.innerText || msgBody.textContent || '');
+    const looksVerification = /verify|verification|confirm|activate|email address|account|password reset|create (your )?account|sign in/i.test(bodyText);
+    const looksOnlyApplicationReceipt = /application (has been )?(received|submitted)|thank you for applying|we received your application/i.test(bodyText) &&
+      !/verify|verification|confirm|activate|email address|account|password reset|create (your )?account/i.test(bodyText);
     const verifyLink = links.find(a =>
       /verify|confirm|activate|reset.*password|click here|get started/i.test(a.textContent.trim()) &&
-      /workday|myworkdayjobs/i.test(a.href)
+      isWorkdayLink(decodeGmailHref(a.href))
     );
-    if (verifyLink) return verifyLink.href;
+    if (verifyLink) return decodeGmailHref(verifyLink.href);
 
     const tokenLink = links.find(a =>
-      /myworkdayjobs\.com|workday\.com/i.test(a.href) &&
-      /[?&](token|key|code|verify|reset|confirm)=/i.test(a.href)
+      isWorkdayLink(decodeGmailHref(a.href)) &&
+      /[?&](token|key|code|verify|reset|confirm|redirect|continue)=|\/(verify|activate|account|reset|signin|login)\b/i.test(decodeGmailHref(a.href))
     );
-    if (tokenLink) return tokenLink.href;
+    if (tokenLink) return decodeGmailHref(tokenLink.href);
+
+    if (looksVerification && !looksOnlyApplicationReceipt) {
+      const contextualLink = links.find(a => {
+        const href = decodeGmailHref(a.href);
+        const txt = a.textContent || '';
+        return isWorkdayLink(href) && !isLowValueWorkdayLink(href, txt);
+      });
+      if (contextualLink) return decodeGmailHref(contextualLink.href);
+    }
   }
   return null;
 }

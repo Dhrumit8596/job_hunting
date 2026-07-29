@@ -112,9 +112,15 @@ module.exports = async (t) => {
   'combobox: Workday prompt-button filler commits country before state and verifies selected button text');
   t.ok(autofillSource.includes('hcpCompliance') &&
     autofillSource.includes('payments and transfers of value') &&
+    autofillSource.includes("querySelectorAll('[data-automation-id=\"richText\"]')") &&
     autofillSource.includes("t === 'c'") &&
     autofillSource.indexOf('hcpCompliance') < autofillSource.indexOf('} else if (/^degree'),
-  'combobox: Workday HCP legal disclosure is answered as C before generic state prompts');
+  'combobox: Workday HCP legal disclosure uses full rich-text field label and answers C before generic state prompts');
+  t.ok(autofillSource.includes('currentEmployerProcurementConflict') &&
+    autofillSource.includes('ongoing negotiations') &&
+    autofillSource.includes('procurements') &&
+    autofillSource.includes("match: txt => /^no\\b/i.test(txt)"),
+  'combobox: Workday current-employer procurement/RFP conflict prompt is answered No');
   t.ok(autofillSource.includes('selectedWithoutLabel') &&
     autofillSource.includes('State California Required') &&
     autofillSource.includes('reopen already-committed prompt buttons'),

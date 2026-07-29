@@ -3103,6 +3103,8 @@
       return 'Yes';
     } else if (/artificial intelligence|\bai\b|machine learning.*(recruit|process|assess)|consent.*(ai|automated)/i.test(label)) {
       return 'Yes';   // consent to AI use in recruiting
+    } else if (/ongoing negotiations|rfps?|procurements/i.test(label) && /current employer|employer/i.test(label)) {
+      return 'No';
     } else if (/worked (at|for)|employed (at|by)|are you (currently|now).*(employee|work)|former.*employee|previously work|current.*employee/i.test(label)) {
       return 'No';
     } else if (/18 years|over 18|at least 18|age of 18/i.test(label)) {
@@ -4391,6 +4393,7 @@
     if (/referr/i.test(t)) return 'No';
     if (/require.*sponsor|\bsponsorship\b|visa sponsor/i.test(t)) return 'No';
     if (/authoriz|eligible to work|legally (authorized|entitled|able)|right to work/i.test(t)) return 'Yes';
+    if (/ongoing negotiations|rfps?|procurements/i.test(t) && /current employer|employer/i.test(t)) return 'No';
     if (/(now or have you ever|currently|previously)[\s\S]{0,50}(employee|employed|worked? (for|at))|previously worked? (for|at)/i.test(t)) return 'No';
     if (/worked (for|at)[\s\S]{0,30}(pricewaterhouse|pwc)/i.test(t)) return 'No';
     if (/\bat least 18\b|\bover 18\b|\b18 (years|or older)\b|are you 18/i.test(t)) return 'Yes';

@@ -546,6 +546,7 @@ const PJA_BUILTIN_ANSWERS = {
   'have you signed a non-compete':                               { answer: 'No' },
   'do you have a non-compete agreement':                         { answer: 'No' },
   'are you subject to a non-compete':                            { answer: 'No' },
+  'are you aware of any ongoing negotiations rfps or other procurements involving bloom energy and your current employer': { answer: 'No' },
   'have you ever been convicted of a felony':                    { answer: 'No' },
   'have you been convicted of a crime':                          { answer: 'No' },
   'are you able to perform the essential functions of this job': { answer: 'Yes' },
@@ -2540,8 +2541,11 @@ async function pjaFillWorkdayPromptButtons(profile) {
     const labelledBy = (button.getAttribute('aria-labelledby') || '').split(/\s+/).filter(Boolean)
       .map(id => document.getElementById(id)?.textContent || '').join(' ').trim().replace(/\s+/g, ' ');
     const field = button.closest('[data-automation-id^="formField-"]');
+    const fieldRichText = field && Array.from(field.querySelectorAll('[data-automation-id="richText"]'))
+      .map(el => el.textContent || '')
+      .join(' ');
     const fieldLabel = field && (
-      field.querySelector('[data-automation-id="richText"]')?.textContent ||
+      fieldRichText ||
       field.querySelector('label')?.textContent ||
       field.querySelector('legend')?.textContent || ''
     );
@@ -2576,6 +2580,8 @@ async function pjaFillWorkdayPromptButtons(profile) {
         const t = txt.toLowerCase().replace(/\s+/g, ' ').trim();
         return t === 'c' || /none of the above/.test(t);
       } });
+    } else if (/ongoing negotiations|rfps?|procurements/i.test(label) && /current employer|employer/i.test(label) && unresolved) {
+      specs.push({ button, key: 'currentEmployerProcurementConflict', match: txt => /^no\b/i.test(txt) });
     } else if (/^degree\b/i.test(label) && unresolved) {
       const wantsBachelor = /bachelor|b\.\s*e\.?|undergraduate/i.test(degree);
       specs.push({ button, key: 'degree', match: txt => {
