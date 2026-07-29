@@ -3275,7 +3275,12 @@
       const nearbyQuestion = fieldIsButton && (btn.getAttribute('aria-invalid') === 'true' || isQuestionnaireButton)
         ? pjaNearestQuestionTextBefore(btn)
         : '';
-      const label = (richLabel || nearbyQuestion || pairedErrorLabel || btnAriaLabel.replace(/:\s*select one.*$/i, '') || buttonId).toLowerCase();
+      const idLabel = /hispanicOrLatino/i.test(buttonId) ? 'Are you Hispanic or Latino?'
+        : /personalInfoUS--ethnicity/i.test(buttonId) ? 'Please select the ethnicity to which you most accurately identify yourself.'
+        : /personalInfoUS--gender/i.test(buttonId) ? 'Please select your gender.'
+        : /personalInfoUS--veteranStatus/i.test(buttonId) ? 'Please select your veteran status.'
+        : '';
+      const label = (idLabel || richLabel || nearbyQuestion || pairedErrorLabel || btnAriaLabel.replace(/:\s*select one.*$/i, '') || buttonId).toLowerCase();
       const answer = pjaWorkdayAnswerForLabel(label, profile);
       if (!answer) continue;
       const selectedText = (btn.textContent || btnAriaLabel || '').trim();
@@ -3299,7 +3304,7 @@
         if (listbox) break;
       }
       if (!listbox) continue;
-      const optionEls = Array.from(listbox.querySelectorAll('[role="option"]'));
+      const optionEls = Array.from(listbox.querySelectorAll('[role="option"], [data-automation-id="promptOption"], [data-automation-id="selectedItem"]'));
       const optionTexts = optionEls.map(ownText);
       let chosenText = pjaPickAnswerOption(answer, optionTexts, profile);
       if (!chosenText && /how did you hear|referral source|\bsource\b/i.test(label)) {

@@ -121,6 +121,10 @@ module.exports = (t) => {
   t.ok(externalSource.includes('profile.hispanicOrLatino = ans') &&
     externalSource.includes('without guessing sensitive demographics'),
   'external-apply: explicit answer-bank Hispanic/Latino values are promoted for Workday EEO prompts');
+  t.ok(externalSource.includes('/hispanicOrLatino/i.test(buttonId)') &&
+    externalSource.includes('Are you Hispanic or Latino?') &&
+    externalSource.includes('[data-automation-id="promptOption"]'),
+  'external-apply: Workday EEO prompt buttons use id-based labels and promptOption rows');
   t.ok(backgroundSource.includes('Ctrl+A, then Meta+A for macOS Chrome') &&
     backgroundSource.includes("key: 'Backspace', code: 'Backspace'") &&
     backgroundSource.includes('appending digits leaves the validator'),
