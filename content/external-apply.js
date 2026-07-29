@@ -3054,13 +3054,13 @@
       return 'C';    // Abbott HCP tracking disclosure: C = none of the listed HCP/prescriber categories.
     } else if (/optional practical training|opt extension|\bopt\b|curricular practical|\bcpt\b|f-1 visa|f1 visa|j-1 visa/i.test(label)) {
       return 'No';   // Canadian on TN — not on OPT/CPT/F-1
-    } else if (/authoriz|eligible|legally|legal right/i.test(label)) {
-      return profile.workAuth === 'Yes' ? 'Yes' : 'No';
     } else if (/sponsor/i.test(label)) {
       const sponsorPref = String(profile.requireSponsorship || '').trim();
-      if (/^yes$/i.test(sponsorPref)) return 'Yes';
-      if (/^no$/i.test(sponsorPref)) return 'No';
+      if (/^yes\b/i.test(sponsorPref)) return 'Yes';
+      if (/^no\b/i.test(sponsorPref)) return 'No';
       return (typeof pjaDeterministicAnswer === 'function') ? pjaDeterministicAnswer(label) : null;
+    } else if (/authoriz|eligible|legally|legal right/i.test(label)) {
+      return profile.workAuth === 'Yes' ? 'Yes' : 'No';
     } else if (/export control|us person/i.test(label)) {
       return /citizen|green card|permanent resident/i.test(profile.visaStatus || '') ? 'Yes' : 'No';
     } else if (/relocat/i.test(label)) {
@@ -3238,7 +3238,8 @@
       const answer = pjaWorkdayAnswerForLabel(label, profile);
       if (!answer) continue;
       const selectedText = (btn.textContent || btnAriaLabel || '').trim();
-      const unresolved = /select one|select\.\.\.|required/i.test(selectedText + ' ' + btnAriaLabel) ||
+      const selectedStateText = (selectedText + ' ' + btnAriaLabel).replace(/\bRequired\b/ig, '').trim();
+      const unresolved = /select one|select\.\.\./i.test(selectedStateText) ||
         btn.getAttribute('aria-invalid') === 'true' || /source--source/i.test(buttonId);
       const selectedClean = selectedText.replace(/\bRequired\b/ig, '').trim();
       const selectedMatchesAnswer = !!selectedClean && !!pjaPickAnswerOption(answer, [selectedClean], profile);

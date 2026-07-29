@@ -246,6 +246,7 @@ module.exports = (t) => {
   // --- sponsorship flips to Yes if profile requires it (synthetic) ---
   t.eq(w.pjaWorkdayAnswerForLabel('require sponsorship', { requireSponsorship: 'Yes' }), 'Yes', 'sponsorship Yes when required');
   t.eq(w.pjaWorkdayAnswerForLabel('require immigration sponsorship for work authorization', {}), 'No', 'sponsorship defaults through deterministic No instead of unsafe Yes');
+  t.eq(w.pjaWorkdayAnswerForLabel('Do you now, or will you in the future, require immigration sponsorship for work authorization?', { workAuth: 'Yes', requireSponsorship: 'No' }), 'No', 'sponsorship wins over work authorization wording');
 
   // --- pjaPickAnswerOption: __YEARS__ range matching ---
   const yrsOpts = ['Select One', 'No prior experience', '0-2 years of experience', '3-6 years of experience', '7-10 years of experience', '10+ years of Experience'];
