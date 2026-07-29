@@ -1408,6 +1408,30 @@
         return false;
       }
     };
+    const mainWorldWorkdayAdvance = async (el, label) => {
+      if (!el || !/workday\.com|myworkdayjobs\.com/i.test(location.hostname)) return false;
+      const priorId = el.id;
+      const tempId = priorId || ('__pja_wd_advance_' + Date.now() + '_' + Math.random().toString(36).slice(2, 7));
+      if (!priorId) el.id = tempId;
+      try {
+        el.scrollIntoView({ block: 'center', behavior: 'instant' });
+        const resp = await new Promise(resolve => {
+          chrome.runtime.sendMessage({
+            type: 'WORKDAY_ADVANCE_STEP',
+            selector: '#' + CSS.escape(tempId),
+            label: label || ''
+          }, r => resolve(chrome.runtime.lastError ? { error: chrome.runtime.lastError.message } : (r || {})));
+        });
+        await addDbg('[WD] main advance ' + (label || '') + ' ok=' + !!resp.ok +
+          (resp.via ? ' via=' + resp.via : '') + (resp.error ? ' err=' + String(resp.error).slice(0, 60) : ''));
+        return !!resp.ok;
+      } catch (e) {
+        await addDbg('[WD] main advance ' + (label || '') + ' threw=' + String(e && e.message || e).slice(0, 60));
+        return false;
+      } finally {
+        if (!priorId && el.id === tempId) el.removeAttribute('id');
+      }
+    };
     const forceWorkdayReferralSource = async () => {
       if (!/workday\.com|myworkdayjobs\.com/i.test(location.hostname)) return 0;
       let filled = 0;
@@ -1965,6 +1989,25 @@
           if (errFound || advanced || urlChanged || waited >= 20000) { clearInterval(poll); resolve(); }
         }, 250);
       });
+      if (isWorkdayHost && location.href === preClickUrl) {
+        const stepAfterClick = document.body.innerText.match(/current step (\d+)/i)?.[1] || '';
+        const errAfterClick = Array.from(document.querySelectorAll('button')).some(b => /^errors found$/i.test(b.textContent.trim()));
+        if (stepTextBefore && stepAfterClick === stepTextBefore && !errAfterClick) {
+          await addDbg('[WD] no advance after trusted click; trying MAIN-world advance');
+          await mainWorldWorkdayAdvance(nextBtn, nextBtnAid || nextBtnText || 'next');
+          await new Promise(resolve => {
+            let waited = 0;
+            const poll = setInterval(() => {
+              waited += 250;
+              const errFound = Array.from(document.querySelectorAll('button')).some(b => /^errors found$/i.test(b.textContent.trim()));
+              const stepNow = document.body.innerText.match(/current step (\d+)/i)?.[1] || '';
+              const advanced = stepNow !== stepTextBefore;
+              const urlChanged = location.href !== preClickUrl;
+              if (errFound || advanced || urlChanged || waited >= 10000) { clearInterval(poll); resolve(); }
+            }, 250);
+          });
+        }
+      }
       if (!isWorkdayHost && !stepTextBefore && location.href === preClickUrl) {
         const postClickBodyMarker = String(document.body?.innerText || '').replace(/\s+/g, ' ').slice(0, 4000);
         const submitNow = !!findButton(/submit.*application|submit.*app|apply now|send application|complete application|^submit$|^submit application$/i);

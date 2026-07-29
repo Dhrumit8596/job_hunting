@@ -72,6 +72,11 @@ module.exports = (t) => {
     externalSource.includes("type: 'WORKDAY_TRUSTED_ENTER'") &&
     externalSource.includes("trustedWorkdayEnter(reNext, 'blocked-retry-' + label)"),
   'external-apply: Workday My Information state is finalized and trusted-clicked before Save/Continue retries');
+  t.ok(externalSource.includes('const mainWorldWorkdayAdvance = async (el, label) =>') &&
+    externalSource.includes("type: 'WORKDAY_ADVANCE_STEP'") &&
+    externalSource.includes('no advance after trusted click; trying MAIN-world advance') &&
+    externalSource.includes('await mainWorldWorkdayAdvance(nextBtn'),
+  'external-apply: Workday step loop falls back to MAIN-world advance when trusted click does not advance');
   t.ok(externalSource.includes("const isPhoneById = /^(phone|phoneNumber)$/i") &&
     externalSource.includes("el.name || ''") &&
     externalSource.includes("(phone\\s*)?extension"),

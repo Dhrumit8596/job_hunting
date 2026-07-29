@@ -2331,6 +2331,55 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     return true;
   }
 
+  if (msg.type === 'WORKDAY_ADVANCE_STEP') {
+    // MAIN-world Workday step advance fallback. CDP clicks can report success while Workday's
+    // React/click_filter layer still leaves the application on the same step. Running the final
+    // click inside the page context gives Workday's own handlers a direct event target.
+    (async () => {
+      try {
+        const tabId = _sender.tab.id;
+        await activateTab(tabId);
+        const [res] = await chrome.scripting.executeScript({
+          target: { tabId },
+          world: 'MAIN',
+          args: [msg.selector || '', msg.label || ''],
+          func: (selector, label) => {
+            const visible = el => {
+              if (!el) return false;
+              const r = el.getBoundingClientRect();
+              return r.width > 0 && r.height > 0 && getComputedStyle(el).visibility !== 'hidden' &&
+                getComputedStyle(el).display !== 'none';
+            };
+            const textOf = el => String(el?.getAttribute?.('aria-label') || el?.textContent || '').trim().replace(/\s+/g, ' ');
+            const wanted = /submit/i.test(label)
+              ? /submit.*application|submit.*app|apply now|^submit$/i
+              : /save\s*(?:and|&)\s*continue|^continue$|^next$|next step/i;
+            let el = null;
+            try { if (selector) el = document.querySelector(selector); } catch (_) {}
+            if (!visible(el)) {
+              el = Array.from(document.querySelectorAll('[data-automation-id="click_filter"], [data-automation-id="pageFooterNextButton"], [data-automation-id="bottomNavigationNext"], [data-automation-id="bottomNavigationSubmit"], button, [role="button"]'))
+                .find(node => visible(node) && wanted.test(textOf(node)));
+            }
+            if (!el) return { ok: false, reason: 'no_advance_control' };
+            try { el.scrollIntoView({ block: 'center', behavior: 'instant' }); } catch (_) {}
+            try { el.focus(); } catch (_) {}
+            for (const type of ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click']) {
+              try {
+                el.dispatchEvent(new MouseEvent(type, { bubbles: true, cancelable: true, view: window, button: 0 }));
+              } catch (_) {}
+            }
+            try { el.click(); } catch (_) {}
+            return { ok: true, via: el.getAttribute('data-automation-id') || el.tagName || 'element', text: textOf(el).slice(0, 80) };
+          }
+        });
+        sendResponse(res && res.result || { ok: false, error: 'no result' });
+      } catch (e) {
+        sendResponse({ ok: false, error: e.message || String(e) });
+      }
+    })();
+    return true;
+  }
+
   if (msg.type === 'SUCCESSFACTORS_START') {
     (async () => {
       try {

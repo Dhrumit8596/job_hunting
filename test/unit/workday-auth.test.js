@@ -65,6 +65,12 @@ module.exports = async (t) => {
     workdayAuthSource.includes('directCount < 3') &&
     workdayAuthSource.includes('/apply/applyManually'),
   'workday auth: job Apply/start-application uses trusted click plus direct applyManually navigation fallback');
+  const backgroundSource = fs.readFileSync(path.join(ROOT, 'background.js'), 'utf8');
+  t.ok(backgroundSource.includes("if (msg.type === 'WORKDAY_ADVANCE_STEP')") &&
+    backgroundSource.includes("world: 'MAIN'") &&
+    backgroundSource.includes("save\\s*(?:and|&)\\s*continue") &&
+    backgroundSource.includes("data-automation-id=\"pageFooterNextButton\""),
+  'workday auth: background exposes MAIN-world Workday step advance fallback');
 
   const authWindow = loadContentScript(path.join(ROOT, 'content/workday-auth.js'));
   t.eq(authWindow.pjaWorkdayAuth.pjaWorkdayTenantEmail('candidate@gmail.com', 'kla.wd1.myworkdayjobs.com'),
