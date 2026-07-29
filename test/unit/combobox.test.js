@@ -135,6 +135,10 @@ module.exports = async (t) => {
     autofillSource.includes('company-specific source taxonomies') &&
     autofillSource.includes('! /select one|select\\.\\.\\.|choose|expanded|required only/i.test(selectedText)'.replace('! ', '!')),
   'combobox: Workday referral-source accepts tenant-specific selected chips as committed');
+  t.ok(autofillSource.includes("const fieldContainer = input.closest('[data-automation-id^=\"formField\"") &&
+    autofillSource.includes('fieldContainer?.querySelector') &&
+    autofillSource.includes('fieldContainer?.textContent'),
+  'combobox: Workday committed detection falls back to enclosing formField text');
   t.ok(autofillSource.includes("key === 'referralSource' && /workday-fail|synthetic|fail/i") &&
     autofillSource.includes("'+cdp-' + fallback"),
   'combobox: Workday referral-source falls back to CDP option click after trusted click failure');

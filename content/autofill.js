@@ -1950,7 +1950,13 @@ function pjaFillCombobox(input, value, key) {
     const workdaySelectionCommitted = () => {
       try {
         const msContainer = input.closest('[data-uxi-widget-type="multiselect"]');
-        const selectedText = (msContainer?.querySelector('[data-automation-id="selectedItemList"], [data-automation-id="selectedItem"], [data-automation-id="promptOption"]')?.textContent || '').trim();
+        const fieldContainer = input.closest('[data-automation-id^="formField"], [data-automation-id^="question"]');
+        const selectedText = (
+          msContainer?.querySelector('[data-automation-id="selectedItemList"], [data-automation-id="selectedItem"], [data-automation-id="promptOption"]')?.textContent ||
+          fieldContainer?.querySelector('[data-automation-id="selectedItemList"], [data-automation-id="selectedItem"], [data-automation-id="promptOption"]')?.textContent ||
+          fieldContainer?.textContent ||
+          ''
+        ).trim();
         if (!selectedText) return false;
         if (key === 'phoneCountryCode') return /united states/i.test(selectedText) && /\+?1\b/.test(selectedText);
         if (key === 'referralSource') {
