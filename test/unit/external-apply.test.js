@@ -113,6 +113,11 @@ module.exports = (t) => {
     externalSource.includes("profile?.signatureDate ? new Date(profile.signatureDate) : new Date()") &&
     externalSource.includes('[WD] self-identify date filled='),
   'external-apply: Workday Self Identify signature date uses the current date and can overwrite stale values');
+  t.ok(externalSource.includes('const disInvalid = disField.getAttribute') &&
+    externalSource.includes('forced-invalid') &&
+    externalSource.includes("nativeChecked.call(cb, true)") &&
+    externalSource.includes("nativeChecked.call(other, false)"),
+  'external-apply: Workday disability checkbox group is force-committed when fieldset remains invalid');
   t.ok(backgroundSource.includes('Ctrl+A, then Meta+A for macOS Chrome') &&
     backgroundSource.includes("key: 'Backspace', code: 'Backspace'") &&
     backgroundSource.includes('appending digits leaves the validator'),
