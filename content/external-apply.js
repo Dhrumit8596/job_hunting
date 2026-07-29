@@ -662,6 +662,14 @@
       // prune stale entries (>6h) so the map can't grow unbounded across runs
       for (const k of Object.keys(clock)) { if (now - (clock[k].firstSeen || now) > 21600000) delete clock[k]; }
       const entry = clock[clockKey] || { firstSeen: now, loads: 0 };
+      const stepSig = /workday\.com|myworkdayjobs\.com/i.test(location.hostname)
+        ? ((document.body?.innerText || '').match(/current step \d+ of \d+\s+[^\n]+/i)?.[0] || location.pathname)
+        : location.pathname;
+      if (entry.stepSig && stepSig && entry.stepSig !== stepSig) {
+        entry.firstSeen = now;
+        entry.loads = 0;
+      }
+      entry.stepSig = stepSig;
       entry.loads += 1;
       clock[clockKey] = entry;
       await new Promise(r => chrome.storage.local.set({ pja_ext_jobclock: clock }, r));

@@ -62,6 +62,10 @@ module.exports = (t) => {
     externalSource.includes('post-prompt text refill done') &&
     externalSource.includes('Country/state prompt commits can trigger Workday to re-render and clear downstream address'),
   'external-apply: Workday re-fills text fields after country/state prompt commits');
+  t.ok(externalSource.includes('entry.stepSig !== stepSig') &&
+    externalSource.includes('entry.loads = 0') &&
+    externalSource.includes('current step \\d+ of \\d+\\s+[^\\n]+'),
+  'external-apply: Workday cross-reload budget resets when the form advances to a new step');
   t.ok(externalSource.includes('const finalizeWorkdayMyInformation = async (label) =>') &&
     externalSource.includes('[WD-MYINFO]') &&
     externalSource.includes('wd-myinfo-prompts-') &&
