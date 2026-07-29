@@ -2028,6 +2028,9 @@
         // input values can contain personal data. Labels, control metadata, and boolean presence
         // flags are sufficient to diagnose a tenant-specific required question safely.
         try {
+          const workdayErrorLabels = (typeof pjaCollectWorkdayErrorLabels === 'function')
+            ? pjaCollectWorkdayErrorLabels().slice(0, 20)
+            : [];
           const rejectedControls = Array.from(document.querySelectorAll(
             '[aria-invalid="true"], [data-automation-id$="-error"], input[id^="question_"], ' +
             'input[role="combobox"], [data-uxi-widget-type="selectinput"]'
@@ -2056,7 +2059,7 @@
           await new Promise(resolve => chrome.storage.local.set({
             pja_wd_error_diag: {
               ts: Date.now(), runId: job.runId || '', jobId: job.id || job.jobId || '',
-              step: stepTextBefore || '', controls: rejectedControls
+              step: stepTextBefore || '', controls: rejectedControls, errorLabels: workdayErrorLabels
             }
           }, resolve));
         } catch (_) {}
@@ -3135,16 +3138,53 @@
     window.pjaPickAnswerOption = pjaPickAnswerOption;
   }
 
+  function pjaCollectWorkdayErrorLabels() {
+    const clean = s => String(s || '').trim().replace(/\s+/g, ' ');
+    const fromErrorButtons = Array.from(document.querySelectorAll('button'))
+      .map(b => clean(b.textContent || b.getAttribute('aria-label') || ''))
+      .filter(txt => /^Error-/i.test(txt))
+      .map(txt => clean(txt.replace(/^Error-?/i, '')));
+    // Workday often renders validation as page text rather than tying the error button to the
+    // invalid "Select One Required" control:
+    //   Error: The field <real question label> is required and must have a value.
+    const bodyText = document.body?.innerText || '';
+    const fromBodyErrors = Array.from(bodyText.matchAll(
+      /Error:\s*The field\s+([\s\S]{5,650}?)\s+is required and must have a value\./gi
+    )).map(m => clean(m[1]));
+    return Array.from(new Set([...fromErrorButtons, ...fromBodyErrors]))
+      .filter(txt => txt && !/^select one required$/i.test(txt));
+  }
+  if (typeof window !== 'undefined') window.pjaCollectWorkdayErrorLabels = pjaCollectWorkdayErrorLabels;
+
+  function pjaNearestQuestionTextBefore(el) {
+    try {
+      const chunks = [];
+      const walker = document.createTreeWalker(document.body || document.documentElement, NodeFilter.SHOW_TEXT);
+      let node;
+      while ((node = walker.nextNode())) {
+        if (el.contains(node)) break;
+        if (el.compareDocumentPosition(node) & Node.DOCUMENT_POSITION_FOLLOWING) break;
+        const txt = String(node.nodeValue || '').trim().replace(/\s+/g, ' ');
+        if (txt) chunks.push(txt);
+        if (chunks.join(' ').length > 5000) chunks.splice(0, chunks.length - 80);
+      }
+      const tail = chunks.join(' ').replace(/\s+/g, ' ').slice(-1800);
+      const q = tail.match(/([^.!?]{12,650}\?)(?:\s*(?:Select One|Required|Yes|No|Acknowledge\/Confirm))*$/i);
+      if (q) return q[1].trim();
+      const colon = tail.match(/([^.!?]{12,650}:)(?:\s*(?:Select One|Required|Yes|No|Acknowledge\/Confirm))*$/i);
+      return colon ? colon[1].trim() : '';
+    } catch (_) {
+      return '';
+    }
+  }
+
   async function pjaFillWorkdayAppQuestions(profile) {
     if (!/workday\.com|myworkdayjobs\.com/i.test(location.hostname)) return;
     const fields = Array.from(new Set([
       ...document.querySelectorAll('[data-automation-id^="formField-"]'),
       ...document.querySelectorAll('button[aria-invalid="true"], [role="button"][aria-invalid="true"]')
     ]));
-    const errorLabels = Array.from(document.querySelectorAll('button'))
-      .map(b => (b.textContent || b.getAttribute('aria-label') || '').trim().replace(/\s+/g, ' '))
-      .filter(txt => /^Error-/i.test(txt))
-      .map(txt => txt.replace(/^Error-?/i, '').trim());
+    const errorLabels = pjaCollectWorkdayErrorLabels();
     let invalidButtonOrdinal = 0;
     const log = [];
     const ownText = opt => {
@@ -3178,7 +3218,10 @@
       const pairedErrorLabel = fieldIsButton && btn.getAttribute('aria-invalid') === 'true'
         ? (errorLabels[invalidButtonOrdinal++] || '')
         : '';
-      const label = (richLabel || pairedErrorLabel || btnAriaLabel.replace(/:\s*select one.*$/i, '') || buttonId).toLowerCase();
+      const nearbyQuestion = fieldIsButton && btn.getAttribute('aria-invalid') === 'true'
+        ? pjaNearestQuestionTextBefore(btn)
+        : '';
+      const label = (richLabel || pairedErrorLabel || nearbyQuestion || btnAriaLabel.replace(/:\s*select one.*$/i, '') || buttonId).toLowerCase();
       const answer = pjaWorkdayAnswerForLabel(label, profile);
       if (!answer) continue;
       const selectedText = (btn.textContent || btnAriaLabel || '').trim();
@@ -4352,6 +4395,7 @@
     // Non-compete: honest No for a California-based candidate — CA Bus. & Prof. Code §16600 voids
     // non-compete agreements, so a CA applicant is not bound by an enforceable one.
     if (/non-?compete|noncompete/i.test(t) && /\b(bound|subject|signed|have|are you)\b/i.test(t)) return 'No';
+    if (/agreement[\s\S]{0,140}(prohibit|limit|restrict)[\s\S]{0,100}(employment|work)|prohibit or limit your employment/i.test(t)) return 'No';
     if (/referred\b.*\b(employee|internal)|\b(employee|internal)\b.*\brefer/i.test(t)) return 'No';
     if (/how did you hear|where did you (hear|find)|referral source|source of (this )?application/i.test(t)) return 'LinkedIn';
     if (/desired (?:base )?salary|salary expectation|expected (?:base )?(?:salary|compensation)|compensation expectation/i.test(t))

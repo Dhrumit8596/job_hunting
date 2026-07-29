@@ -135,6 +135,10 @@ module.exports = async (t) => {
     autofillSource.includes('company-specific source taxonomies') &&
     autofillSource.includes('! /select one|select\\.\\.\\.|choose|expanded|required only/i.test(selectedText)'.replace('! ', '!')),
   'combobox: Workday referral-source accepts tenant-specific selected chips as committed');
+  t.ok(autofillSource.includes('Type to Add Skills') &&
+    autofillSource.includes('Leave skills untouched unless a future dedicated skills filler is added') &&
+    autofillSource.includes('return;'),
+  'combobox: Workday Add Skills multiselect is not misrouted to referralSource');
   t.ok(autofillSource.includes("const fieldContainer = input.closest('[data-automation-id^=\"formField\"") &&
     autofillSource.includes('fieldContainer?.querySelector') &&
     autofillSource.includes('fieldContainer?.textContent'),

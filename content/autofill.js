@@ -2757,6 +2757,14 @@ function pjaFillForm(profile, answers) {
         el.getAttribute('data-uxi-widget-type') === 'selectinput') {
       const wdFieldText = (el.closest('[data-automation-id^="formField-"], [data-uxi-widget-type="multiselect"]')?.textContent || '')
         .replace(/\s+/g, ' ');
+      // Workday "My Experience" exposes optional "Add Skills / Type to Add Skills" as a
+      // multiselect. Its surrounding page text can include unrelated "source" wording, which
+      // previously made the generic classifier type referralSource="LinkedIn" into the skills box.
+      // Leave skills untouched unless a future dedicated skills filler is added.
+      if (/\b(add skills|type to add skills|skills)\b/i.test(rawLabel + ' ' + wdFieldText) &&
+          !/how did you hear|where did you (hear|find)|referral source|source of (this )?application/i.test(rawLabel)) {
+        return;
+      }
       const isPhoneCodeField = /(country|territory).{0,60}phone.{0,30}code|phone.{0,30}(country|territory).{0,30}code|dial(?:ing|ling) code/i
         .test(rawLabel + ' ' + wdFieldText);
       if (isPhoneCodeField) wdForcedKey = 'phoneCountryCode';
