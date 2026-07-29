@@ -205,6 +205,11 @@ module.exports = (t) => {
     externalSource.includes("const recoveryKey = 'pja_recovery_submit_'") &&
     externalSource.includes('postRetrySuccess'),
   'external-apply: LLM recovery is single-shot per job for missing-required and submit-unclear paths');
+  t.ok(externalSource.includes('button[aria-invalid="true"], [role="button"][aria-invalid="true"]') &&
+    externalSource.includes('const errorLabels = Array.from(document.querySelectorAll') &&
+    externalSource.includes('pairedErrorLabel') &&
+    externalSource.includes('invalidButtonOrdinal'),
+  'external-apply: Workday app-question filler scans invalid questionnaire buttons with paired error labels');
 
   const a = (label) => w.pjaWorkdayAnswerForLabel(label.toLowerCase(), P);
 
@@ -297,6 +302,7 @@ module.exports = (t) => {
   t.eq(w.pjaProfileFieldForLabel('Were you referred by an internal employee?', P), null, 'profile map: internal referral is not referralSource');
   t.eq(w.pjaDeterministicAnswer('Are you able and willing to be on site 5 days per week?'), 'Yes', 'det: able and willing onsite -> Yes');
   t.eq(w.pjaDeterministicAnswer('Do you have any immediate family that works for HeartFlow?'), 'No', 'det: immediate family employed by company -> No');
+  t.eq(w.pjaDeterministicAnswer('Do you have any relatives presently working for Dexcom?'), 'No', 'det: relatives presently working at company -> No');
   t.eq(w.pjaDeterministicAnswer('Have you ever been or are you currently debarred?'), 'No', 'det: debarment -> No');
   t.eq(w.pjaDeterministicAnswer('How did you hear about us?'), 'LinkedIn', 'det: how-did-you-hear -> LinkedIn');
   t.eq(w.pjaDeterministicAnswer('What is the highest level of education you have completed?'), null, 'det: education -> null (AI handles)');
@@ -316,6 +322,7 @@ module.exports = (t) => {
   t.ok(!w.pjaSameQueuedJob({ id: 'req-1' }, { id: 'req-2' }), 'different queue ids are stale');
   t.ok(w.pjaSameQueuedJob({ applyUrl: 'https://a' }, { applyUrl: 'https://a' }), 'queue identity falls back to apply URL');
   t.eq(w.pjaDeterministicAnswer('I certify that the information provided is accurate.'), 'Yes', 'det: certify -> Yes');
+  t.eq(w.pjaDeterministicAnswer('I verify that my application submission is truthful and accurate.'), 'Yes', 'det: verify truthful application -> Yes');
   t.eq(w.pjaDeterministicAnswer('Please describe how many years of experience you have.'), null, 'det: open-ended not mis-caught as ack -> null');
 
   // --- experience screening: honest Yes for configured domains, No for documented gaps, null otherwise ---

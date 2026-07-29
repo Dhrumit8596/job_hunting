@@ -3101,7 +3101,8 @@
     } else if (/how did you hear|where did you (hear|find)|referral source|source of (this )?application|\bsource\b/i.test(label)) {
       return profile.referralSource || 'LinkedIn';
     }
-    return null;
+    const det = (typeof pjaDeterministicAnswer === 'function') ? pjaDeterministicAnswer(label) : null;
+    return det || null;
   }
 
   // PURE: given an answer (possibly a sentinel) and the dropdown's option texts, returns
@@ -3136,7 +3137,15 @@
 
   async function pjaFillWorkdayAppQuestions(profile) {
     if (!/workday\.com|myworkdayjobs\.com/i.test(location.hostname)) return;
-    const fields = Array.from(document.querySelectorAll('[data-automation-id^="formField-"]'));
+    const fields = Array.from(new Set([
+      ...document.querySelectorAll('[data-automation-id^="formField-"]'),
+      ...document.querySelectorAll('button[aria-invalid="true"], [role="button"][aria-invalid="true"]')
+    ]));
+    const errorLabels = Array.from(document.querySelectorAll('button'))
+      .map(b => (b.textContent || b.getAttribute('aria-label') || '').trim().replace(/\s+/g, ' '))
+      .filter(txt => /^Error-/i.test(txt))
+      .map(txt => txt.replace(/^Error-?/i, '').trim());
+    let invalidButtonOrdinal = 0;
     const log = [];
     const ownText = opt => {
       const clone = opt.cloneNode(true);
@@ -3159,13 +3168,17 @@
       }
     });
     for (const field of fields) {
-      const btn = field.querySelector('button[type="button"], button[aria-haspopup], [role="button"]');
+      const fieldIsButton = field.matches?.('button, [role="button"]');
+      const btn = fieldIsButton ? field : field.querySelector('button[type="button"], button[aria-haspopup], [role="button"]');
       if (!btn) continue;
       // Label lives in richText div OR in the button's aria-label (e.g. "Protected Veteran: Select One")
       const richLabel = field.querySelector('[data-automation-id="richText"]')?.textContent || '';
       const btnAriaLabel = btn.getAttribute('aria-label') || '';
       const buttonId = btn.id || btn.getAttribute('data-automation-id') || '';
-      const label = (richLabel || btnAriaLabel.replace(/:\s*select one.*$/i, '') || buttonId).toLowerCase();
+      const pairedErrorLabel = fieldIsButton && btn.getAttribute('aria-invalid') === 'true'
+        ? (errorLabels[invalidButtonOrdinal++] || '')
+        : '';
+      const label = (richLabel || pairedErrorLabel || btnAriaLabel.replace(/:\s*select one.*$/i, '') || buttonId).toLowerCase();
       const answer = pjaWorkdayAnswerForLabel(label, profile);
       if (!answer) continue;
       const selectedText = (btn.textContent || btnAriaLabel || '').trim();
@@ -4323,7 +4336,7 @@
       }
     }
     // Conflict-of-interest / relatives at the company → No.
-    if (/friends or relatives|related to (an?|any)[\s\S]{0,30}(employee|customer)|immediate family[\s\S]{0,60}(employee|employed|work(?:s|ing)? (?:at|for)|health care|use or prescribe)|conflict of interest|affiliated with a company that does business/i.test(t)) return 'No';
+    if (/friends or relatives|relatives?[\s\S]{0,40}(presently\s+)?work(?:ing)?\s+(?:at|for)|related to (an?|any)[\s\S]{0,30}(employee|customer)|immediate family[\s\S]{0,60}(employee|employed|work(?:s|ing)? (?:at|for)|health care|use or prescribe)|conflict of interest|affiliated with a company that does business/i.test(t)) return 'No';
     if (/(?:ever|currently)[\s\S]{0,35}employed by[\s\S]{0,45}(?:u\.?s\.? )?federal government|contractor[\s\S]{0,45}performed work for[\s\S]{0,35}federal government|served in the military|political appointee/i.test(t)) return 'No';
     if (/relatives[\s\S]{0,45}(?:employed by|work(?:ing)? for|serves? in)[\s\S]{0,80}(?:federal government|department of (?:health|defense)|military)|relatives[\s\S]{0,100}political appointee/i.test(t)) return 'No';
     if (/\bdebarred\b|\bexcluded\b[\s\S]{0,30}(federal|government|health care|program)|\bsuspended\b[\s\S]{0,30}(federal|government|program)/i.test(t)) return 'No';
@@ -4347,7 +4360,7 @@
     // statement…", "I acknowledge…", "I certify…", "I agree…") — honest Yes: reading and agreeing
     // to a posted statement is part of applying. Excludes eligibility/legal-status framings, which
     // the sponsorship/authorization rules above answer, and open-ended prompts.
-    if (/^\s*(?:i )?(?:have read|acknowledge(?:\/confirm)?|certify|understand|agree|consent)\b|i have read and (understand|agree)|acknowledge (that i|and (agree|understand))|i certify that/i.test(t) &&
+    if (/^\s*(?:i )?(?:have read|acknowledge(?:\/confirm)?|certify|verify|understand|agree|consent)\b|i have read and (understand|agree)|acknowledge (that i|and (agree|understand))|i certify that|application submission is truthful and accurate/i.test(t) &&
         !/how many|describe|explain|please (provide|list|specify)/i.test(t)) return 'Yes';
     if (/export control|u\.?s\.? export|itar\b|ear\b|export administration regulation/i.test(t) &&
         !/have read|read and understand|acknowledge|certify|agree|consent|statement/i.test(t)) return 'No';
