@@ -2530,6 +2530,7 @@ async function pjaFillWorkdayPromptButtons(profile) {
   const country = String(profile && profile.country || 'United States').trim();
   const phoneType = String(profile && profile.phoneType || 'Mobile').trim();
   const degree = String(profile && (profile.degree || profile.educationDegree) || 'Bachelor').trim();
+  const hispanicOrLatino = String(profile && (profile.hispanicOrLatino || profile.hispanic) || '').trim();
   const specs = [];
   for (const button of Array.from(document.querySelectorAll('button'))) {
     const text = (button.textContent || '').trim().replace(/\s+/g, ' ');
@@ -2549,7 +2550,13 @@ async function pjaFillWorkdayPromptButtons(profile) {
       field.querySelector('label')?.textContent ||
       field.querySelector('legend')?.textContent || ''
     );
-    const label = (labelledBy || fieldLabel || ariaLabel.replace(/:\s*select one.*$/i, '') || '')
+    const buttonId = button.id || button.getAttribute('data-automation-id') || '';
+    const idLabel = /hispanicOrLatino/i.test(buttonId) ? 'Are you Hispanic or Latino?'
+      : /personalInfoUS--ethnicity/i.test(buttonId) ? 'Please select the ethnicity to which you most accurately identify yourself.'
+      : /personalInfoUS--gender/i.test(buttonId) ? 'Please select your gender.'
+      : /personalInfoUS--veteranStatus/i.test(buttonId) ? 'Please select your veteran status.'
+      : '';
+    const label = (idLabel || labelledBy || fieldLabel || ariaLabel.replace(/:\s*select one.*$/i, '') || '')
       .trim().replace(/\s+/g, ' ');
     const selected = (text || ariaLabel).trim();
     const selectedWithoutLabel = (selected + ' ' + ariaLabel)
@@ -2582,6 +2589,15 @@ async function pjaFillWorkdayPromptButtons(profile) {
       } });
     } else if (/ongoing negotiations|rfps?|procurements/i.test(label) && /current employer|employer/i.test(label) && unresolved) {
       specs.push({ button, key: 'currentEmployerProcurementConflict', match: txt => /^no\b/i.test(txt) });
+    } else if (/hispanic|latino/i.test(label) && unresolved && hispanicOrLatino) {
+      specs.push({ button, key: 'hispanicOrLatino', match: txt => {
+        const t = txt.toLowerCase().replace(/\s+/g, ' ').trim();
+        const h = hispanicOrLatino.toLowerCase();
+        if (/^no\b|not hispanic|not latino/i.test(h)) return /^no\b|not hispanic|not latino/.test(t);
+        if (/^yes\b|hispanic|latino/i.test(h) && !/not hispanic|not latino/.test(h)) return /^yes\b/.test(t) || (/hispanic|latino/.test(t) && !/not hispanic|not latino/.test(t));
+        if (/decline|prefer not|choose not|do not wish/i.test(h)) return /decline|prefer not|choose not|do not wish|not disclose/i.test(t);
+        return false;
+      } });
     } else if (/^degree\b/i.test(label) && unresolved) {
       const wantsBachelor = /bachelor|b\.\s*e\.?|undergraduate/i.test(degree);
       specs.push({ button, key: 'degree', match: txt => {

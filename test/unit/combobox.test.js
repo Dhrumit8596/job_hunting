@@ -121,6 +121,11 @@ module.exports = async (t) => {
     autofillSource.includes('procurements') &&
     autofillSource.includes("match: txt => /^no\\b/i.test(txt)"),
   'combobox: Workday current-employer procurement/RFP conflict prompt is answered No');
+  t.ok(autofillSource.includes('const hispanicOrLatino = String') &&
+    autofillSource.includes('/hispanicOrLatino/i.test(buttonId)') &&
+    autofillSource.includes("key: 'hispanicOrLatino'") &&
+    autofillSource.includes('not hispanic|not latino'),
+  'combobox: Workday Hispanic/Latino EEO prompt uses explicit profile/answer-bank value');
   t.ok(autofillSource.includes('selectedWithoutLabel') &&
     autofillSource.includes('State California Required') &&
     autofillSource.includes('reopen already-committed prompt buttons'),
