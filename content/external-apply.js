@@ -3341,9 +3341,13 @@
         : /do not want|not answer/i;
       const disInvalid = disField.getAttribute('aria-invalid') === 'true' ||
         !!disField.querySelector('[aria-invalid="true"], [data-automation-id$="-error"]');
-      for (const cb of disField.querySelectorAll('input[type="checkbox"], input[type="radio"]')) {
+      const disInputs = Array.from(disField.querySelectorAll('input[type="checkbox"], input[type="radio"]'));
+      for (const cb of disInputs) {
         const lbl = document.querySelector('label[for="'+cb.id+'"]');
-        if (lbl && targetRe.test(lbl.textContent)) {
+        const fieldText = (disField.innerText || disField.textContent || '').replace(/\s+/g, ' ');
+        const fallbackNoCheckbox = !lbl && /no|do not|don.t/i.test(dis) && disInputs.length === 3 && cb === disInputs[1] &&
+          /yes[\s\S]{0,120}no[\s\S]{0,160}(do not want|not answer)/i.test(fieldText);
+        if ((lbl && targetRe.test(lbl.textContent)) || fallbackNoCheckbox) {
           const nativeChecked = Object.getOwnPropertyDescriptor(
             cb instanceof HTMLInputElement ? HTMLInputElement.prototype : Object.getPrototypeOf(cb), 'checked'
           )?.set;
@@ -3360,7 +3364,8 @@
             cb.dispatchEvent(new Event('change', { bubbles: true, composed: true }));
             cb.dispatchEvent(new MouseEvent('click', { bubbles: true, composed: true, cancelable: true }));
           }
-          log.push('disability→' + lbl.textContent.trim().slice(0, 35) + (disInvalid ? ' forced-invalid' : ''));
+          const labelText = lbl ? lbl.textContent.trim() : 'No disability fallback option 2';
+          log.push('disability→' + labelText.slice(0, 35) + (disInvalid ? ' forced-invalid' : ''));
           await new Promise(r => setTimeout(r, 300)); // wait for re-render to settle
           break;
         }

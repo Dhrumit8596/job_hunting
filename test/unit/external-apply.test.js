@@ -118,6 +118,10 @@ module.exports = (t) => {
     externalSource.includes("nativeChecked.call(cb, true)") &&
     externalSource.includes("nativeChecked.call(other, false)"),
   'external-apply: Workday disability checkbox group is force-committed when fieldset remains invalid');
+  t.ok(externalSource.includes('No disability fallback option 2') &&
+    externalSource.includes('disInputs.length === 3') &&
+    externalSource.includes('cb === disInputs[1]'),
+  'external-apply: Workday disability group can select standard No option when labels lack for= bindings');
   t.ok(externalSource.includes('profile.hispanicOrLatino = ans') &&
     externalSource.includes('fallbackHispanicAnswer') &&
     externalSource.includes('not hispanic|not latino') &&
