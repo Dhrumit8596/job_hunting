@@ -1953,7 +1953,12 @@ function pjaFillCombobox(input, value, key) {
         const selectedText = (msContainer?.querySelector('[data-automation-id="selectedItemList"], [data-automation-id="selectedItem"], [data-automation-id="promptOption"]')?.textContent || '').trim();
         if (!selectedText) return false;
         if (key === 'phoneCountryCode') return /united states/i.test(selectedText) && /\+?1\b/.test(selectedText);
-        if (key === 'referralSource') return /linkedin|job board|social media|online|internet|website|career/i.test(selectedText);
+        if (key === 'referralSource') {
+          // Workday tenants use company-specific source taxonomies ("Job Board: 104 Job Bank",
+          // "Applied Materials Corporate Website", etc.). Once a selected chip is present and it
+          // is not a placeholder, treat it as committed instead of retrying until timeout.
+          return /\S/.test(selectedText) && !/select one|select\.\.\.|choose|expanded|required only/i.test(selectedText);
+        }
         return /\S/.test(selectedText);
       } catch (_) {
         return false;

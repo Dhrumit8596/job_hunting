@@ -131,6 +131,10 @@ module.exports = async (t) => {
   t.ok(autofillSource.includes("key === 'referralSource' && !clicked") &&
     autofillSource.includes('highlighted parent row'),
   'combobox: Workday referral-source does not press Enter after scheduling an option click');
+  t.ok(autofillSource.includes('Job Board: 104 Job Bank') &&
+    autofillSource.includes('company-specific source taxonomies') &&
+    autofillSource.includes('! /select one|select\\.\\.\\.|choose|expanded|required only/i.test(selectedText)'.replace('! ', '!')),
+  'combobox: Workday referral-source accepts tenant-specific selected chips as committed');
   t.ok(autofillSource.includes("key === 'referralSource' && /workday-fail|synthetic|fail/i") &&
     autofillSource.includes("'+cdp-' + fallback"),
   'combobox: Workday referral-source falls back to CDP option click after trusted click failure');
