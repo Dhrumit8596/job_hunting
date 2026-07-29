@@ -1865,32 +1865,41 @@
           }).length === 0;
         if (isWorkdayDeadEnd) {
           const deadEndRetryKey = 'pja_wd_deadend_retry_' + (job.id || job.jobId || job.applyUrl || '');
-          if (sessionStorage.getItem(deadEndRetryKey) !== '1') {
-            sessionStorage.setItem(deadEndRetryKey, '1');
-            await addDbg('[WD] empty step shell; waiting for hydration before recovery');
+          const deadEndTries = parseInt(sessionStorage.getItem(deadEndRetryKey) || '0', 10);
+          if (deadEndTries < 3) {
+            sessionStorage.setItem(deadEndRetryKey, String(deadEndTries + 1));
+            await addDbg('[WD] empty step shell; waiting for hydration before recovery try=' + (deadEndTries + 1));
             let hydrated = false;
-            for (let w = 0; w < 40 && !hydrated; w++) {
+            for (let w = 0; w < 90 && !hydrated; w++) {
               await sleep(500);
               const visibleInputs = pjaQueryAllExt('input, textarea, select').filter(el => {
                 const r = el.getBoundingClientRect();
                 return r.width > 0 && r.height > 0;
               }).length;
+              const bodyNow = document.body.innerText || '';
               const nextNow = !!document.querySelector('[data-automation-id="pageFooterNextButton"],[data-automation-id="bottomNavigationNext"],[data-automation-id="bottomNavigationSubmit"]') ||
                 Array.from(document.querySelectorAll('[data-automation-id="click_filter"]'))
                   .some(el => /next|continue|submit|apply now/i.test(el.getAttribute('aria-label') || ''));
-              const stepNow = document.body.innerText.match(/current step (\d+)/i)?.[1] || '';
-              hydrated = visibleInputs > 0 || nextNow || (stepNow && stepNow !== '1');
+              const stepNow = bodyNow.match(/current step (\d+)/i)?.[1] || '';
+              const stillLoadingOnly = /\bLoading\b/i.test(bodyNow) && !/Errors Found|required field|select one|required/i.test(bodyNow);
+              hydrated = visibleInputs > 0 || nextNow || (stepNow && stepNow !== '1' && !stillLoadingOnly);
             }
             if (hydrated) {
               await addDbg('[WD] empty step shell hydrated; re-entering fill path');
               return runExternalApply(job, rawAnswers);
             }
-            await addDbg('[WD] empty step shell persisted; reloading apply route once');
-            location.assign(location.href);
+            const base = String(job.applyUrl || location.href).replace(/[?#].*$/, '').replace(/\/+$/, '');
+            const retryUrl = (/\/apply(?:\/|$)/i.test(base) ? base : base + '/apply/applyManually') +
+              '?pja_wd_entry_retry=1&pja_wd_hydrate_retry=' + (deadEndTries + 1);
+            await addDbg('[WD] empty step shell persisted; navigating apply route retry=' + (deadEndTries + 1));
+            location.assign(retryUrl);
             await sleep(5000);
             return runExternalApply(job, rawAnswers);
           }
-          await addDbg('[WD] empty step shell already retried once');
+          await addDbg('[WD] empty step shell exhausted retries; recording stuck_budget');
+          await recordResult(job, { success: false, reason: 'stuck_budget', fields: ['workday_empty_shell'] });
+          navigateBack(job);
+          return;
         }
         const diagBtns = Array.from(document.querySelectorAll('button')).map(b => (b.textContent||b.getAttribute('aria-label')||'').trim().slice(0,20)).filter(Boolean).slice(0,8);
         const diagCFs = Array.from(document.querySelectorAll('[data-automation-id="click_filter"]')).map(cf => cf.getAttribute('aria-label')||'noLabel').slice(0,5);

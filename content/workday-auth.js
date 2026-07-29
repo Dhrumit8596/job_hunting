@@ -91,6 +91,28 @@ function pjaWorkdayTenantEmail(email, hostname) {
   return `${m[1]}+wd-${slug}@${m[2].toLowerCase()}`;
 }
 
+function findWorkdayEmailInput() {
+  const candidates = Array.from(document.querySelectorAll(
+    'input[data-automation-id="email"], input[type=email], input[autocomplete="username"], ' +
+    'input[name*="email" i], input[id*="email" i], input[aria-label*="email" i], input[placeholder*="email" i], ' +
+    'input[name*="user" i], input[id*="user" i]'
+  ));
+  return candidates.find(el => {
+    if (!pjaWdVisible(el)) return false;
+    const type = String(el.getAttribute('type') || 'text').toLowerCase();
+    if (/password|checkbox|radio|hidden|submit|button|file/.test(type)) return false;
+    const text = [
+      el.getAttribute('data-automation-id') || '',
+      el.getAttribute('autocomplete') || '',
+      el.getAttribute('name') || '',
+      el.id || '',
+      el.getAttribute('aria-label') || '',
+      el.getAttribute('placeholder') || ''
+    ].join(' ');
+    return /email|e-mail|username|user name|login/i.test(text);
+  }) || null;
+}
+
 // ── Screen detection ──────────────────────────────────────────────────────
 
 // Finds the "Sign in with email" / "Continue with email" button that some Workday
@@ -112,7 +134,7 @@ function findEmailSignInButton() {
 
 function detectScreen() {
   const pwFields = document.querySelectorAll('input[type=password]');
-  const emailField = document.querySelector('input[data-automation-id="email"], input[type=email]');
+  const emailField = findWorkdayEmailInput();
 
   const bodyText = document.body?.innerText || '';
   const authAction = document.querySelector(
@@ -531,7 +553,7 @@ async function runForgotPassword(profile, password) {
   forgotLink.click();
   await sleep(1500);
 
-  const emailField = document.querySelector('input[data-automation-id="email"], input[type=email]');
+  const emailField = findWorkdayEmailInput();
   if (emailField) {
     const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set;
     if (setter) {

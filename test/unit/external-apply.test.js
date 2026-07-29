@@ -168,9 +168,11 @@ module.exports = (t) => {
   'external-apply: Workday job-description pages with Apply/Continue controls navigate to applyManually before no_submit');
   t.ok(externalSource.includes('empty step shell; waiting for hydration before recovery') &&
     externalSource.includes('empty step shell hydrated; re-entering fill path') &&
-    externalSource.includes('empty step shell persisted; reloading apply route once') &&
+    externalSource.includes('empty step shell persisted; navigating apply route retry=') &&
+    externalSource.includes('pja_wd_hydrate_retry=') &&
+    externalSource.includes("reason: 'stuck_budget', fields: ['workday_empty_shell']") &&
     !externalSource.includes('back-to-job-posting'),
-  'external-apply: Workday empty step shell waits/reloads instead of immediately clicking Back to Job Posting');
+  'external-apply: Workday empty step shell waits, retries direct apply route, then fails fast');
   t.ok(externalSource.includes("const retryKey = 'pja_wd_block_retry_' + (job.runId || 'norun')") &&
     externalSource.includes("(reasonHint || 'blocked')") &&
     externalSource.includes("(stepBefore || 'nostep')"),

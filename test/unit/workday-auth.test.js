@@ -106,6 +106,26 @@ module.exports = async (t) => {
   t.eq(createWithoutEmail.clicks, 0,
     'workday auth: invalid account-creation form is not submitted');
 
+  const createWithUsernameTextEmail = await runSynthetic(`
+    <input type="text" autocomplete="username" name="username">
+    <input type="password"><input type="password">
+    <button type="submit" data-automation-id="createAccountSubmitButton">Create Account</button>
+  `, 'createaccount');
+  t.eq(createWithUsernameTextEmail.result.ok, true,
+    'workday auth: account creation accepts text username/email fields');
+  t.eq(createWithUsernameTextEmail.clicks, 1,
+    'workday auth: text username/email create-account form submits');
+
+  const textEmailCreateScreen = loadWorkdayAuthDom(`
+    <body>
+      <input type="text" autocomplete="username" name="username">
+      <input type="password"><input type="password">
+      <button type="submit" data-automation-id="createAccountSubmitButton">Create Account</button>
+    </body>
+  `);
+  t.eq(textEmailCreateScreen.pjaWorkdayAuth._detectScreen(), 'createaccount',
+    'workday auth: text username/email field is detected as create-account screen');
+
   const signedInPosting = loadWorkdayAuthDom(`
     <body>
       <button data-automation-id="utilityMenuButton">candidate@example.test</button>

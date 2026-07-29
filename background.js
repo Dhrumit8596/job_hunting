@@ -2612,7 +2612,30 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
               if (window.__pjaCFInterval3) clearInterval(window.__pjaCFInterval3);
               window.__pjaCFInterval3 = setInterval(suppress, 20);
 
-              const emailEl = document.querySelector('input[data-automation-id="email"], input[type=email]');
+              const findEmailEl = () => {
+                const candidates = Array.from(document.querySelectorAll(
+                  'input[data-automation-id="email"], input[type=email], input[autocomplete="username"], ' +
+                  'input[name*="email" i], input[id*="email" i], input[aria-label*="email" i], input[placeholder*="email" i], ' +
+                  'input[name*="user" i], input[id*="user" i]'
+                ));
+                return candidates.find(el => {
+                  const type = String(el.getAttribute('type') || 'text').toLowerCase();
+                  if (/password|checkbox|radio|hidden|submit|button|file/.test(type)) return false;
+                  const r = el.getBoundingClientRect();
+                  const isJsdom = /jsdom/i.test(String(window.navigator && window.navigator.userAgent || ''));
+                  if (!isJsdom && !((el.offsetParent !== null) || r.width > 0 || r.height > 0)) return false;
+                  const text = [
+                    el.getAttribute('data-automation-id') || '',
+                    el.getAttribute('autocomplete') || '',
+                    el.getAttribute('name') || '',
+                    el.id || '',
+                    el.getAttribute('aria-label') || '',
+                    el.getAttribute('placeholder') || ''
+                  ].join(' ');
+                  return /email|e-mail|username|user name|login/i.test(text);
+                }) || null;
+              };
+              const emailEl = findEmailEl();
               const pwEls = Array.from(document.querySelectorAll('input[type=password]'));
 
               const setVal = (el, val) => {
