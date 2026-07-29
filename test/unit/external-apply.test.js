@@ -46,14 +46,16 @@ module.exports = (t) => {
   t.ok(externalSource.includes('wd-phone-code-postfill') &&
     externalSource.includes('input[data-uxi-widget-type="selectinput"], input[role="combobox"], input[required], input[aria-required="true"]') &&
     externalSource.includes('wd-phone-code-prompts') &&
-    externalSource.includes('const wdSelectedText = root =>'),
+    externalSource.includes('const workdaySelectedTextFor = (el) =>'),
   'external-apply: Workday phone-code fallback runs after AI postfill and scans non-selectinput required controls');
-  t.ok(externalSource.includes('wdSelectedText = root =>') &&
+  t.ok(externalSource.includes('workdaySelectedTextFor') &&
     externalSource.includes('[data-automation-id="selectedItemList"], [data-automation-id="selectedItem"], [data-automation-id="promptOption"]') &&
-    externalSource.includes('const selected = wdSelectedText(ms)'),
+    externalSource.includes('const selectedText = typeof workdaySelectedTextFor'),
   'external-apply: Workday selected-value checks accept selectedItem/promptOption-only DOMs');
-  t.ok(externalSource.includes("el.closest('[data-uxi-widget-type=\"multiselect\"]') ||") &&
-    externalSource.includes("el.closest('[data-automation-id^=\"formField\"], fieldset')"),
+  t.ok(externalSource.includes("el.closest('[data-uxi-widget-type=\"multiselect\"]')") &&
+    externalSource.includes("el.closest('[data-automation-id^=\"formField\"], [data-automation-id^=\"question\"], fieldset')") &&
+    externalSource.includes('company: job.company ||') &&
+    externalSource.includes('url: location.href'),
   'external-apply: Workday diagnostics read selected chips from the multiselect container before shallow wrappers');
   t.ok(externalSource.includes('United States of America (+1)') &&
     externalSource.includes('\\d+\\s*item selected') &&
@@ -242,10 +244,10 @@ module.exports = (t) => {
     externalSource.includes("(reasonHint || 'blocked')") &&
     externalSource.includes("(stepBefore || 'nostep')"),
   'external-apply: Workday blocked retry key is scoped by runId and recovery phase so fresh retries are not suppressed');
-  t.ok(externalSource.includes('promptAriaInstruction') &&
+  t.ok(!externalSource.includes('promptAriaInstruction') &&
     externalSource.includes("el.closest('[data-automation-id=\"activeListContainer\"], [role=\"listbox\"]')") &&
     externalSource.includes("el.closest('[data-uxi-widget-type=\"multiselect\"]')"),
-  'external-apply: required-field AI collector skips Workday generated multiselect/listbox search inputs');
+  'external-apply: required-field AI collector skips Workday generated multiselect/listbox search inputs and ignores instruction-only text');
   t.ok(externalSource.includes('const workdayComboKeyFor = f =>') &&
     externalSource.includes("return 'phoneCountryCode'") &&
     externalSource.includes("return 'referralSource'") &&
@@ -310,6 +312,8 @@ module.exports = (t) => {
   // --- misc ---
   t.eq(a('Are you 18 years of age or older?'), 'Yes', '18+ -> Yes');
   t.eq(a('Are you currently or have you within the last 12 months worked at the company?'), 'No', 'worked-here -> No');
+  t.eq(a('Can you safely and efficiently perform the essential functions of the position for which you applied?'), 'Yes', 'essential functions -> Yes');
+  t.eq(a('Are you a Temp or a Contractor'), 'No', 'temp/contractor -> No');
   t.eq(a('How did you hear about us?'), 'LinkedIn', 'Workday source question -> referral source');
   t.eq(a('State and federal law require Abbott to track and report certain payments and transfers of value provided to certain health care professionals (HCPs). Are you: (A) A physician - MD, DO, Dentist, DDS, Podiatrist, Optometrist or Chiropractor - with an active license to practice in the US; (B) a Massachusetts-licensed prescriber; or (C) None of the above?'), 'C', 'Workday HCP disclosure -> C / none of the above');
   t.eq(w.pjaPickAnswerOption('C', ['Select One', 'A', 'B', 'C'], P), 'C', 'Workday HCP disclosure option C selected exactly');

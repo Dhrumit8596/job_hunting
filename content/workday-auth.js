@@ -810,7 +810,12 @@ async function run(profile, password) {
     }
     const signInResult = await runSignIn(effectiveProfile, existing.password || password);
     if (signInResult === 'sign_in_error') {
-      dbg('stored account sign-in failed — clearing account and retrying create path once');
+      dbg('stored account sign-in failed — trying forgot-password recovery before create path');
+      const resetResult = await runForgotPassword(profile, password);
+      if (resetResult === 'needs_gmail_verify' || resetResult === 'signed_in' || resetResult === 'account_created_verified') {
+        return resetResult;
+      }
+      dbg('forgot-password recovery failed after stored account sign-in error — clearing account and retrying create path once');
       await deleteAccount(hostname);
       if (sessionStorage.getItem('pja_wd_auth_create_retry_' + hostname) !== '1') {
         sessionStorage.setItem('pja_wd_auth_create_retry_' + hostname, '1');

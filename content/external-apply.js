@@ -1593,9 +1593,10 @@
           });
           await sleep(250);
           const valDigits = String(el.value || '').replace(/\D/g, '');
-          if (valDigits.includes(digits.slice(-7))) committed++;
+          const ok = valDigits.includes(digits.slice(-7));
+          if (ok) committed++;
           await addDbg('[WD-MYINFO] trusted phoneNumber insertText ' + (label || '') +
-            ' ok=' + !!resp.ok + ' valLen=' + valDigits.length + (resp.error ? ' err=' + String(resp.error).slice(0, 50) : ''));
+            ' ok=' + !!resp.ok + ' committed=' + ok + ' valLen=' + valDigits.length + (resp.error ? ' err=' + String(resp.error).slice(0, 50) : ''));
         } catch (e) {
           await addDbg('[WD-MYINFO] trusted phoneNumber insertText error=' + String(e && e.message || e).slice(0, 80));
         } finally {
@@ -1670,6 +1671,29 @@
           input?.value || '',
         ].join(' ').replace(/\s+/g, ' ').trim();
       }
+      return '';
+    };
+    const workdaySelectedTextFor = (el) => {
+      if (!el || !/workday\.com|myworkdayjobs\.com/i.test(location.hostname)) return '';
+      try {
+        const roots = [
+          el.closest('[data-uxi-widget-type="multiselect"]'),
+          el.closest('[data-automation-id^="formField"], [data-automation-id^="question"], fieldset'),
+          el.parentElement,
+        ].filter(Boolean);
+        for (const root of roots) {
+          const selected = Array.from(root.querySelectorAll(
+            '[data-automation-id="selectedItemList"], [data-automation-id="selectedItem"], [data-automation-id="promptOption"]'
+          )).map(node => (node.textContent || '').replace(/\s+/g, ' ').trim())
+            .find(txt => txt && !/^select one|select\.\.\.|required|choose$/i.test(txt));
+          if (selected) return selected;
+          const text = (root.textContent || '').replace(/\s+/g, ' ').trim();
+          if (/\d+\s*item selected/i.test(text)) return text;
+          if (/united states(?: of america)?\s*\(\+?1\)/i.test(text)) return text;
+          if (/linkedin|indeed|job board|social media|career(?:s)? website|company website/i.test(text) &&
+              !/select one|select\.\.\.|required only/i.test(text)) return text;
+        }
+      } catch (_) {}
       return '';
     };
     const workdayMyInfoCommitGaps = () => {
@@ -2322,6 +2346,7 @@
           )).map(el => {
             const root = el.closest('fieldset,[data-automation-id^="formField"],[data-automation-id^="question"],div') || el.parentElement;
             const selected = root?.querySelector('[data-automation-id="selectedItemList"], [class*="singleValue"], [class*="single-value"]');
+            const wdSelected = typeof workdaySelectedTextFor === 'function' ? workdaySelectedTextFor(el) : '';
             const rawLabel = (typeof getLabelFor === 'function' ? getLabelFor(el) : '') ||
               root?.querySelector('legend,label')?.textContent || el.getAttribute('aria-label') || '';
             return {
@@ -2335,7 +2360,8 @@
               required: !!el.required || el.getAttribute('aria-required') === 'true',
               invalid: el.getAttribute('aria-invalid') === 'true' || /-error$/.test(el.getAttribute('data-automation-id') || ''),
               valuePresent: 'value' in el ? !!String(el.value || '').trim() : undefined,
-              selectedPresent: !!selected?.textContent?.trim()
+              selectedPresent: !!(wdSelected || selected?.textContent?.trim()),
+              selectedText: String(wdSelected || selected?.textContent || '').replace(/\s+/g, ' ').trim().slice(0, 120)
             };
           }).filter((item, index, all) => item.label || item.id || item.automationId)
             .filter((item, index, all) => index === all.findIndex(other =>
@@ -2344,7 +2370,8 @@
           await new Promise(resolve => chrome.storage.local.set({
             pja_wd_error_diag: {
               ts: Date.now(), runId: job.runId || '', jobId: job.id || job.jobId || '',
-              step: stepTextBefore || '', controls: rejectedControls, errorLabels: workdayErrorLabels
+              company: job.company || '', title: job.title || '', applyUrl: job.applyUrl || location.href,
+              url: location.href, step: stepTextBefore || '', controls: rejectedControls, errorLabels: workdayErrorLabels
             }
           }, resolve));
         } catch (_) {}
@@ -3375,6 +3402,10 @@
     } else if (/artificial intelligence|\bai\b|machine learning.*(recruit|process|assess)|consent.*(ai|automated)/i.test(label)) {
       return 'Yes';   // consent to AI use in recruiting
     } else if (/ongoing negotiations|rfps?|procurements/i.test(label) && /current employer|employer/i.test(label)) {
+      return 'No';
+    } else if (/safely|efficiently|able|can you|perform/i.test(label) && /essential (functions|duties)|essential functions of the position/i.test(label)) {
+      return 'Yes';
+    } else if (/\btemp\b|temporary|contractor/i.test(label)) {
       return 'No';
     } else if (/worked (at|for)|employed (at|by)|are you (currently|now).*(employee|work)|former.*employee|previously work|current.*employee/i.test(label)) {
       return 'No';
@@ -4490,7 +4521,8 @@
         el.dispatchEvent(new InputEvent('beforeinput', { bubbles: true, data: digitsPhone, inputType: 'insertText' }));
         el.dispatchEvent(new InputEvent('input', { bubbles: true, data: digitsPhone, inputType: 'insertText' }));
         el.dispatchEvent(new Event('change', { bubbles: true }));
-        count++;
+        const valDigits = String(el.value || '').replace(/\D/g, '');
+        if (valDigits.includes(digitsPhone.slice(-7))) count++;
       } catch (_) {}
     }
     return count;
@@ -4556,11 +4588,13 @@
       // Check the multiselect container's selectedItemList text instead.
       const isWdSelectinput = el.getAttribute('data-uxi-widget-type') === 'selectinput';
       if (!val && isWdSelectinput) {
+        const selectedText = typeof workdaySelectedTextFor === 'function' ? workdaySelectedTextFor(el) : '';
+        if (selectedText) val = selectedText;
         const msContainer = el.closest('[data-uxi-widget-type="multiselect"]');
         const selectedList = msContainer?.querySelector('[data-automation-id="selectedItemList"], [data-automation-id="selectedItem"], [data-automation-id="promptOption"]');
-        if (selectedList?.textContent?.trim()) val = selectedList.textContent.trim();
-        else if (/\d+\s*item/i.test(msContainer?.textContent || '')) val = '1 item selected';
-        else {
+        if (!val && selectedList?.textContent?.trim()) val = selectedList.textContent.trim();
+        if (!val && /\d+\s*item/i.test(msContainer?.textContent || '')) val = '1 item selected';
+        if (!val) {
           const fieldText = (el.closest('[data-automation-id^="formField"], [data-uxi-widget-type="multiselect"], fieldset, div')?.textContent || '')
             .replace(/\s+/g, ' ');
           if (/(country|territory).{0,60}phone.{0,30}code|phone.{0,30}(country|territory).{0,30}code|dial(?:ing|ling) code/i.test(fieldText) &&
@@ -4832,8 +4866,10 @@
         if (el.closest('[data-automation-id="activeListContainer"], [role="listbox"]')) continue;
         const wdMs = el.closest('[data-uxi-widget-type="multiselect"]');
         if (wdMs) {
-          const selectedText = (wdMs.querySelector('[data-automation-id="selectedItemList"], [data-automation-id="selectedItem"], [data-automation-id="promptOption"], [data-automation-id="promptAriaInstruction"]')?.textContent || '')
-            .replace(/\s+/g, ' ').trim();
+          const selectedText = typeof workdaySelectedTextFor === 'function'
+            ? workdaySelectedTextFor(el)
+            : (wdMs.querySelector('[data-automation-id="selectedItemList"], [data-automation-id="selectedItem"], [data-automation-id="promptOption"]')?.textContent || '')
+              .replace(/\s+/g, ' ').trim();
           if (selectedText && !/^select one|select\.\.\./i.test(selectedText)) continue;
         }
       }

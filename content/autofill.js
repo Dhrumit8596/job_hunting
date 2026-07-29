@@ -1360,14 +1360,22 @@ async function pjaFillSmartRecruitersCustomFields(profile) {
   }
   pjaQueryAll('input[type="checkbox"][required], input[type="checkbox"][aria-required="true"]')
     .forEach(cb => {
-      const label = (typeof pjaGetLabel === 'function' ? pjaGetLabel(cb) : '') + ' ' + (cb.closest('label, spl-form-element, div')?.textContent || '');
-      if (/privacy notice|privacy policy|read and agree|declare that you have read|terms/i.test(label) && !cb.checked) {
+      const label = [
+        typeof pjaGetLabel === 'function' ? pjaGetLabel(cb) : '',
+        cb.id || '',
+        cb.name || '',
+        cb.getAttribute('aria-label') || '',
+        cb.closest('label, spl-form-element, [data-automation-id^="formField"], div')?.textContent || ''
+      ].join(' ').replace(/\s+/g, ' ');
+      if (/(privacy notice|privacy policy|read and agree|declare that you have read|terms|terms and conditions|accept terms|consent to the terms|termsAndConditions|acceptTermsAndAgreements)/i.test(label) && !cb.checked) {
         try {
-          const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'checked')?.set;
-          if (setter) setter.call(cb, true); else cb.checked = true;
+          cb.click();
+          if (!cb.checked) {
+            const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'checked')?.set;
+            if (setter) setter.call(cb, true); else cb.checked = true;
+          }
           cb.dispatchEvent(new Event('input', { bubbles: true, composed: true }));
           cb.dispatchEvent(new Event('change', { bubbles: true, composed: true }));
-          cb.click();
           filled++;
           dbg('privacy checkbox checked');
         } catch (_) {}
@@ -2531,6 +2539,9 @@ async function pjaFillWorkdayPromptButtons(profile) {
   const phoneType = String(profile && profile.phoneType || 'Mobile').trim();
   const degree = String(profile && (profile.degree || profile.educationDegree) || 'Bachelor').trim();
   const hispanicOrLatino = String(profile && (profile.hispanicOrLatino || profile.hispanic) || '').trim();
+  const ethnicity = String(profile && (profile.ethnicity || profile.raceEthnicity || profile.race) || '').trim();
+  const veteran = String(profile && profile.veteran || '').trim();
+  const declineEeo = txt => /decline|prefer not|choose not|do not wish|not disclose|not wish to answer|do not want to answer|not specified/i.test(txt);
   const specs = [];
   for (const button of Array.from(document.querySelectorAll('button'))) {
     const text = (button.textContent || '').trim().replace(/\s+/g, ' ');
@@ -2589,14 +2600,42 @@ async function pjaFillWorkdayPromptButtons(profile) {
       } });
     } else if (/ongoing negotiations|rfps?|procurements/i.test(label) && /current employer|employer/i.test(label) && unresolved) {
       specs.push({ button, key: 'currentEmployerProcurementConflict', match: txt => /^no\b/i.test(txt) });
-    } else if (/hispanic|latino/i.test(label) && unresolved && hispanicOrLatino) {
+    } else if (/hispanic|latino/i.test(label) && unresolved) {
       specs.push({ button, key: 'hispanicOrLatino', match: txt => {
         const t = txt.toLowerCase().replace(/\s+/g, ' ').trim();
         const h = hispanicOrLatino.toLowerCase();
+        if (!h) return declineEeo(t);
         if (/^no\b|not hispanic|not latino/i.test(h)) return /^no\b|not hispanic|not latino/.test(t);
         if (/^yes\b|hispanic|latino/i.test(h) && !/not hispanic|not latino/.test(h)) return /^yes\b/.test(t) || (/hispanic|latino/.test(t) && !/not hispanic|not latino/.test(t));
-        if (/decline|prefer not|choose not|do not wish/i.test(h)) return /decline|prefer not|choose not|do not wish|not disclose/i.test(t);
+        if (declineEeo(h)) return declineEeo(t);
         return false;
+      } });
+    } else if (/ethnicity|race/i.test(label) && unresolved) {
+      specs.push({ button, key: 'ethnicity', match: txt => {
+        const t = txt.toLowerCase().replace(/\s+/g, ' ').trim();
+        const e = ethnicity.toLowerCase();
+        if (!e || declineEeo(e)) return declineEeo(t);
+        if (/asian/i.test(e)) return /\basian\b/i.test(t);
+        if (/white|caucasian/i.test(e)) return /\bwhite\b|caucasian/i.test(t);
+        if (/black|african american/i.test(e)) return /\bblack\b|african american/i.test(t);
+        if (/native hawaiian|pacific islander/i.test(e)) return /native hawaiian|pacific islander/i.test(t);
+        if (/american indian|alaska native/i.test(e)) return /american indian|alaska native/i.test(t);
+        if (/two or more|multiracial|multiple/i.test(e)) return /two or more|multiracial|multiple/i.test(t);
+        return t.includes(e);
+      } });
+    } else if (/veteran/i.test(label) && unresolved) {
+      specs.push({ button, key: 'veteran', match: txt => {
+        const t = txt.toLowerCase().replace(/\s+/g, ' ').trim();
+        const v = veteran.toLowerCase();
+        if (!v || declineEeo(v)) return declineEeo(t);
+        if (/not a protected veteran|not.*veteran|^no\b|i am not a veteran/i.test(v)) {
+          return /not a protected veteran|not.*veteran|^no\b|i am not a veteran/i.test(t);
+        }
+        if (/protected veteran|disabled veteran|recently separated|active duty|armed forces/i.test(v)) {
+          return /protected veteran|disabled veteran|recently separated|active duty|armed forces/i.test(t) &&
+            !/not a protected veteran|not.*veteran/i.test(t);
+        }
+        return t.includes(v);
       } });
     } else if (/^degree\b/i.test(label) && unresolved) {
       const wantsBachelor = /bachelor|b\.\s*e\.?|undergraduate/i.test(degree);
