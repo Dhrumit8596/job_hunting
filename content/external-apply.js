@@ -716,13 +716,20 @@
     // Promote explicit answer-bank EEO values into the in-memory profile so Workday prompt
     // buttons can use saved user answers without guessing sensitive demographics.
     if (!String(profile.hispanicOrLatino || profile.hispanic || '').trim()) {
+      let fallbackHispanicAnswer = '';
       for (const [rawLabel, rec] of Object.entries(answers || {})) {
         const label = String(rawLabel || '').toLowerCase();
         const ans = String((rec && (rec.answer ?? rec)) || '').trim();
         if (/hispanic|latino/.test(label) && ans) {
-          profile.hispanicOrLatino = ans;
-          break;
+          if (/^yes\b|^no\b|not hispanic|not latino/i.test(ans)) {
+            profile.hispanicOrLatino = ans;
+            break;
+          }
+          if (!fallbackHispanicAnswer) fallbackHispanicAnswer = ans;
         }
+      }
+      if (!String(profile.hispanicOrLatino || '').trim() && fallbackHispanicAnswer) {
+        profile.hispanicOrLatino = fallbackHispanicAnswer;
       }
     }
     // Write the merged profile back onto the job so downstream helpers that read job.profile —

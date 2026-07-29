@@ -119,8 +119,10 @@ module.exports = (t) => {
     externalSource.includes("nativeChecked.call(other, false)"),
   'external-apply: Workday disability checkbox group is force-committed when fieldset remains invalid');
   t.ok(externalSource.includes('profile.hispanicOrLatino = ans') &&
+    externalSource.includes('fallbackHispanicAnswer') &&
+    externalSource.includes('not hispanic|not latino') &&
     externalSource.includes('without guessing sensitive demographics'),
-  'external-apply: explicit answer-bank Hispanic/Latino values are promoted for Workday EEO prompts');
+  'external-apply: explicit answer-bank Hispanic/Latino Yes/No values are preferred over decline fallbacks');
   t.ok(externalSource.includes('/hispanicOrLatino/i.test(buttonId)') &&
     externalSource.includes('Are you Hispanic or Latino?') &&
     externalSource.includes('[data-automation-id="promptOption"]'),
