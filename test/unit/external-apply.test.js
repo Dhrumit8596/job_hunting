@@ -82,6 +82,10 @@ module.exports = (t) => {
     externalSource.includes('no advance after trusted click; trying MAIN-world advance') &&
     externalSource.includes('await mainWorldWorkdayAdvance(nextBtn'),
   'external-apply: Workday step loop falls back to MAIN-world advance when trusted click does not advance');
+  t.ok(externalSource.includes('trusted_click_timeout') &&
+    externalSource.includes('trusted_enter_timeout') &&
+    externalSource.includes('main_advance_timeout'),
+  'external-apply: Workday trusted click/enter/main-world advance calls are bounded so CDP stalls do not trip the watchdog');
   t.ok(externalSource.includes("const isPhoneById = /^(phone|phoneNumber)$/i") &&
     externalSource.includes("el.name || ''") &&
     externalSource.includes("(phone\\s*)?extension"),
@@ -113,6 +117,38 @@ module.exports = (t) => {
     externalSource.includes("profile?.signatureDate ? new Date(profile.signatureDate) : new Date()") &&
     externalSource.includes('[WD] self-identify date filled='),
   'external-apply: Workday Self Identify signature date uses the current date and can overwrite stale values');
+  t.ok(externalSource.includes('const workdaySelfIdentifyTransaction = async (profileArg, phase) =>') &&
+    externalSource.includes('[WD-SID] transaction start phase=') &&
+    externalSource.includes('await workdayCommitSelfIdentifyDisability(profileArg)') &&
+    externalSource.includes('await workdayCommitSelfIdentifyName(profileArg)') &&
+    externalSource.includes('await workdayCommitSelfIdentifyDate(profileArg)') &&
+    externalSource.includes('[WD-SID] verify phase='),
+  'external-apply: Workday Self Identify is filled as one ordered disability→name→date transaction with verification');
+  t.ok(externalSource.includes('const sidStepAtTop = isWorkdaySelfIdentifyStep()') &&
+    externalSource.includes("workdaySelfIdentifyTransaction(profile, 'step-' + steps)") &&
+    externalSource.includes("workdaySelfIdentifyTransaction(profile, 'pre-click-' + steps)") &&
+    externalSource.includes("workdaySelfIdentifyTransaction(profile, 'validation-error-' + steps)") &&
+    externalSource.includes('do not run generic form/My Info fillers'),
+  'external-apply: Workday Self Identify step loop uses the SID transaction instead of generic My Info/form fillers');
+  t.ok(externalSource.includes('[ext] WD appQ fill: SID skipped; transaction-owned') &&
+    externalSource.indexOf('[ext] WD appQ fill: SID skipped; transaction-owned') < externalSource.indexOf('const fields = Array.from(new Set(['),
+  'external-apply: legacy Workday app-question filler exits on Self Identify pages so it cannot corrupt transaction-owned SID fields');
+  t.ok(externalSource.includes('Do not match the Workday left/top step navigation text alone') &&
+    externalSource.includes('public burden statement|omb control number|please check one of the boxes below') &&
+    externalSource.includes('if (inputs.length) return inputs.some(input => input.checked)'),
+  'external-apply: Workday Self Identify detection ignores inactive step navigation and requires checked disability input when rendered');
+  t.ok(externalSource.includes('const setNativeDateDom = () =>') &&
+    externalSource.includes('[WD-SID] date nativeFallback n=') &&
+    externalSource.includes("type: 'WORKDAY_TYPE_DATE'") &&
+    externalSource.includes('workdaySelfIdentifyDateValid()'),
+  'external-apply: Workday Self Identify date uses a native DOM fallback after CDP date hook/typing leaves invalid visible spinners');
+  t.ok(externalSource.includes('const yearOk = (y >= 2020 && y <= 2100) || (y >= 20 && y <= 99)') &&
+    externalSource.includes('!parts.month.invalid && !parts.day.invalid && !parts.year.invalid'),
+  'external-apply: Workday Self Identify date validation accepts Workday two-digit years when controls are not invalid');
+  t.ok(externalSource.includes('if (!isWorkdaySelfIdentifyStep()) {') &&
+    externalSource.includes("pjaFillRequiredComboboxFallback(profile, answers)") &&
+    externalSource.includes("pjaFillRequiredRadioFallback()"),
+  'external-apply: Workday blocked-advance recovery does not run generic required-field fallbacks on Self Identify');
   t.ok(externalSource.includes('const disInvalid = disField.getAttribute') &&
     externalSource.includes('forced-invalid') &&
     externalSource.includes("nativeChecked.call(cb, true)") &&

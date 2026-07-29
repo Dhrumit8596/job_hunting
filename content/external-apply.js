@@ -1403,7 +1403,14 @@
       try {
         el.scrollIntoView({ block: 'center', behavior: 'instant' });
         const resp = await new Promise(resolve => {
+          let done = false;
+          const timer = setTimeout(() => {
+            if (!done) { done = true; resolve({ ok: false, error: 'trusted_click_timeout' }); }
+          }, 7000);
           chrome.runtime.sendMessage({ type: 'WORKDAY_TRUSTED_CLICK', selector: '#' + CSS.escape(tempId), single: true }, r => {
+            if (done) return;
+            done = true;
+            clearTimeout(timer);
             resolve(chrome.runtime.lastError ? { error: chrome.runtime.lastError.message } : (r || {}));
           });
         });
@@ -1424,7 +1431,14 @@
           try { el.focus(); } catch (_) {}
         }
         const resp = await new Promise(resolve => {
+          let done = false;
+          const timer = setTimeout(() => {
+            if (!done) { done = true; resolve({ ok: false, error: 'trusted_enter_timeout' }); }
+          }, 7000);
           chrome.runtime.sendMessage({ type: 'WORKDAY_TRUSTED_ENTER' }, r => {
+            if (done) return;
+            done = true;
+            clearTimeout(timer);
             resolve(chrome.runtime.lastError ? { error: chrome.runtime.lastError.message } : (r || {}));
           });
         });
@@ -1443,11 +1457,20 @@
       try {
         el.scrollIntoView({ block: 'center', behavior: 'instant' });
         const resp = await new Promise(resolve => {
+          let done = false;
+          const timer = setTimeout(() => {
+            if (!done) { done = true; resolve({ ok: false, error: 'main_advance_timeout' }); }
+          }, 9000);
           chrome.runtime.sendMessage({
             type: 'WORKDAY_ADVANCE_STEP',
             selector: '#' + CSS.escape(tempId),
             label: label || ''
-          }, r => resolve(chrome.runtime.lastError ? { error: chrome.runtime.lastError.message } : (r || {})));
+          }, r => {
+            if (done) return;
+            done = true;
+            clearTimeout(timer);
+            resolve(chrome.runtime.lastError ? { error: chrome.runtime.lastError.message } : (r || {}));
+          });
         });
         await addDbg('[WD] main advance ' + (label || '') + ' ok=' + !!resp.ok +
           (resp.via ? ' via=' + resp.via : '') + (resp.error ? ' err=' + String(resp.error).slice(0, 60) : ''));
@@ -1707,6 +1730,210 @@
       }
       return workdayMyInfoCommitGaps();
     };
+    const isWorkdaySelfIdentifyStep = () => {
+      if (!/workday\.com|myworkdayjobs\.com/i.test(location.hostname)) return false;
+      const bodyText = (document.body?.innerText || '').replace(/\s+/g, ' ');
+      const hasSidControls = !!document.querySelector(
+        '[data-automation-id="formField-dateSignedOn"], ' +
+        '[data-automation-id="formField-disabilityStatus"], ' +
+        '[data-automation-id*="selfIdentifiedDisabilityData"]'
+      );
+      if (hasSidControls) return true;
+      // Do not match the Workday left/top step navigation text alone. It contains
+      // "Self Identify" on every step, including My Information. Require content that
+      // exists in the active disability form itself.
+      return /public burden statement|omb control number|please check one of the boxes below/i.test(bodyText) &&
+        /disability|date signed|signed on/i.test(bodyText);
+    };
+    const workdaySelfIdentifyDateParts = () => {
+      const dateField = document.querySelector('[data-automation-id="formField-dateSignedOn"]') || document;
+      const read = sel => {
+        const el = dateField.querySelector(sel);
+        const raw = String(el?.value || el?.getAttribute('aria-valuenow') || el?.getAttribute('aria-valuetext') || '').trim();
+        return { el, raw, invalid: el?.getAttribute('aria-invalid') === 'true' };
+      };
+      return {
+        month: read('input[data-automation-id="dateSectionMonth-input"], [role="spinbutton"][aria-label="Month"]'),
+        day: read('input[data-automation-id="dateSectionDay-input"], [role="spinbutton"][aria-label="Day"]'),
+        year: read('input[data-automation-id="dateSectionYear-input"], [role="spinbutton"][aria-label="Year"]')
+      };
+    };
+    const workdaySelfIdentifyDateValid = () => {
+      const parts = workdaySelfIdentifyDateParts();
+      const m = parseInt(parts.month.raw, 10);
+      const d = parseInt(parts.day.raw, 10);
+      const y = parseInt(parts.year.raw, 10);
+      const yearOk = (y >= 2020 && y <= 2100) || (y >= 20 && y <= 99);
+      return !parts.month.invalid && !parts.day.invalid && !parts.year.invalid &&
+        m >= 1 && m <= 12 && d >= 1 && d <= 31 && yearOk;
+    };
+    const workdaySelfIdentifyDisabilitySelected = () => {
+      const disField = document.querySelector('[data-automation-id="formField-disabilityStatus"]');
+      if (!disField) return true;
+      const inputs = Array.from(disField.querySelectorAll('input[type="checkbox"], input[type="radio"]'));
+      if (inputs.length) return inputs.some(input => input.checked);
+      return disField.getAttribute('aria-invalid') !== 'true' &&
+        !disField.querySelector('[aria-invalid="true"], [data-automation-id$="-error"]');
+    };
+    const workdaySelfIdentifyNameCommitted = (profileArg) => {
+      const fullName = String(profileArg?.fullName || ((profileArg?.firstName || '') + ' ' + (profileArg?.lastName || '')).trim()).trim();
+      const nameField = document.querySelector('[data-automation-id="formField-name"] input[type="text"]');
+      if (!nameField) return true;
+      const value = String(nameField.value || '').trim();
+      return !!value && (!fullName || value.length >= Math.min(4, fullName.length));
+    };
+    const workdaySelfIdentifyGaps = (profileArg) => {
+      if (!isWorkdaySelfIdentifyStep()) return [];
+      const gaps = [];
+      if (!workdaySelfIdentifyDisabilitySelected()) gaps.push('disabilityStatus');
+      if (!workdaySelfIdentifyNameCommitted(profileArg)) gaps.push('signatureName');
+      if (document.querySelector('[data-automation-id="formField-dateSignedOn"]') && !workdaySelfIdentifyDateValid()) gaps.push('dateSignedOn');
+      return gaps;
+    };
+    const workdayCommitSelfIdentifyDisability = async (profileArg) => {
+      const disField = document.querySelector('[data-automation-id="formField-disabilityStatus"]');
+      if (!disField) return { present: false, selected: true };
+      const dis = String(profileArg?.disability || '').toLowerCase();
+      const targetRe = /no|do not|don.t/i.test(dis) ? /no.*disab|not have.*disab|without.*disab/i
+        : /yes|have a disab/i.test(dis) ? /yes.*disab|have.*disab/i
+        : /do not want|not answer|decline|prefer not/i;
+      const inputs = Array.from(disField.querySelectorAll('input[type="checkbox"], input[type="radio"]'));
+      let target = null;
+      let targetLabel = '';
+      for (const input of inputs) {
+        const lbl = input.id ? document.querySelector('label[for="' + CSS.escape(input.id) + '"]') : null;
+        const text = (lbl?.textContent || input.getAttribute('aria-label') || '').trim().replace(/\s+/g, ' ');
+        if (text && targetRe.test(text)) {
+          target = input;
+          targetLabel = text;
+          break;
+        }
+      }
+      if (!target && /no|do not|don.t/i.test(dis) && inputs.length === 3) {
+        target = inputs[1];
+        targetLabel = 'No disability fallback option 2';
+      }
+      if (!target && inputs.length) {
+        target = inputs.find(input => !input.checked) || inputs[0];
+        targetLabel = 'fallback disability option';
+      }
+      if (!target) return { present: true, selected: false };
+      const labelEl = target.id ? document.querySelector('label[for="' + CSS.escape(target.id) + '"]') : null;
+      for (const other of inputs) {
+        if (other !== target && other.checked) {
+          const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'checked')?.set;
+          try { setter ? setter.call(other, false) : (other.checked = false); } catch (_) { other.checked = false; }
+          other.dispatchEvent(new InputEvent('input', { bubbles: true, composed: true }));
+          other.dispatchEvent(new Event('change', { bubbles: true, composed: true }));
+        }
+      }
+      if (!target.checked || !workdaySelfIdentifyDisabilitySelected()) {
+        if (labelEl) {
+          await trustedWorkdayClick(labelEl, 'sid-disability-label');
+        } else {
+          const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'checked')?.set;
+          try { setter ? setter.call(target, true) : (target.checked = true); } catch (_) { target.checked = true; }
+          target.dispatchEvent(new InputEvent('input', { bubbles: true, composed: true }));
+          target.dispatchEvent(new Event('change', { bubbles: true, composed: true }));
+        }
+        await sleep(650);
+      }
+      const selected = workdaySelfIdentifyDisabilitySelected();
+      await addDbg('[WD-SID] disability selected=' + selected + ' target=' + targetLabel.slice(0, 45));
+      return { present: true, selected };
+    };
+    const workdayCommitSelfIdentifyName = async (profileArg) => {
+      const nameField = document.querySelector('[data-automation-id="formField-name"] input[type="text"]');
+      const fullName = String(profileArg?.fullName || ((profileArg?.firstName || '') + ' ' + (profileArg?.lastName || '')).trim()).trim();
+      if (!nameField || !fullName) return { present: !!nameField, committed: !nameField };
+      const priorId = nameField.id;
+      const tempId = priorId || ('__pja_sid_name_' + Date.now() + '_' + Math.random().toString(36).slice(2, 7));
+      if (!priorId) nameField.id = tempId;
+      try {
+        const resp = await new Promise(resolve => {
+          chrome.runtime.sendMessage({ type: 'WORKDAY_SET_SID', selector: '#' + CSS.escape(tempId), text: fullName }, r => {
+            resolve(chrome.runtime.lastError ? { ok: false, error: chrome.runtime.lastError.message } : (r || {}));
+          });
+        });
+        await sleep(350);
+        const committed = workdaySelfIdentifyNameCommitted(profileArg);
+        await addDbg('[WD-SID] name committed=' + committed + ' ok=' + !!resp.ok +
+          (resp.error ? ' err=' + String(resp.error).slice(0, 50) : ''));
+        return { present: true, committed };
+      } finally {
+        if (!priorId && nameField.id === tempId) nameField.removeAttribute('id');
+      }
+    };
+    const workdayCommitSelfIdentifyDate = async (profileArg) => {
+      const dateField = document.querySelector('[data-automation-id="formField-dateSignedOn"]');
+      if (!dateField) return { present: false, committed: true };
+      const sourceDate = profileArg?.signatureDate ? new Date(profileArg.signatureDate) : new Date();
+      const desired = {
+        month: sourceDate.getMonth() + 1,
+        day: sourceDate.getDate(),
+        year: sourceDate.getFullYear()
+      };
+      const setNativeDateDom = () => {
+        const fresh = workdaySelfIdentifyDateParts();
+        const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set;
+        const apply = (part, value) => {
+          const el = part?.el;
+          if (!el) return false;
+          try { el.focus(); } catch (_) {}
+          try { setter ? setter.call(el, String(value)) : (el.value = String(value)); } catch (_) { el.value = String(value); }
+          el.dispatchEvent(new InputEvent('input', { bubbles: true, composed: true }));
+          el.dispatchEvent(new Event('change', { bubbles: true, composed: true }));
+          try { el.blur(); } catch (_) {}
+          return true;
+        };
+        let n = 0;
+        if (apply(fresh.month, desired.month)) n++;
+        if (apply(fresh.day, desired.day)) n++;
+        if (apply(fresh.year, desired.year)) n++;
+        return n;
+      };
+      const monthSpinner = dateField.querySelector('[role="spinbutton"][aria-label="Month"], input[data-automation-id="dateSectionMonth-input"]');
+      const baseId = monthSpinner?.id?.replace('-dateSectionMonth-input', '') || null;
+      if (!baseId) {
+        await addDbg('[WD-SID] date no baseId');
+        return { present: true, committed: false };
+      }
+      const resp = await new Promise(resolve => {
+        chrome.runtime.sendMessage({
+          type: 'WORKDAY_TYPE_DATE',
+          baseId,
+          month: desired.month,
+          day: desired.day,
+          year: desired.year
+        }, r => resolve(chrome.runtime.lastError ? { ok: false, error: chrome.runtime.lastError.message } : (r || {})));
+      });
+      await sleep(500);
+      if (!workdaySelfIdentifyDateValid()) {
+        const nativeSet = setNativeDateDom();
+        await sleep(300);
+        await addDbg('[WD-SID] date nativeFallback n=' + nativeSet);
+      }
+      const committed = workdaySelfIdentifyDateValid();
+      const parts = workdaySelfIdentifyDateParts();
+      await addDbg('[WD-SID] date committed=' + committed + ' values=' +
+        [parts.month.raw || '?', parts.day.raw || '?', parts.year.raw || '?'].join('/') +
+        ' ok=' + !!resp.ok + (resp.error ? ' err=' + String(resp.error).slice(0, 50) : ''));
+      return { present: true, committed };
+    };
+    const workdaySelfIdentifyTransaction = async (profileArg, phase) => {
+      if (!isWorkdaySelfIdentifyStep()) return { ok: true, gaps: [] };
+      await closeWorkdayTransientMenus();
+      await addDbg('[WD-SID] transaction start phase=' + (phase || ''));
+      // Order is load-bearing. Disability is first because its React re-render can clear text/date
+      // inputs; name and date are committed after that re-render, then verified immediately.
+      await workdayCommitSelfIdentifyDisability(profileArg);
+      await workdayCommitSelfIdentifyName(profileArg);
+      await workdayCommitSelfIdentifyDate(profileArg);
+      await closeWorkdayTransientMenus();
+      const gaps = workdaySelfIdentifyGaps(profileArg);
+      await addDbg('[WD-SID] verify phase=' + (phase || '') + ' gaps=' + (gaps.join('|') || 'none'));
+      return { ok: !gaps.length, gaps };
+    };
     const retryWorkdayBlockedAdvance = async (reasonHint) => {
       if (!/workday\.com|myworkdayjobs\.com/i.test(location.hostname)) return { advanced: false };
       const stepBefore = document.body.innerText.match(/current step (\d+)/i)?.[1] || '';
@@ -1721,13 +1948,19 @@
       await summarizeWorkdayCriticalSelects('before-retry ' + (reasonHint || 'blocked'));
       await addDbg('[WD] blocked advance retry start reason=' + (reasonHint || 'blocked') + ' step=' + (stepBefore || '?'));
       try {
-        await withTimeout(forceWorkdayPhoneCountryCode(), 18000, 'wd-phone-code-blocked-retry');
-        await finalizeWorkdayMyInformation('blocked-retry');
-        await withTimeout(pjaFillWorkdayAppQuestions(profile), 30000, 'wd-appq-blocked-retry');
+        if (isWorkdaySelfIdentifyStep()) {
+          await withTimeout(workdaySelfIdentifyTransaction(profile, 'blocked-retry'), 45000, 'wd-sid-blocked-retry');
+        } else {
+          await withTimeout(forceWorkdayPhoneCountryCode(), 18000, 'wd-phone-code-blocked-retry');
+          await finalizeWorkdayMyInformation('blocked-retry');
+          await withTimeout(pjaFillWorkdayAppQuestions(profile), 30000, 'wd-appq-blocked-retry');
+        }
         await addDbg('[WD] post-prompt text refill done');
-        if (typeof pjaFillRequiredComboboxFallback === 'function') pjaFillRequiredComboboxFallback(profile, answers);
-        if (typeof pjaFillRequiredSelectFallback === 'function') pjaFillRequiredSelectFallback();
-        if (typeof pjaFillRequiredRadioFallback === 'function') pjaFillRequiredRadioFallback();
+        if (!isWorkdaySelfIdentifyStep()) {
+          if (typeof pjaFillRequiredComboboxFallback === 'function') pjaFillRequiredComboboxFallback(profile, answers);
+          if (typeof pjaFillRequiredSelectFallback === 'function') pjaFillRequiredSelectFallback();
+          if (typeof pjaFillRequiredRadioFallback === 'function') pjaFillRequiredRadioFallback();
+        }
         await sleep(700);
         await summarizeWorkdayCriticalSelects('after-refill ' + (reasonHint || 'blocked'));
         await closeWorkdayTransientMenus();
@@ -1931,10 +2164,16 @@
       }
       // Fill Workday Work Experience fields at the top of each iteration — they render
       // late (after step transition) so the initial fill pass misses them. Idempotent.
-      if (typeof pjaFillWorkdayWorkExperience === 'function') { await pjaFillWorkdayWorkExperience(profile); await sleep(300); }
-      if (typeof pjaFillWorkdaySelfIdentifyDate === 'function') { await pjaFillWorkdaySelfIdentifyDate(profile); await sleep(150); }
-      await finalizeWorkdayMyInformation('step-' + steps);
-      await addDbg('[WD] post-prompt step text refill done');
+      const isWorkdayHost = /workday\.com|myworkdayjobs\.com/i.test(location.hostname);
+      const sidStepAtTop = isWorkdaySelfIdentifyStep();
+      if (sidStepAtTop) {
+        await withTimeout(workdaySelfIdentifyTransaction(profile, 'step-' + steps), 45000, 'wd-sid-step-' + steps);
+      } else {
+        if (typeof pjaFillWorkdayWorkExperience === 'function') { await pjaFillWorkdayWorkExperience(profile); await sleep(300); }
+        if (typeof pjaFillWorkdaySelfIdentifyDate === 'function') { await pjaFillWorkdaySelfIdentifyDate(profile); await sleep(150); }
+        await finalizeWorkdayMyInformation('step-' + steps);
+        await addDbg('[WD] post-prompt step text refill done');
+      }
       const missing = findMissingRequired();
       // Workday selectinput fields can't be opened via JS — try Next anyway and let Workday validate.
       let hardMissing = missing.filter(m => m.type !== 'wd_selectinput');
@@ -1943,16 +2182,20 @@
         // "My Experience" Work Experience subsection (workExperience-N--jobTitle/company/...).
         // Re-run the fillers once and re-check before bailing.
         await addDbg('[ext] hardMissing=' + hardMissing.map(m=>m.label).join('|') + ' — re-filling late fields');
-        if (typeof pjaFillWorkdayWorkExperience === 'function') await pjaFillWorkdayWorkExperience(profile);
-        if (typeof pjaFillWorkdaySelfIdentifyDate === 'function') await pjaFillWorkdaySelfIdentifyDate(profile);
-        pjaFillForm(profile, answers);
-        if (window._pjaComboChain && typeof window._pjaComboChain.then === 'function') {
-          await Promise.race([window._pjaComboChain.catch(() => {}), sleep(30000)]);
+        if (isWorkdaySelfIdentifyStep()) {
+          await withTimeout(workdaySelfIdentifyTransaction(profile, 'hardMissing-refill'), 45000, 'wd-sid-hardMissing-refill');
+        } else {
+          if (typeof pjaFillWorkdayWorkExperience === 'function') await pjaFillWorkdayWorkExperience(profile);
+          if (typeof pjaFillWorkdaySelfIdentifyDate === 'function') await pjaFillWorkdaySelfIdentifyDate(profile);
+          pjaFillForm(profile, answers);
+          if (window._pjaComboChain && typeof window._pjaComboChain.then === 'function') {
+            await Promise.race([window._pjaComboChain.catch(() => {}), sleep(30000)]);
+          }
+          await sleep(300);
+          await finalizeWorkdayMyInformation('hardMissing-refill');
+          pjaFillRequiredComboboxFallback(profile, answers);
+          await sleep(400);
         }
-        await sleep(300);
-        await finalizeWorkdayMyInformation('hardMissing-refill');
-        pjaFillRequiredComboboxFallback(profile, answers);
-        await sleep(400);
         hardMissing = findMissingRequired().filter(m => m.type !== 'wd_selectinput');
         // Still-missing required fields → answer them with AI (profile + resume + prefs), then re-check.
         if (hardMissing.length) {
@@ -1969,14 +2212,17 @@
       const nextBtnDisabled = !!(nextBtn.disabled || nextBtn.getAttribute('aria-disabled') === 'true');
       const nextBtnText = (nextBtn.textContent || nextBtn.getAttribute('aria-label') || '').trim().slice(0,30);
       const nextBtnAid = nextBtn.getAttribute('data-automation-id') || '';
-      const isWorkdayHost = /workday\.com|myworkdayjobs\.com/i.test(location.hostname);
       // SID form detected by its unique fields (disability checkbox + date spinner).
-      const isWorkdaySidStep = isWorkdayHost && (
-        !!document.querySelector('[data-automation-id="formField-dateSignedOn"]') ||
-        !!document.querySelector('[data-automation-id="formField-disabilityStatus"]')
-      );
+      const isWorkdaySidStep = isWorkdaySelfIdentifyStep();
       await addDbg('[ext] step ' + steps + ' clicking Next step=' + stepTextBefore + ' wdMissing=' + wdSelectMissing.map(m=>m.label).join('|') + ' btn=' + nextBtnAid + '/' + nextBtnText + (nextBtnDisabled ? '[DISABLED]' : '') + (isWorkdaySidStep ? '[SID-CDP]' : ''));
-      if (isWorkdayHost) await finalizeWorkdayMyInformation('pre-click-' + steps);
+      if (isWorkdayHost) {
+        if (isWorkdaySidStep) {
+          const sidReady = await withTimeout(workdaySelfIdentifyTransaction(profile, 'pre-click-' + steps), 45000, 'wd-sid-pre-click-' + steps);
+          if (!sidReady.ok) await addDbg('[WD-SID] pre-click gaps remain=' + sidReady.gaps.join('|'));
+        } else {
+          await finalizeWorkdayMyInformation('pre-click-' + steps);
+        }
+      }
       // If THIS click is the final Submit (Workday multi-step forms submit via the footer/bottom
       // Submit button in the step loop), record a PERSISTENT per-job "submitted this run" flag so
       // the early-confirmation on the next /completed/ load records APPLIED — not already_applied.
@@ -2114,20 +2360,24 @@
         const disabVal = disabInput ? disabInput.value : 'not found';
         await addDbg('[ext] SID err markers: ' + (errMarkers.join('|')||'none') + ' disab="' + disabVal.slice(0,30) + '"');
 
-        // General recovery: re-run every filler (work experience, dates, app questions,
-        // combobox/radio fallbacks) then retry Next. Handles late-rendered required fields
-        // and values that didn't commit before the first Next click.
-        await pjaFillWorkdayWorkExperience(profile);
-        await pjaFillWorkdaySelfIdentifyDate(profile);
-        if (typeof pjaFillForm === 'function') pjaFillForm(profile, answers);
-        if (window._pjaComboChain && typeof window._pjaComboChain.then === 'function') {
-          await Promise.race([window._pjaComboChain.catch(() => {}), sleep(30000)]);
+        // General recovery: re-run the correct scoped filler, then retry Next. On the
+        // Workday Self Identify page, do not run generic form/My Info fillers; they can
+        // trigger React re-renders that clear the signature date/name/checkbox state.
+        if (isWorkdaySelfIdentifyStep()) {
+          await withTimeout(workdaySelfIdentifyTransaction(profile, 'validation-error-' + steps), 45000, 'wd-sid-validation-' + steps);
+        } else {
+          await pjaFillWorkdayWorkExperience(profile);
+          await pjaFillWorkdaySelfIdentifyDate(profile);
+          if (typeof pjaFillForm === 'function') pjaFillForm(profile, answers);
+          if (window._pjaComboChain && typeof window._pjaComboChain.then === 'function') {
+            await Promise.race([window._pjaComboChain.catch(() => {}), sleep(30000)]);
+          }
+          await sleep(300);
+          await finalizeWorkdayMyInformation('validation-error-' + steps);
+          await pjaFillWorkdayAppQuestions(profile);
+          pjaFillRequiredComboboxFallback(profile, answers);
+          if (typeof pjaFillRequiredRadioFallback === 'function') pjaFillRequiredRadioFallback();
         }
-        await sleep(300);
-        await finalizeWorkdayMyInformation('validation-error-' + steps);
-        await pjaFillWorkdayAppQuestions(profile);
-        pjaFillRequiredComboboxFallback(profile, answers);
-        if (typeof pjaFillRequiredRadioFallback === 'function') pjaFillRequiredRadioFallback();
         await sleep(700);
         {
           const beforeStepG = document.body.innerText.match(/current step (\d+)/i)?.[1] || '';
@@ -3239,6 +3489,18 @@
 
   async function pjaFillWorkdayAppQuestions(profile) {
     if (!/workday\.com|myworkdayjobs\.com/i.test(location.hostname)) return;
+    if (document.querySelector(
+      '[data-automation-id="formField-dateSignedOn"], ' +
+      '[data-automation-id="formField-disabilityStatus"], ' +
+      '[data-automation-id*="selfIdentifiedDisabilityData"]'
+    )) {
+      await new Promise(r => chrome.storage.local.get('pja_dbg', d => {
+        const arr = (d.pja_dbg || []).slice(-19);
+        arr.push('[ext] WD appQ fill: SID skipped; transaction-owned');
+        chrome.storage.local.set({ pja_dbg: arr }, r);
+      }));
+      return;
+    }
     const fields = Array.from(new Set([
       ...document.querySelectorAll('[data-automation-id^="formField-"]'),
       ...document.querySelectorAll('button[aria-invalid="true"], [role="button"][aria-invalid="true"]'),
