@@ -1696,6 +1696,7 @@
       try {
         await withTimeout(forceWorkdayPhoneCountryCode(), 18000, 'wd-phone-code-blocked-retry');
         await finalizeWorkdayMyInformation('blocked-retry');
+        await withTimeout(pjaFillWorkdayAppQuestions(profile), 30000, 'wd-appq-blocked-retry');
         await addDbg('[WD] post-prompt text refill done');
         if (typeof pjaFillRequiredComboboxFallback === 'function') pjaFillRequiredComboboxFallback(profile, answers);
         if (typeof pjaFillRequiredSelectFallback === 'function') pjaFillRequiredSelectFallback();
@@ -3170,7 +3171,7 @@
   function pjaNearestQuestionTextBefore(el) {
     try {
       const chunks = [];
-      const walker = document.createTreeWalker(document.body || document.documentElement, NodeFilter.SHOW_TEXT);
+      const walker = document.createTreeWalker(document.body || document.documentElement, 4);
       let node;
       while ((node = walker.nextNode())) {
         if (el.contains(node)) break;

@@ -211,6 +211,7 @@ module.exports = (t) => {
     externalSource.includes('Error:\\s*The field') &&
     externalSource.includes('pjaNearestQuestionTextBefore') &&
     externalSource.includes('mustCorrectSelected') &&
+    externalSource.includes('wd-appq-blocked-retry') &&
     externalSource.includes('pairedErrorLabel') &&
     externalSource.includes('invalidButtonOrdinal'),
   'external-apply: Workday app-question filler scans and corrects questionnaire buttons with Workday error/body labels');
