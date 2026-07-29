@@ -120,10 +120,13 @@ module.exports = (t) => {
   t.ok(externalSource.includes('const workdaySelfIdentifyTransaction = async (profileArg, phase) =>') &&
     externalSource.includes('[WD-SID] transaction start phase=') &&
     externalSource.includes('await workdayCommitSelfIdentifyDisability(profileArg)') &&
-    externalSource.includes('await workdayCommitSelfIdentifyName(profileArg)') &&
     externalSource.includes('await workdayCommitSelfIdentifyDate(profileArg)') &&
+    externalSource.includes('final committed field must') &&
     externalSource.includes('[WD-SID] verify phase='),
-  'external-apply: Workday Self Identify is filled as one ordered disability→name→date transaction with verification');
+  'external-apply: Workday Self Identify is filled as one ordered disability→date→name transaction with verification');
+  t.ok(externalSource.indexOf('await workdayCommitSelfIdentifyDate(profileArg)') <
+    externalSource.indexOf('await workdayCommitSelfIdentifyName(profileArg)'),
+  'external-apply: Workday Self Identify commits signature name after date to recover from CDP date focus races');
   t.ok(externalSource.includes('const sidStepAtTop = isWorkdaySelfIdentifyStep()') &&
     externalSource.includes("workdaySelfIdentifyTransaction(profile, 'step-' + steps)") &&
     externalSource.includes("workdaySelfIdentifyTransaction(profile, 'pre-click-' + steps)") &&

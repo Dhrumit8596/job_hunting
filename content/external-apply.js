@@ -1924,11 +1924,13 @@
       if (!isWorkdaySelfIdentifyStep()) return { ok: true, gaps: [] };
       await closeWorkdayTransientMenus();
       await addDbg('[WD-SID] transaction start phase=' + (phase || ''));
-      // Order is load-bearing. Disability is first because its React re-render can clear text/date
-      // inputs; name and date are committed after that re-render, then verified immediately.
+      // Order is load-bearing. Disability is first because its React re-render can clear
+      // text/date inputs. Date is before name because Workday/CDP focus races can send a
+      // date digit into the previously focused text input; the final committed field must
+      // therefore be the signature name.
       await workdayCommitSelfIdentifyDisability(profileArg);
-      await workdayCommitSelfIdentifyName(profileArg);
       await workdayCommitSelfIdentifyDate(profileArg);
+      await workdayCommitSelfIdentifyName(profileArg);
       await closeWorkdayTransientMenus();
       const gaps = workdaySelfIdentifyGaps(profileArg);
       await addDbg('[WD-SID] verify phase=' + (phase || '') + ' gaps=' + (gaps.join('|') || 'none'));
