@@ -2202,6 +2202,30 @@ async function cdpTypeDateSpinner(tabId, { baseId, month, day, year }) {
     s2Results.push(ariaLabel + ':ok:' + focused.result.usedId.slice(-20));
     await new Promise(r => setTimeout(r, 150));
 
+    // Clear any placeholder/stale visible value before typing. Some Workday tenants keep
+    // "MM/DD/YYYY" or a prior DOM value in the spinbutton; appending digits leaves the validator
+    // on "Error-Date" even though the field looks touched.
+    for (const modifiers of [2, 4]) { // Ctrl+A, then Meta+A for macOS Chrome.
+      await chrome.debugger.sendCommand({ tabId }, 'Input.dispatchKeyEvent', {
+        type: 'rawKeyDown', key: 'a', code: 'KeyA',
+        windowsVirtualKeyCode: 65, nativeVirtualKeyCode: 65, modifiers
+      });
+      await chrome.debugger.sendCommand({ tabId }, 'Input.dispatchKeyEvent', {
+        type: 'keyUp', key: 'a', code: 'KeyA',
+        windowsVirtualKeyCode: 65, nativeVirtualKeyCode: 65, modifiers
+      });
+      await new Promise(r => setTimeout(r, 40));
+    }
+    await chrome.debugger.sendCommand({ tabId }, 'Input.dispatchKeyEvent', {
+      type: 'rawKeyDown', key: 'Backspace', code: 'Backspace',
+      windowsVirtualKeyCode: 8, nativeVirtualKeyCode: 8, modifiers: 0
+    });
+    await chrome.debugger.sendCommand({ tabId }, 'Input.dispatchKeyEvent', {
+      type: 'keyUp', key: 'Backspace', code: 'Backspace',
+      windowsVirtualKeyCode: 8, nativeVirtualKeyCode: 8, modifiers: 0
+    });
+    await new Promise(r => setTimeout(r, 100));
+
     const padded = String(value).padStart(isYear ? 4 : 2, '0');
     console.log('PJA typing padded=', padded, 'for', focused.result.usedId);
     for (const d of padded) {

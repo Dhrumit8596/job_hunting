@@ -24,6 +24,7 @@ const P = {
 
 module.exports = (t) => {
   const externalSource = fs.readFileSync(path.resolve(__dirname, '../../content/external-apply.js'), 'utf8');
+  const backgroundSource = fs.readFileSync(path.resolve(__dirname, '../../background.js'), 'utf8');
   t.ok(externalSource.includes('google\\.com$/i.test(location.hostname)') &&
     externalSource.includes('Gmail is used by the verification helper'),
   'external apply: never runs on Google/Gmail tabs used by email verification');
@@ -112,6 +113,10 @@ module.exports = (t) => {
     externalSource.includes("profile?.signatureDate ? new Date(profile.signatureDate) : new Date()") &&
     externalSource.includes('[WD] self-identify date filled='),
   'external-apply: Workday Self Identify signature date uses the current date and can overwrite stale values');
+  t.ok(backgroundSource.includes('Ctrl+A, then Meta+A for macOS Chrome') &&
+    backgroundSource.includes("key: 'Backspace', code: 'Backspace'") &&
+    backgroundSource.includes('appending digits leaves the validator'),
+  'external-apply: Workday date CDP helper clears stale spinbutton values before typing');
   t.ok(externalSource.includes('pjaFillCombobox(el, profile.referralSource') &&
     externalSource.includes('source--source') &&
     externalSource.includes("window._pjaComboChain.catch") &&
