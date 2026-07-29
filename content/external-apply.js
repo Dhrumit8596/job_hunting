@@ -3057,7 +3057,10 @@
     } else if (/authoriz|eligible|legally|legal right/i.test(label)) {
       return profile.workAuth === 'Yes' ? 'Yes' : 'No';
     } else if (/sponsor/i.test(label)) {
-      return profile.requireSponsorship === 'No' ? 'No' : 'Yes';
+      const sponsorPref = String(profile.requireSponsorship || '').trim();
+      if (/^yes$/i.test(sponsorPref)) return 'Yes';
+      if (/^no$/i.test(sponsorPref)) return 'No';
+      return (typeof pjaDeterministicAnswer === 'function') ? pjaDeterministicAnswer(label) : null;
     } else if (/export control|us person/i.test(label)) {
       return /citizen|green card|permanent resident/i.test(profile.visaStatus || '') ? 'Yes' : 'No';
     } else if (/relocat/i.test(label)) {
@@ -3130,6 +3133,14 @@
     }
     const al = String(answer).toLowerCase();
     const candidates = texts.filter(txt => !/^(select one|select|choose|--|-)?$/i.test(txt));
+    if (/^(yes|true)$/i.test(String(answer || ''))) {
+      const agree = candidates.find(txt => /^(agree|i agree|yes,? i agree|acknowledge|confirm)/i.test(txt) && !/disagree|do not agree/i.test(txt));
+      if (agree) return agree;
+    }
+    if (/^(no|false)$/i.test(String(answer || ''))) {
+      const disagree = candidates.find(txt => /^(disagree|i disagree|do not agree)/i.test(txt));
+      if (disagree) return disagree;
+    }
     return candidates.find(txt => { const ot = txt.toLowerCase(); return ot === al || ot.includes(al) || al.includes(ot); }) || null;
   }
 

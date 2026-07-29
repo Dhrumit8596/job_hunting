@@ -243,6 +243,7 @@ module.exports = (t) => {
 
   // --- sponsorship flips to Yes if profile requires it (synthetic) ---
   t.eq(w.pjaWorkdayAnswerForLabel('require sponsorship', { requireSponsorship: 'Yes' }), 'Yes', 'sponsorship Yes when required');
+  t.eq(w.pjaWorkdayAnswerForLabel('require immigration sponsorship for work authorization', {}), 'No', 'sponsorship defaults through deterministic No instead of unsafe Yes');
 
   // --- pjaPickAnswerOption: __YEARS__ range matching ---
   const yrsOpts = ['Select One', 'No prior experience', '0-2 years of experience', '3-6 years of experience', '7-10 years of experience', '10+ years of Experience'];
@@ -258,6 +259,8 @@ module.exports = (t) => {
   // --- pjaPickAnswerOption: plain includes match (case-insensitive) ---
   t.eq(w.pjaPickAnswerOption('No', ['Yes', 'No'], P), 'No', 'plain Yes/No');
   t.eq(w.pjaPickAnswerOption('I AM NOT A VETERAN', ['I am a protected veteran', 'I AM NOT A VETERAN'], P), 'I AM NOT A VETERAN', 'plain caps match');
+  t.eq(w.pjaPickAnswerOption('Yes', ['Select One', 'Agree', 'Disagree'], P), 'Agree', 'Yes maps to Agree when Workday uses agreement options');
+  t.eq(w.pjaPickAnswerOption('No', ['Select One', 'Agree', 'Disagree'], P), 'Disagree', 'No maps to Disagree when Workday uses agreement options');
 
   // --- pjaSelectAiAnswer: label-match + confidence gating (inline AI answerer) ---
   const ai = [
