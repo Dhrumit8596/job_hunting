@@ -118,6 +118,9 @@ module.exports = (t) => {
     externalSource.includes("nativeChecked.call(cb, true)") &&
     externalSource.includes("nativeChecked.call(other, false)"),
   'external-apply: Workday disability checkbox group is force-committed when fieldset remains invalid');
+  t.ok(externalSource.includes('profile.hispanicOrLatino = ans') &&
+    externalSource.includes('without guessing sensitive demographics'),
+  'external-apply: explicit answer-bank Hispanic/Latino values are promoted for Workday EEO prompts');
   t.ok(backgroundSource.includes('Ctrl+A, then Meta+A for macOS Chrome') &&
     backgroundSource.includes("key: 'Backspace', code: 'Backspace'") &&
     backgroundSource.includes('appending digits leaves the validator'),
@@ -259,6 +262,8 @@ module.exports = (t) => {
   t.eq(a('State and federal law require Abbott to track and report certain payments and transfers of value provided to certain health care professionals (HCPs). Are you: (A) A physician - MD, DO, Dentist, DDS, Podiatrist, Optometrist or Chiropractor - with an active license to practice in the US; (B) a Massachusetts-licensed prescriber; or (C) None of the above?'), 'C', 'Workday HCP disclosure -> C / none of the above');
   t.eq(w.pjaPickAnswerOption('C', ['Select One', 'A', 'B', 'C'], P), 'C', 'Workday HCP disclosure option C selected exactly');
   t.eq(a('Are you aware of any ongoing negotiations, RFPs, or other procurements involving Bloom Energy and your current employer?'), 'No', 'Workday current-employer procurement conflict -> No');
+  t.eq(w.pjaWorkdayAnswerForLabel('Are you Hispanic or Latino?', { hispanicOrLatino: 'no' }), 'No', 'Workday Hispanic/Latino explicit answer -> No');
+  t.eq(w.pjaWorkdayAnswerForLabel('Are you Hispanic or Latino?', { hispanicOrLatino: 'Decline to answer' }), '__DECLINE__', 'Workday Hispanic/Latino explicit decline -> decline sentinel');
   t.eq(a('What is your favorite color?'), null, 'unknown question -> null');
 
   // --- sponsorship flips to Yes if profile requires it (synthetic) ---

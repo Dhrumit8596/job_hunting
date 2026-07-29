@@ -713,6 +713,18 @@
     profile = Object.assign({}, defaultProfile, profile);
     if (!String(profile.phoneCountryCode || '').trim()) profile.phoneCountryCode = defaultProfile.phoneCountryCode || 'United States of America (+1)';
     if (!String(profile.referralSource || '').trim()) profile.referralSource = defaultProfile.referralSource || 'LinkedIn';
+    // Promote explicit answer-bank EEO values into the in-memory profile so Workday prompt
+    // buttons can use saved user answers without guessing sensitive demographics.
+    if (!String(profile.hispanicOrLatino || profile.hispanic || '').trim()) {
+      for (const [rawLabel, rec] of Object.entries(answers || {})) {
+        const label = String(rawLabel || '').toLowerCase();
+        const ans = String((rec && (rec.answer ?? rec)) || '').trim();
+        if (/hispanic|latino/.test(label) && ans) {
+          profile.hispanicOrLatino = ans;
+          break;
+        }
+      }
+    }
     // Write the merged profile back onto the job so downstream helpers that read job.profile —
     // notably pjaAnswerRequiredViaAI's deterministic pre-pass (LinkedIn/website/location) — get the
     // real data. The queue seeds jobs with profile:{}, so without this the deterministic answerer
@@ -3109,7 +3121,16 @@
       return 'No';
     } else if (/18 years|over 18|at least 18|age of 18/i.test(label)) {
       return 'Yes';
-    } else if (/ethnic|race|hispanic|latino/i.test(label)) {
+    } else if (/hispanic|latino/i.test(label)) {
+      const h = String(profile.hispanicOrLatino || profile.hispanic || '').toLowerCase();
+      if (/^no\b|not hispanic|not latino|decline|prefer not|choose not|do not wish/i.test(h)) {
+        return /^no\b|not hispanic|not latino/i.test(h) ? 'No' : '__DECLINE__';
+      }
+      if (/^yes\b|hispanic|latino/i.test(h)) return 'Yes';
+      const e = (profile.ethnicity || '').toLowerCase();
+      if (/hispanic|latino/.test(e)) return 'Yes';
+      return '__DECLINE__';
+    } else if (/ethnic|race/i.test(label)) {
       const e = (profile.ethnicity || '').toLowerCase();
       if (/asian/.test(e)) return 'Asian';
       if (/white|caucas/.test(e)) return 'White';
