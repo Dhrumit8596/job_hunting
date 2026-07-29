@@ -206,12 +206,14 @@ module.exports = (t) => {
     externalSource.includes('postRetrySuccess'),
   'external-apply: LLM recovery is single-shot per job for missing-required and submit-unclear paths');
   t.ok(externalSource.includes('button[aria-invalid="true"], [role="button"][aria-invalid="true"]') &&
+    externalSource.includes('button[id^="primaryQuestionnaire--"]') &&
     externalSource.includes('function pjaCollectWorkdayErrorLabels()') &&
     externalSource.includes('Error:\\s*The field') &&
     externalSource.includes('pjaNearestQuestionTextBefore') &&
+    externalSource.includes('mustCorrectSelected') &&
     externalSource.includes('pairedErrorLabel') &&
     externalSource.includes('invalidButtonOrdinal'),
-  'external-apply: Workday app-question filler scans invalid questionnaire buttons with Workday error/body labels');
+  'external-apply: Workday app-question filler scans and corrects questionnaire buttons with Workday error/body labels');
 
   const a = (label) => w.pjaWorkdayAnswerForLabel(label.toLowerCase(), P);
 

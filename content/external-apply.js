@@ -3193,7 +3193,8 @@
     if (!/workday\.com|myworkdayjobs\.com/i.test(location.hostname)) return;
     const fields = Array.from(new Set([
       ...document.querySelectorAll('[data-automation-id^="formField-"]'),
-      ...document.querySelectorAll('button[aria-invalid="true"], [role="button"][aria-invalid="true"]')
+      ...document.querySelectorAll('button[aria-invalid="true"], [role="button"][aria-invalid="true"]'),
+      ...document.querySelectorAll('button[id^="primaryQuestionnaire--"]')
     ]));
     const errorLabels = pjaCollectWorkdayErrorLabels();
     let invalidButtonOrdinal = 0;
@@ -3226,19 +3227,24 @@
       const richLabel = field.querySelector('[data-automation-id="richText"]')?.textContent || '';
       const btnAriaLabel = btn.getAttribute('aria-label') || '';
       const buttonId = btn.id || btn.getAttribute('data-automation-id') || '';
+      const isQuestionnaireButton = /^primaryQuestionnaire--/i.test(buttonId);
       const pairedErrorLabel = fieldIsButton && btn.getAttribute('aria-invalid') === 'true'
         ? (errorLabels[invalidButtonOrdinal++] || '')
         : '';
-      const nearbyQuestion = fieldIsButton && btn.getAttribute('aria-invalid') === 'true'
+      const nearbyQuestion = fieldIsButton && (btn.getAttribute('aria-invalid') === 'true' || isQuestionnaireButton)
         ? pjaNearestQuestionTextBefore(btn)
         : '';
-      const label = (richLabel || pairedErrorLabel || nearbyQuestion || btnAriaLabel.replace(/:\s*select one.*$/i, '') || buttonId).toLowerCase();
+      const label = (richLabel || nearbyQuestion || pairedErrorLabel || btnAriaLabel.replace(/:\s*select one.*$/i, '') || buttonId).toLowerCase();
       const answer = pjaWorkdayAnswerForLabel(label, profile);
       if (!answer) continue;
       const selectedText = (btn.textContent || btnAriaLabel || '').trim();
       const unresolved = /select one|select\.\.\.|required/i.test(selectedText + ' ' + btnAriaLabel) ||
         btn.getAttribute('aria-invalid') === 'true' || /source--source/i.test(buttonId);
-      if (!unresolved && selectedText && selectedText !== 'Select One') continue;
+      const selectedClean = selectedText.replace(/\bRequired\b/ig, '').trim();
+      const selectedMatchesAnswer = !!selectedClean && !!pjaPickAnswerOption(answer, [selectedClean], profile);
+      const mustCorrectSelected = /sponsor|relatives?[\s\S]{0,60}work|immediate family[\s\S]{0,80}(employee|work)|agreement[\s\S]{0,140}(prohibit|limit|restrict)[\s\S]{0,100}(employment|work)/i.test(label) &&
+        !selectedMatchesAnswer;
+      if (!unresolved && selectedText && selectedText !== 'Select One' && !mustCorrectSelected) continue;
       // Close any stale open listbox before opening this field's dropdown
       document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
       await new Promise(r => setTimeout(r, 150));
