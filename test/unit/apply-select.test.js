@@ -141,6 +141,8 @@ module.exports = (t) => {
   t.eq(resultToState('no_apply_path', 0).status, 'needs_manual', 'invalid/stale apply path → immediate manual deferral');
   t.eq(resultToState('wd_selectinput_blocked', 0).status, 'needs_manual', 'Workday selectinput blocker → manual deferral');
   t.eq(resultToState('workday_auth_sign_in_error', 0).status, 'needs_manual', 'Workday auth error → manual deferral');
+  t.eq(resultToState('workday_create_rejected_no_visible_error', 0).status, 'needs_manual', 'Workday create rejected/no visible error → manual deferral');
+  t.eq(resultToState('workday_account_exists_wrong_password', 0).status, 'needs_manual', 'Workday account exists/wrong password → manual deferral');
   t.eq(resultToState('missing_required', 0).status, 'sourced', 'transient first fail → stays sourced (retry)');
   t.eq(resultToState('missing_required', 0).retry, true, 'transient marks retry');
   t.eq(resultToState('missing_required', 0, 1).status, 'needs_manual', 'E2E-safe maxAttempts=1 defers transient first fail');

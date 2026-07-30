@@ -395,6 +395,7 @@
       'captcha', 'workday_captcha', 'submit_unclear', 'watchdog_timeout', 'stuck_budget',
       'no_submit_btn', 'no_apply_btn_on_description', 'no_submit_after_spa',
       'wd_selectinput_blocked', 'workday_auth_sign_in_error', 'needs_login',
+      'workday_create_rejected_no_visible_error', 'workday_account_exists_wrong_password',
       'apply_btn_no_form', 'posting_not_found', 'missing_required', 'email_verification_required', 'chatbot_apply_manual'
     ]);
     const isSmartRecruitersHost = /smartrecruiters\.com/i.test(location.hostname);
@@ -1347,6 +1348,13 @@
       } else if (authResult === 'captcha_blocked') {
         await maybeRequestApplyHelp('workday_captcha', { formSummary: 'workday auth captcha', visibleErrors: [authResult] });
         await recordResult(job, { success: false, reason: 'workday_captcha' });
+        navigateBack(job); return;
+      } else if (authResult === 'create_rejected_no_visible_error' || authResult === 'account_exists_wrong_password') {
+        const mappedReason = authResult === 'account_exists_wrong_password'
+          ? 'workday_account_exists_wrong_password'
+          : 'workday_create_rejected_no_visible_error';
+        await maybeRequestApplyHelp(mappedReason, { formSummary: 'workday account creation/sign-in classification', visibleErrors: [authResult] });
+        await recordResult(job, { success: false, reason: mappedReason });
         navigateBack(job); return;
       } else {
         await maybeRequestApplyHelp(`workday_auth_${authResult}`, { formSummary: 'workday auth failure', visibleErrors: [authResult] });
@@ -2492,6 +2500,16 @@
       // sessionStorage.pja_last_action is too fragile (later step-loop iterations overwrite it
       // before /completed/ loads); chrome.storage.local survives the navigation intact.
       if (/submit/i.test(nextBtnText) || nextBtnAid === 'bottomNavigationSubmit') {
+        const stopBeforeFinalSubmit = await new Promise(r => {
+          try { chrome.storage.local.get('pja_ext_stop_before_submit', d => r(d.pja_ext_stop_before_submit ?? PJA_EXT_STOP_BEFORE_SUBMIT_DEFAULT)); }
+          catch(_) { r(PJA_EXT_STOP_BEFORE_SUBMIT_DEFAULT); }
+        });
+        if (stopBeforeFinalSubmit) {
+          await addDbg('[ext] stop-before-submit at Workday final Submit — leaving review screen');
+          sessionStorage.setItem('pja_last_action', 'ready_to_submit:' + job.company);
+          await recordResult(job, { success: false, reason: 'ready_to_submit_review' });
+          return;
+        }
         try { sessionStorage.setItem('pja_last_action', 'ready_to_submit:' + job.company); } catch (_) {}
         try { await new Promise(r => chrome.storage.local.set({ ['pja_wd_submitclick_' + (job.id || job.jobId || '')]: Date.now() }, r)); } catch (_) {}
       }
@@ -3201,6 +3219,16 @@
             await maybeRequestApplyHelp('workday_auth_sign_in_error', { formSummary: 'workday auth lock from no-submit recovery', visibleErrors: allBtns });
             sessionStorage.setItem('pja_last_action', 'recordResult:workday_account_locked:' + job.company);
             await recordResult(job, { success: false, reason: 'workday_account_locked' });
+            navigateBack(job);
+            return;
+          }
+          if (authResult2 === 'create_rejected_no_visible_error' || authResult2 === 'account_exists_wrong_password') {
+            const mappedReason2 = authResult2 === 'account_exists_wrong_password'
+              ? 'workday_account_exists_wrong_password'
+              : 'workday_create_rejected_no_visible_error';
+            await maybeRequestApplyHelp(mappedReason2, { formSummary: 'workday auth create/sign-in failed from no-submit recovery', visibleErrors: allBtns });
+            sessionStorage.setItem('pja_last_action', 'recordResult:' + mappedReason2 + ':' + job.company);
+            await recordResult(job, { success: false, reason: mappedReason2 });
             navigateBack(job);
             return;
           }

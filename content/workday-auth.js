@@ -125,11 +125,56 @@ function workdayAuthScreenSummary(label) {
 }
 
 async function persistWorkdayAuthSnapshot(label, fields) {
+  const diagnostic = { ts: Date.now(), ...workdayAuthScreenSummary(label), ...(fields || {}) };
   try {
     await new Promise(r => chrome.storage.local.set({
-      pja_wd_auth_diag: { ts: Date.now(), ...workdayAuthScreenSummary(label), ...(fields || {}) }
+      pja_wd_auth_diag: diagnostic
     }, r));
   } catch (_) {}
+  try {
+    chrome.runtime.sendMessage({
+      type: 'CAPTURE_APPLY_DIAGNOSTIC',
+      snapshot: {
+        reason: 'workday_auth_' + (label || 'diagnostic'),
+        phase: 'workday-auth',
+        applyUrl: location.href,
+        page: {
+          url: location.href,
+          title: document.title || '',
+          errors: diagnostic.errors || [],
+          controls: [],
+          textTail: String(diagnostic.body || '').slice(-1200)
+        },
+        extra: { workdayAuth: diagnostic }
+      }
+    }, () => {});
+  } catch (_) {}
+}
+
+async function classifyCreateRejectedAfterSignin(profile, signInResult, label) {
+  const hostname = location.hostname;
+  const errors = visibleWorkdayAuthErrors();
+  const body = String(document.body?.innerText || '').replace(/\s+/g, ' ');
+  let reason = 'create_rejected_no_visible_error';
+  if (/captcha|robot|human verification|security check/i.test(body)) reason = 'captcha_blocked';
+  else if (/already.*(exist|register|account)|account.*already|email.*(use|taken)/i.test(body + ' ' + errors.join(' '))) reason = 'account_exists_wrong_password';
+  else if (/verify|verification|confirm.*email|email.*confirm|account.*not.*verified|not.*verified|activate.*account/i.test(body + ' ' + errors.join(' '))) reason = 'unverified';
+  await persistWorkdayAuthSnapshot(label || 'create-rejected-after-signin', {
+    signInResult,
+    classifiedReason: reason,
+    targetEmail: profile && profile.email || ''
+  });
+  if (reason === 'captcha_blocked') {
+    await setAccount(hostname, { status: 'captcha_blocked', notes: 'create_after_signin_captcha' });
+    return 'captcha_blocked';
+  }
+  if (reason === 'unverified') return 'unverified';
+  await setAccount(hostname, {
+    status: reason,
+    notes: errors.length ? errors.join(' | ').slice(0, 300) : 'no_visible_error_after_create_signin',
+    lastAuthClassificationAt: Date.now()
+  });
+  return reason;
 }
 
 function findWorkdayEmailInput() {
@@ -529,8 +574,9 @@ async function runCreateAccount(profile, password) {
       return 'error';
     }
     if (signInResult === 'sign_in_error') {
-      await persistWorkdayAuthSnapshot('post-create-signin-failed');
-      await setAccount(hostname, { status: 'creation_failed', notes: 'signin_after_create_failed' });
+      const classified = await classifyCreateRejectedAfterSignin(profile, signInResult, 'post-create-signin-failed');
+      if (classified !== 'create_rejected_no_visible_error' && classified !== 'account_exists_wrong_password') return classified;
+      return classified;
     }
     return signInResult;
   }
@@ -904,8 +950,9 @@ async function run(profile, password) {
       }
       if (signInResult === 'sign_in_error') {
         dbg('pending_creation sign-in failed without unverified signal — not opening Gmail');
-        await persistWorkdayAuthSnapshot('pending-creation-signin-failed');
-        await setAccount(hostname, { status: 'creation_failed', notes: 'pending_creation_signin_failed' });
+        const classified = await classifyCreateRejectedAfterSignin(profile, signInResult, 'pending-creation-signin-failed');
+        if (classified !== 'create_rejected_no_visible_error' && classified !== 'account_exists_wrong_password') return classified;
+        return classified;
       }
       return signInResult;
     }

@@ -229,6 +229,18 @@ module.exports = (t) => {
   t.ok(externalSource.includes("authResult === 'needs_navigation'") &&
     externalSource.includes('auth requested navigation; waiting for reloaded apply page'),
   'external-apply: Workday auth direct-navigation recovery waits for reload instead of recording auth failure');
+  t.ok(externalSource.includes("authResult === 'create_rejected_no_visible_error'") &&
+    externalSource.includes("'workday_create_rejected_no_visible_error'") &&
+    externalSource.includes("'workday_account_exists_wrong_password'") &&
+    externalSource.includes("authResult2 === 'create_rejected_no_visible_error'"),
+  'external-apply: Workday account-create/sign-in classifications are recorded as stable manual auth reasons');
+  const wdFinalSubmitBlock = externalSource.slice(
+    externalSource.indexOf('const stopBeforeFinalSubmit = await new Promise'),
+    externalSource.indexOf('const preClickUrl = location.href')
+  );
+  t.ok(wdFinalSubmitBlock.includes('stop-before-submit at Workday final Submit') &&
+    wdFinalSubmitBlock.indexOf('stopBeforeFinalSubmit') < wdFinalSubmitBlock.indexOf("pja_wd_submitclick_"),
+  'external-apply: Workday final Submit inside the step loop honors stop-before-submit before clicking');
   t.ok(externalSource.includes('const isWorkdayHost = /workday\\.com|myworkdayjobs\\.com/i.test(location.hostname)') &&
     externalSource.includes("const terminalHelpReason = reactSelectError && isWorkdayHost ? 'wd_selectinput_blocked' : 'submit_unclear'"),
   'external-apply: non-Workday React-select submit errors are not mislabeled wd_selectinput_blocked');

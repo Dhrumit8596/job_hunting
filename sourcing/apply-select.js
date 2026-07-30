@@ -239,7 +239,9 @@
     'ready_to_submit_review', 'stuck_budget',
     // These are stable ATS/UI blockers observed in live runs. Retrying them three times only
     // burns the batch budget; defer for manual review and let the queue advance immediately.
-    'no_apply_btn_on_description', 'no_apply_path', 'no_submit_btn', 'wd_selectinput_blocked', 'workday_auth_sign_in_error']);
+    'no_apply_btn_on_description', 'no_apply_path', 'no_submit_btn', 'wd_selectinput_blocked',
+    'workday_auth_sign_in_error', 'workday_create_rejected_no_visible_error',
+    'workday_account_exists_wrong_password']);
 
   // Everything else (missing_required, submit_unclear, apply_btn_no_form,
   // watchdog_timeout, no_apply_btn_on_description, no_submit_after_spa, workday_auth_*) is TRANSIENT:

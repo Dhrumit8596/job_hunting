@@ -75,10 +75,13 @@ module.exports = async (t) => {
   'workday auth: background exposes MAIN-world Workday step advance fallback');
   t.ok(workdayAuthSource.includes('function workdayAuthScreenSummary(label)') &&
     workdayAuthSource.includes('pja_wd_auth_diag') &&
+    workdayAuthSource.includes("type: 'CAPTURE_APPLY_DIAGNOSTIC'") &&
+    workdayAuthSource.includes('function classifyCreateRejectedAfterSignin') &&
     workdayAuthSource.includes("signInResult === 'unverified'") &&
     workdayAuthSource.includes('pending_creation sign-in failed without unverified signal') &&
-    workdayAuthSource.includes("status: 'creation_failed', notes: 'pending_creation_signin_failed'"),
-  'workday auth: account creation persists screen diagnostics and does not blindly open Gmail after generic pending-creation sign-in failures');
+    workdayAuthSource.includes("let reason = 'create_rejected_no_visible_error'") &&
+    workdayAuthSource.includes("reason = 'account_exists_wrong_password'"),
+  'workday auth: account creation persists screen/screenshot diagnostics and classifies generic pending-creation sign-in failures');
   t.ok(workdayAuthSource.includes('function visibleWorkdayAuthErrors()') &&
     workdayAuthSource.includes("return 'unverified'") &&
     workdayAuthSource.includes('account.*not.*verified') &&
