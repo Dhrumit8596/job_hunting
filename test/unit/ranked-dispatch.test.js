@@ -201,8 +201,11 @@ module.exports = async (t) => {
   t.ok(devSource.includes('"classification":"applied|captcha|missing_required') &&
     devSource.includes('recommendedActions') &&
     devSource.includes("retry_greenhouse_react_selects") &&
+    devSource.includes("retry_workday_sid_transaction") &&
+    devSource.includes("retry_workday_auth_reset") &&
+    devSource.includes("capture_only") &&
     devSource.includes("record_captcha_and_advance") &&
     devSource.includes('data.recommendedActions = Array.isArray(data.recommendedActions)') &&
     devSource.includes('screenshot: snapshot.screenshot && snapshot.screenshot.dataUrl'),
-  'dev server: apply-help returns structured classification plus whitelisted recovery actions with screenshot metadata');
+  'dev server: apply-help returns structured classification plus whitelisted generic/Workday recovery actions with screenshot metadata');
 };

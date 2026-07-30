@@ -271,13 +271,18 @@ module.exports = (t) => {
     externalSource.includes('executeRecoveryActions(help, contextReason)') &&
     externalSource.includes("retry_fill_phone','retry_fill_country','retry_fill_phone_country_code") &&
     externalSource.includes("retry_greenhouse_react_selects','retry_smartrecruiters_custom_fields','retry_answer_required") &&
+    externalSource.includes('retry_workday_sid_transaction') &&
+    externalSource.includes('retry_workday_auth_reset') &&
+    externalSource.includes('async function runApplyRecoveryLoop') &&
+    externalSource.includes('pja_recovery_log') &&
+    externalSource.includes('recoveryAttempt: attempt') &&
     externalSource.includes('retrying submit once after LLM recovery'),
-  'external-apply: LLM recovery mode sends DOM context and executes only whitelisted bounded recovery actions');
+  'external-apply: LLM recovery mode loops with DOM context, transcript logging, and whitelisted Workday actions');
   t.ok(externalSource.includes("const recoveryKey = 'pja_recovery_missing_'") &&
-    externalSource.includes('missing_required cleared; re-entering submit path') &&
+    externalSource.includes('missing_required cleared by loop; re-entering submit path') &&
     externalSource.includes("const recoveryKey = 'pja_recovery_submit_'") &&
     externalSource.includes('postRetrySuccess'),
-  'external-apply: LLM recovery is single-shot per job for missing-required and submit-unclear paths');
+  'external-apply: LLM recovery loop is still scoped once per job for missing-required and submit-unclear paths');
   t.ok(externalSource.includes('button[aria-invalid="true"], [role="button"][aria-invalid="true"]') &&
     externalSource.includes('button[id^="primaryQuestionnaire--"]') &&
     externalSource.includes('function pjaCollectWorkdayErrorLabels()') &&

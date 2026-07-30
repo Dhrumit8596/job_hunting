@@ -448,6 +448,9 @@
           missingRequired: Array.isArray(extra.missingRequired) ? extra.missingRequired : [],
           visibleErrors: Array.isArray(extra.visibleErrors) ? extra.visibleErrors : [],
           formSummary: extra.formSummary || '',
+          recoveryAttempt: extra.recoveryAttempt || 0,
+          previousRecovery: Array.isArray(extra.previousRecovery) ? extra.previousRecovery.slice(-5) : [],
+          afterState: extra.afterState || null,
           stepLog: await readRecentDbg(),
           domSummary: collectApplyDomSummary(),
         };
@@ -477,7 +480,14 @@
     async function executeRecoveryActions(help, contextReason) {
       const actions = help && Array.isArray(help.recommendedActions) ? help.recommendedActions : [];
       if (!actions.length) return { executed: 0, retrySubmit: false };
-      const allowed = new Set(['retry_fill_phone','retry_fill_country','retry_fill_phone_country_code','retry_greenhouse_react_selects','retry_smartrecruiters_custom_fields','retry_answer_required','wait_for_hydration','retry_submit_once','check_gmail_confirmation','record_captcha_and_advance','record_needs_manual']);
+      const allowed = new Set([
+        'retry_fill_phone','retry_fill_country','retry_fill_phone_country_code',
+        'retry_greenhouse_react_selects','retry_smartrecruiters_custom_fields','retry_answer_required',
+        'retry_workday_prompt_buttons','retry_workday_app_questions','retry_workday_terms_checkbox',
+        'retry_workday_sid_transaction','retry_workday_advance','retry_workday_auth_reset',
+        'capture_only','wait_for_hydration','retry_submit_once','check_gmail_confirmation',
+        'record_captcha_and_advance','record_needs_manual'
+      ]);
       let executed = 0, retrySubmit = !!help.shouldRetrySubmit, advanceReason = '';
       for (const action of actions.slice(0, 4)) {
         const type = String(action && action.type || '');
@@ -503,6 +513,41 @@
             if (/smartrecruiters\.com/i.test(location.hostname) && typeof pjaFillSmartRecruitersCustomFields === 'function') await withTimeout(pjaFillSmartRecruitersCustomFields(profile), 25000, 'recover-sr-fields');
           } else if (type === 'retry_answer_required') {
             if (typeof pjaAnswerRequiredViaAI === 'function') await withTimeout(pjaAnswerRequiredViaAI(job), 120000, 'recover-ai-required');
+          } else if (type === 'retry_workday_prompt_buttons') {
+            if (/workday\.com|myworkdayjobs\.com/i.test(location.hostname) && typeof pjaFillWorkdayPromptButtons === 'function') {
+              await withTimeout(pjaFillWorkdayPromptButtons(profile), 30000, 'recover-wd-prompts');
+            }
+          } else if (type === 'retry_workday_app_questions') {
+            if (/workday\.com|myworkdayjobs\.com/i.test(location.hostname) && typeof pjaFillWorkdayAppQuestions === 'function') {
+              await withTimeout(pjaFillWorkdayAppQuestions(profile), 45000, 'recover-wd-appq');
+            }
+          } else if (type === 'retry_workday_terms_checkbox') {
+            if (/workday\.com|myworkdayjobs\.com/i.test(location.hostname) && typeof pjaAutoCheckConsent === 'function') {
+              pjaAutoCheckConsent();
+            }
+          } else if (type === 'retry_workday_sid_transaction') {
+            if (/workday\.com|myworkdayjobs\.com/i.test(location.hostname) &&
+                typeof isWorkdaySelfIdentifyStep === 'function' && isWorkdaySelfIdentifyStep() &&
+                typeof workdaySelfIdentifyTransaction === 'function') {
+              await withTimeout(workdaySelfIdentifyTransaction(profile, 'recover-loop'), 50000, 'recover-wd-sid');
+            }
+          } else if (type === 'retry_workday_advance') {
+            if (/workday\.com|myworkdayjobs\.com/i.test(location.hostname)) {
+              const nextBtn = document.querySelector('[data-automation-id="bottomNavigationNext"], [data-automation-id="pageFooterNextButton"]') ||
+                findButton(/save and continue|continue|next|review/i);
+              if (nextBtn) {
+                if (typeof trustedWorkdayClick === 'function') await trustedWorkdayClick(nextBtn, 'recover-advance');
+                else nextBtn.click();
+              }
+            }
+          } else if (type === 'retry_workday_auth_reset') {
+            if (/workday\.com|myworkdayjobs\.com/i.test(location.hostname) && window.pjaWorkdayAuth && typeof window.pjaWorkdayAuth.run === 'function') {
+              const { pja_job_password: _storedPw } = await new Promise(r => chrome.storage.local.get('pja_job_password', r));
+              await withTimeout(window.pjaWorkdayAuth.run(profile, _storedPw || 'ChangeMe#2025!'), 120000, 'recover-wd-auth');
+            }
+          } else if (type === 'capture_only') {
+            // No-op action used when the dev server wants another screenshot/DOM round before
+            // making a terminal decision.
           } else if (type === 'wait_for_hydration') {
             await sleep(4000);
           } else if (type === 'retry_submit_once') {
@@ -522,6 +567,61 @@
         }
       }
       return { executed, retrySubmit, advanceReason };
+    }
+
+    async function appendRecoveryLog(entry) {
+      try {
+        await new Promise(r => chrome.storage.local.get('pja_recovery_log', d => {
+          const log = (Array.isArray(d.pja_recovery_log) ? d.pja_recovery_log : []).slice(-199);
+          log.push({ ts: Date.now(), runId: job.runId || '', jobId: job.id || job.jobId || '',
+            company: job.company || '', title: job.title || '', url: location.href.slice(0, 220), ...entry });
+          chrome.storage.local.set({ pja_recovery_log: log }, r);
+        }));
+      } catch (_) {}
+    }
+
+    async function runApplyRecoveryLoop(reason, extra = {}, opts = {}) {
+      const isWorkdayHost = /workday\.com|myworkdayjobs\.com/i.test(location.hostname);
+      const maxAttempts = opts.maxAttempts || (isWorkdayHost ? 3 : 2);
+      const transcript = [];
+      let last = { executed: 0, retrySubmit: false, advanceReason: '' };
+      for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+        const before = collectApplyDomSummary();
+        const help = await maybeRequestApplyHelp(reason, {
+          ...extra,
+          recoveryAttempt: attempt,
+          previousRecovery: transcript,
+          afterState: attempt > 1 ? before : null,
+        });
+        const recovery = await executeRecoveryActions(help, reason);
+        await sleep(opts.settleMs || 900);
+        const after = collectApplyDomSummary();
+        const recovered = typeof opts.verify === 'function' ? !!(await opts.verify({ attempt, help, recovery, before, after })) : false;
+        const item = {
+          attempt, reason,
+          classification: help?.classification || '',
+          likelyCause: help?.likelyCause || help?.error || '',
+          actionsProposed: Array.isArray(help?.recommendedActions) ? help.recommendedActions.map(a => a.type).slice(0, 6) : [],
+          actionsExecuted: recovery.executed || 0,
+          retrySubmit: !!recovery.retrySubmit,
+          advanceReason: recovery.advanceReason || '',
+          recovered,
+          beforeUrl: before?.url || location.href,
+          afterUrl: after?.url || location.href,
+          beforeErrors: Array.isArray(before?.errors) ? before.errors.slice(0, 6) : [],
+          afterErrors: Array.isArray(after?.errors) ? after.errors.slice(0, 6) : [],
+        };
+        transcript.push(item);
+        await appendRecoveryLog(item);
+        await addDbg('[recover-loop] ' + reason + ' attempt=' + attempt +
+          ' class=' + (item.classification || 'none') +
+          ' exec=' + item.actionsExecuted + ' recovered=' + recovered +
+          (item.advanceReason ? ' advance=' + item.advanceReason : ''));
+        last = recovery;
+        if (recovery.advanceReason || recovered) return { ...recovery, recovered, transcript, help };
+        if (!recovery.executed && !recovery.retrySubmit && help && help.shouldRetry === false) break;
+      }
+      return { ...last, recovered: false, transcript };
     }
 
     function emailCodeSearchQuery() {
@@ -2786,14 +2886,18 @@
       }
       console.log('PJA ext-apply: missing_required, fields:', hardMissing.map(m => m.label).join('; '));
       sessionStorage.setItem('pja_last_action', 'recordResult:missing_required:' + job.company);
-      const help = await maybeRequestApplyHelp('missing_required', {
-        missingRequired: missingLabels,
-        formSummary: 'required fields still missing after fill',
-      });
       const recoveryKey = 'pja_recovery_missing_' + (job.id || job.jobId || job.applyUrl || '');
       if (!sessionStorage.getItem(recoveryKey)) {
         sessionStorage.setItem(recoveryKey, '1');
-        const recovery = await executeRecoveryActions(help, 'missing_required');
+        const recovery = await runApplyRecoveryLoop('missing_required', {
+          missingRequired: missingLabels,
+          formSummary: 'required fields still missing after fill',
+        }, {
+          verify: async () => {
+            const afterRecovery = findMissingRequired().filter(m => m.type !== 'wd_selectinput');
+            return !afterRecovery.length;
+          }
+        });
         if (recovery.advanceReason) {
           await addDbg('[recover] terminal advance after missing_required: ' + recovery.advanceReason);
           await saveMissingQuestions(hardMissing, job);
@@ -2801,15 +2905,12 @@
           navigateBack(job);
           return;
         }
-        if (recovery.executed) {
-          await sleep(900);
-          const afterRecovery = findMissingRequired().filter(m => m.type !== 'wd_selectinput');
-          if (!afterRecovery.length) {
-            await addDbg('[recover] missing_required cleared; re-entering submit path');
-            return runExternalApply(job, rawAnswers);
-          }
-          await addDbg('[recover] missing_required remains: ' + afterRecovery.map(m => m.label).join('|').slice(0, 100));
+        if (recovery.recovered) {
+          await addDbg('[recover] missing_required cleared by loop; re-entering submit path');
+          return runExternalApply(job, rawAnswers);
         }
+        const afterRecovery = findMissingRequired().filter(m => m.type !== 'wd_selectinput');
+        await addDbg('[recover] missing_required remains after loop: ' + afterRecovery.map(m => m.label).join('|').slice(0, 100));
       }
       await saveMissingQuestions(hardMissing, job);
       await recordResult(job, { success: false, reason: 'missing_required', fields: missingLabels });
@@ -3158,17 +3259,31 @@
         await addDbg('[submit-fail] errs(' + errEls.length + '): ' + errs.join(' | ') + ' | pathHint=' + location.pathname.slice(-24));
         const isWorkdayHost = /workday\.com|myworkdayjobs\.com/i.test(location.hostname);
         const terminalHelpReason = reactSelectError && isWorkdayHost ? 'wd_selectinput_blocked' : 'submit_unclear';
-        const help = await maybeRequestApplyHelp(terminalHelpReason, {
-          visibleErrors: errs,
-          formSummary: 'post-submit validation errors on ' + location.hostname,
-        });
         const recoveryKey = 'pja_recovery_submit_' + (job.id || job.jobId || job.applyUrl || '');
         if (!success && !sessionStorage.getItem(recoveryKey)) {
           sessionStorage.setItem(recoveryKey, '1');
-          const recovery = await executeRecoveryActions(help, terminalHelpReason);
+          const recovery = await runApplyRecoveryLoop(terminalHelpReason, {
+            visibleErrors: errs,
+            formSummary: 'post-submit validation errors on ' + location.hostname,
+          }, {
+            verify: async () => pjaIsSubmitSuccess({
+              text: document.body?.innerText || '',
+              title: document.title,
+              url: location.href,
+              preSubmitUrl,
+              hasSubmitButton: !!findButton(/submit.*application|submit.*app|apply now|send application|complete application|^submit$|^submit application$/i),
+              hasFormFields: pjaQueryAllExt('form input, form select, form textarea').some(el => el.type !== 'hidden'),
+            })
+          });
           if (recovery.advanceReason) {
             await addDbg('[recover] terminal advance after ' + terminalHelpReason + ': ' + recovery.advanceReason);
             await recordResult(job, { success: false, reason: recovery.advanceReason, fields: errs });
+            navigateBack(job);
+            return;
+          }
+          if (recovery.recovered) {
+            await addDbg('[recover] loop confirmed success after ' + terminalHelpReason);
+            await recordResult(job, { success: true, reason: 'applied' });
             navigateBack(job);
             return;
           }

@@ -1509,7 +1509,7 @@ Return ONLY valid JSON, no markdown:
 `A job application automation attempt got stuck. Diagnose the current page status and propose bounded recovery actions.
 
 Return ONLY valid JSON:
-{"classification":"applied|captcha|missing_required|email_verification_required|login_required|no_apply_path|submit_unclear|manual_required|stuck_wait","confidence":"low|medium|high","likelyCause":"...","evidence":["..."],"blockedFields":["..."],"recommendedActions":[{"type":"retry_fill_phone|retry_fill_country|retry_fill_phone_country_code|retry_greenhouse_react_selects|retry_smartrecruiters_custom_fields|retry_answer_required|wait_for_hydration|retry_submit_once|check_gmail_confirmation|record_captcha_and_advance|record_needs_manual","fieldHint":"...","valueKey":"profile.phone|profile.country|profile.phoneCountryCode|answers","reason":"..."}],"shouldRetry":true|false,"shouldRetrySubmit":true|false,"shouldAdvance":true|false,"needsCodeChange":true|false,"nextSelectors":["..."],"notes":["..."]}
+{"classification":"applied|captcha|missing_required|email_verification_required|login_required|no_apply_path|submit_unclear|manual_required|stuck_wait","confidence":"low|medium|high","likelyCause":"...","evidence":["..."],"blockedFields":["..."],"recommendedActions":[{"type":"retry_fill_phone|retry_fill_country|retry_fill_phone_country_code|retry_greenhouse_react_selects|retry_smartrecruiters_custom_fields|retry_answer_required|retry_workday_prompt_buttons|retry_workday_app_questions|retry_workday_terms_checkbox|retry_workday_sid_transaction|retry_workday_advance|retry_workday_auth_reset|capture_only|wait_for_hydration|retry_submit_once|check_gmail_confirmation|record_captcha_and_advance|record_needs_manual","fieldHint":"...","valueKey":"profile.phone|profile.country|profile.phoneCountryCode|answers","reason":"..."}],"shouldRetry":true|false,"shouldRetrySubmit":true|false,"shouldAdvance":true|false,"needsCodeChange":true|false,"nextSelectors":["..."],"notes":["..."]}
 
 Snapshot:
 ${JSON.stringify(compact, null, 2)}
@@ -1519,6 +1519,8 @@ Rules:
 - Be concrete about the most likely blocker.
 - If the blocker is captcha, auth, missing required data, or a closed/stale posting, do not recommend blind retry.
 - If the blocker looks like a selector or DOM handling problem, propose one or more whitelisted recovery actions and suggest the next selector change.
+- For Workday pages, prefer Workday-specific actions when applicable: prompt buttons, app questions, terms checkbox, SID transaction, step advance, or auth reset.
+- If current evidence is inconclusive but another screenshot/DOM round would help, recommend capture_only with shouldRetry=true.
 - Do not propose arbitrary code, arbitrary clicks, CAPTCHA bypass, or fabricated profile answers.
 - Mark applied only with strong visual/URL/DOM confirmation evidence; otherwise use submit_unclear or check_gmail_confirmation.`;
         const raw = await runClaudeWithSystemPrompt(`${runtimeCandidatePrompt}\n\nYou are helping debug a live job application automation system.`, prompt, 120000);
@@ -1526,7 +1528,14 @@ Rules:
         const end = raw.lastIndexOf('}');
         if (start === -1 || end === -1) throw new Error('No JSON in response');
         const data = JSON.parse(raw.slice(start, end + 1));
-        const allowed = new Set(['retry_fill_phone','retry_fill_country','retry_fill_phone_country_code','retry_greenhouse_react_selects','retry_smartrecruiters_custom_fields','retry_answer_required','wait_for_hydration','retry_submit_once','check_gmail_confirmation','record_captcha_and_advance','record_needs_manual']);
+        const allowed = new Set([
+          'retry_fill_phone','retry_fill_country','retry_fill_phone_country_code',
+          'retry_greenhouse_react_selects','retry_smartrecruiters_custom_fields','retry_answer_required',
+          'retry_workday_prompt_buttons','retry_workday_app_questions','retry_workday_terms_checkbox',
+          'retry_workday_sid_transaction','retry_workday_advance','retry_workday_auth_reset',
+          'capture_only','wait_for_hydration','retry_submit_once','check_gmail_confirmation',
+          'record_captcha_and_advance','record_needs_manual'
+        ]);
         data.recommendedActions = Array.isArray(data.recommendedActions)
           ? data.recommendedActions.filter(a => a && allowed.has(String(a.type))).slice(0, 5)
           : [];
