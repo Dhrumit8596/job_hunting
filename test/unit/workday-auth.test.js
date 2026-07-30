@@ -60,11 +60,13 @@ function loadWorkdayAuthDom(html, url = 'https://example.wd1.myworkdayjobs.com/e
 module.exports = async (t) => {
   const workdayAuthSource = fs.readFileSync(path.join(ROOT, 'content/workday-auth.js'), 'utf8');
   t.ok(workdayAuthSource.includes('async function trustedWorkdayClick(el, label)') &&
+    workdayAuthSource.includes('window.PJAWorkdayEngine') &&
+    workdayAuthSource.includes('async function lifecycle(profile)') &&
     workdayAuthSource.includes("return 'needs_navigation'") &&
     workdayAuthSource.includes('job_apply_start: direct nav fallback attempt') &&
     workdayAuthSource.includes('directCount < 3') &&
     workdayAuthSource.includes('/apply/applyManually'),
-  'workday auth: job Apply/start-application uses trusted click plus direct applyManually navigation fallback');
+  'workday auth: uses Workday engine state/lifecycle plus trusted applyManually navigation fallback');
   const backgroundSource = fs.readFileSync(path.join(ROOT, 'background.js'), 'utf8');
   t.ok(backgroundSource.includes("if (msg.type === 'WORKDAY_ADVANCE_STEP')") &&
     backgroundSource.includes("world: 'MAIN'") &&

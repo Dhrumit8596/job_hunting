@@ -12,7 +12,9 @@ The ranked apply dispatcher still opens Workday jobs through the external queue:
 1. `background.js` selects a ranked job and calls `pjaLaunchExternalSingle()`.
 2. The ATS tab loads `content/autofill.js`, `content/workday-auth.js`, and
    `content/external-apply.js`.
-3. `external-apply.js` detects the Workday hostname and runs Workday-specific branches:
+3. `content/workday-engine.js` exposes `window.PJAWorkdayEngine` with Workday state detection
+   and a normalized field snapshot.
+4. `external-apply.js` detects the Workday hostname and runs Workday-specific branches:
    auth, step filling, step advance, Self Identify, diagnostics, and submit.
 
 This keeps the current extension flow intact while allowing Workday-specific behavior to be
@@ -71,6 +73,8 @@ Every visible Workday control should be normalized before filling:
 ```
 
 Fillers should operate on this model rather than repeatedly scanning arbitrary DOM selectors.
+`content/workday-engine.js` now provides the first version of this model through
+`PJAWorkdayEngine.collectFields()` and `PJAWorkdayEngine.snapshot()`.
 
 ## Recovery loop
 
@@ -109,4 +113,3 @@ choose from whitelisted recovery contracts only.
    visible DOM verification.
 4. Make every Workday step advance require a proven transition.
 5. Expand fixture tests for My Information, Application Questions, EEO, terms, SID, and Review.
-

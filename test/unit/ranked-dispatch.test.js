@@ -151,15 +151,17 @@ module.exports = async (t) => {
   const fullInjectList = source.slice(source.indexOf('const allScripts = ['), source.indexOf('];', source.indexOf('const allScripts = [')));
   const hasWorkdayAuthOrder = snippet =>
     snippet.includes("'content/autofill.js'") &&
+    snippet.includes("'content/workday-engine.js'") &&
     snippet.includes("'content/workday-auth.js'") &&
     snippet.includes("'content/external-apply.js'") &&
-    snippet.indexOf("'content/autofill.js'") < snippet.indexOf("'content/workday-auth.js'") &&
+    snippet.indexOf("'content/autofill.js'") < snippet.indexOf("'content/workday-engine.js'") &&
+    snippet.indexOf("'content/workday-engine.js'") < snippet.indexOf("'content/workday-auth.js'") &&
     snippet.indexOf("'content/workday-auth.js'") < snippet.indexOf("'content/external-apply.js'");
   t.ok(source.includes('delete window.__pjaExtApplyLoaded') &&
     source.includes("files: allScripts") &&
     hasWorkdayAuthOrder(smallInjectList) &&
     hasWorkdayAuthOrder(fullInjectList),
-  'ranked dispatch: dev reinjection resets external-apply loaded guard and loads Workday auth before external-apply');
+  'ranked dispatch: dev reinjection resets external-apply loaded guard and loads Workday engine/auth before external-apply');
 
   t.ok(source.includes('async function pjaReinjectRankedTab(tabId, reason)') &&
     source.includes('function pjaScheduleRankedReinject(runId, index, tabId, delayMs)') &&

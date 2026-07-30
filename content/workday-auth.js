@@ -133,6 +133,12 @@ function findEmailSignInButton() {
 }
 
 function detectScreen() {
+  try {
+    const engineState = window.PJAWorkdayEngine && window.PJAWorkdayEngine.detectState &&
+      window.PJAWorkdayEngine.detectState(document);
+    if (engineState && engineState !== 'not_workday' && engineState !== 'unknown') return engineState;
+  } catch (_) {}
+
   const pwFields = document.querySelectorAll('input[type=password]');
   const emailField = findWorkdayEmailInput();
 
@@ -864,6 +870,23 @@ async function run(profile, password) {
   return await runCreateAccount(profile, password);
 }
 
-window.pjaWorkdayAuth = { run, pjaWorkdayTenantEmail, _detectScreen: detectScreen };
+async function lifecycle(profile) {
+  const hostname = location.hostname;
+  const tenantEmail = pjaWorkdayTenantEmail(profile && profile.email, hostname);
+  const account = await getAccount(hostname);
+  return {
+    hostname,
+    screen: detectScreen(),
+    tenantEmail,
+    accountStatus: account && account.status || 'none',
+    failedAttempts: account && account.failedAttempts || 0,
+    updatedAt: account && account.updatedAt || null,
+    engine: window.PJAWorkdayEngine && typeof window.PJAWorkdayEngine.snapshot === 'function'
+      ? window.PJAWorkdayEngine.snapshot(document)
+      : null,
+  };
+}
+
+window.pjaWorkdayAuth = { run, lifecycle, pjaWorkdayTenantEmail, _detectScreen: detectScreen };
 console.log('PJA: workday-auth.js loaded on', location.hostname);
 })();

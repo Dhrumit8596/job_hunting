@@ -268,6 +268,7 @@ module.exports = (t) => {
   'external-apply: ranked same-host ATS pages repair stale pja_ext_current by exact apply URL');
   t.ok(externalSource.includes('const collectApplyDomSummary = () =>') &&
     externalSource.includes('domSummary: collectApplyDomSummary()') &&
+    externalSource.includes('window.PJAWorkdayEngine.snapshot(document)') &&
     externalSource.includes('executeRecoveryActions(help, contextReason)') &&
     externalSource.includes("retry_fill_phone','retry_fill_country','retry_fill_phone_country_code") &&
     externalSource.includes("retry_greenhouse_react_selects','retry_smartrecruiters_custom_fields','retry_answer_required") &&

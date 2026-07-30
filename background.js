@@ -217,6 +217,7 @@ async function pjaReinjectRankedTab(tabId, reason) {
   const scripts = [
     'content/extractors/generic.js',
     'content/autofill.js',
+    'content/workday-engine.js',
     'content/workday-auth.js',
     'content/external-apply.js',
   ];
@@ -1258,6 +1259,7 @@ function injectContentScriptsIntoExistingTabs() {
     'content/extractors/glassdoor.js',
     'content/extractors/generic.js',
     'content/autofill.js',
+    'content/workday-engine.js',
     'content/workday-auth.js',
     'content/auto-apply.js',
     'content/external-apply.js',

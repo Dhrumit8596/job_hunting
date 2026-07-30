@@ -283,6 +283,9 @@
         return {
           url: location.href,
           title: document.title,
+          workday: window.PJAWorkdayEngine && typeof window.PJAWorkdayEngine.snapshot === 'function'
+            ? window.PJAWorkdayEngine.snapshot(document)
+            : null,
           controls,
           errors,
           required: findMissingRequired().slice(0, 20).map(m => ({ label: m.label, type: m.type, options: (m.options || []).slice(0, 10) })),
@@ -335,6 +338,9 @@
           url: location.href,
           title: document.title,
           readyState: document.readyState,
+          workday: window.PJAWorkdayEngine && typeof window.PJAWorkdayEngine.snapshot === 'function'
+            ? window.PJAWorkdayEngine.snapshot(document)
+            : null,
           activeElement: document.activeElement ? {
             tag: document.activeElement.tagName,
             type: document.activeElement.type || '',
