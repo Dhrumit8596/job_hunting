@@ -7,14 +7,15 @@ console.log('PJA gmail-verify: injected into Gmail tab');
 
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
-function sendNoEmail(reason) {
+function sendNoEmail(reason, evidence) {
   chrome.storage.local.get('pja_email_code_session', d => {
     const details = {
       reason,
       pageUrl: location.href,
       pageTitle: document.title || '',
       hasSearchInput: !!document.querySelector('input[aria-label="Search mail"], input[placeholder="Search mail"], form[role="search"] input'),
-      hash: location.hash || ''
+      hash: location.hash || '',
+      evidence: evidence || null
     };
     if (d && d.pja_email_code_session) chrome.runtime.sendMessage({ type: 'EMAIL_CODE_NOT_FOUND', ...details });
     else chrome.runtime.sendMessage({ type: 'WD_GMAIL_NO_EMAIL_FOUND', ...details });
@@ -153,6 +154,44 @@ function normalizeText(text) {
 
 function redactVerificationTokens(text) {
   return normalizeText(text).replace(/\b(?=[A-Za-z0-9]{6,10}\b)(?=[A-Za-z0-9]*\d)(?=[A-Za-z0-9]*[A-Za-z])[A-Za-z0-9]+\b/g, '[code]');
+}
+
+function collectWorkdayRowEvidence(row) {
+  const txt = normalizeText(row?.innerText || row?.textContent || '');
+  const sender = normalizeText(row?.querySelector?.('[email], .yW, .bA4 span[email], span[email]')?.getAttribute?.('email') ||
+    row?.querySelector?.('[email], .yW, .bA4 span[email], span[email]')?.textContent || '').slice(0, 180);
+  const subject = normalizeText(row?.querySelector?.('.bog, [data-thread-id] span, .y6 span')?.textContent || txt).slice(0, 200);
+  return {
+    subject,
+    sender,
+    snippet: redactVerificationTokens(txt).slice(0, 500),
+    looksWorkday: /workday|myworkday|myworkdayjobs/i.test(txt + ' ' + sender),
+    looksVerify: /verify|verification|confirm|activate|email address|account|password reset/i.test(txt),
+    pageUrl: location.href,
+    pageTitle: document.title || ''
+  };
+}
+
+function collectOpenedWorkdayEmailEvidence() {
+  const subject = normalizeText(
+    firstVisible('h2.hP, .ha h2, [data-legacy-message-id] h2, [role="main"] h2')?.textContent || ''
+  ).slice(0, 200);
+  const bodyEl = firstVisible('div.a3s.aiL, div.a3s, [data-message-id] div.ii.gt, .ii.gt') ||
+    firstVisible('[role="main"]');
+  const bodyText = normalizeText(bodyEl?.innerText || bodyEl?.textContent || '');
+  const senderEl = firstVisible('[email], .gD[email], span[email], [data-hovercard-id]');
+  const sender = normalizeText(
+    senderEl?.getAttribute('email') || senderEl?.getAttribute('data-hovercard-id') || senderEl?.textContent || ''
+  ).slice(0, 180);
+  return {
+    subject,
+    sender,
+    snippet: redactVerificationTokens(bodyText).slice(0, 700),
+    looksWorkday: /workday|myworkday|myworkdayjobs/i.test(bodyText + ' ' + sender),
+    looksVerify: /verify|verification|confirm|activate|email address|account|password reset|create (your )?account|sign in/i.test(bodyText + ' ' + subject),
+    pageUrl: location.href,
+    pageTitle: document.title || ''
+  };
 }
 
 function isVisibleEl(el) {
@@ -317,7 +356,7 @@ async function main() {
     rows = await waitForEmailRows(15000);
     if (!rows || rows.length === 0) {
       console.log('PJA gmail-verify: email never arrived');
-      sendNoEmail('email_not_found');
+      sendNoEmail('email_not_found', { rowCount: 0, queryHash: location.hash || '', pageUrl: location.href, pageTitle: document.title || '' });
       return;
     }
     location.reload();
@@ -392,12 +431,15 @@ async function main() {
   console.log('PJA gmail-verify: found', rows.length, 'rows, scanning top', Math.min(rows.length, 4));
   // Broad search may return several rows — open the newest few until one has a Workday link.
   let verifyUrl = null;
+  let evidence = null;
   for (let i = 0; i < Math.min(rows.length, 4); i++) {
     // rows go stale after navigation; re-query each pass.
     const fresh = document.querySelectorAll('tr.zA, [role="row"][data-legacy-last-message-id], tr[data-thread-id], [data-thread-id]');
     if (!fresh[i]) break;
+    evidence = collectWorkdayRowEvidence(fresh[i]);
     fresh[i].click();
     await sleep(1500);
+    evidence = { ...evidence, opened: collectOpenedWorkdayEmailEvidence() };
     verifyUrl = await findLinkInEmailBody(6000);
     if (verifyUrl) break;
     // go back to the results list for the next row
@@ -405,12 +447,12 @@ async function main() {
   }
   if (!verifyUrl) {
     console.log('PJA gmail-verify: no Workday link found in top emails');
-    sendNoEmail('link_not_found');
+    sendNoEmail('link_not_found', evidence);
     return;
   }
 
   console.log('PJA gmail-verify: sending WD_GMAIL_FOUND_LINK');
-  chrome.runtime.sendMessage({ type: 'WD_GMAIL_FOUND_LINK', verifyUrl });
+  chrome.runtime.sendMessage({ type: 'WD_GMAIL_FOUND_LINK', verifyUrl, evidence });
 }
 
 main().catch(err => {

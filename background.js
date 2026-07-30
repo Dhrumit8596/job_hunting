@@ -3771,6 +3771,8 @@ ${questionList}`;
           applyTabId,
           hostname: msg.hostname,
           purpose: msg.purpose,
+          searchQuery: msg.searchQuery,
+          targetEmail: msg.targetEmail || '',
           acctPath,
           startedAt: Date.now()
         }
@@ -4070,6 +4072,7 @@ ${questionList}`;
     (async () => {
       const gmailTabId = _sender.tab?.id;
       const verifyUrl = msg.verifyUrl;
+      const evidence = msg.evidence || null;
       const { pja_wd_gmail_session: session } = await new Promise(r =>
         chrome.storage.local.get('pja_wd_gmail_session', r)
       );
@@ -4084,7 +4087,10 @@ ${questionList}`;
         chrome.tabs.remove(verifyTab.id).catch(() => {});
         chrome.tabs.remove(gmailTabId).catch(() => {});
         await chrome.storage.local.set({
-          pja_wd_verify_result: { hostname: session.hostname, success: false, reason: 'verify_tab_timeout', ts: Date.now() }
+          pja_wd_verify_result: { hostname: session.hostname, success: false, reason: 'verify_tab_timeout', ts: Date.now(),
+            evidence: { ...(evidence || {}), searchQuery: session.searchQuery || '', targetEmail: session.targetEmail || '' } },
+          pja_wd_last_gmail_result: { hostname: session.hostname, success: false, reason: 'verify_tab_timeout', ts: Date.now(),
+            evidence: { ...(evidence || {}), searchQuery: session.searchQuery || '', targetEmail: session.targetEmail || '' } }
         });
         const { pja_wd_pending_apply: pending } = await new Promise(r =>
           chrome.storage.local.get('pja_wd_pending_apply', r)
@@ -4126,7 +4132,10 @@ ${questionList}`;
             await chrome.storage.local.set({ pja_workday_accounts: accounts });
           }
           await chrome.storage.local.set({
-            pja_wd_verify_result: { hostname: session.hostname, success: false, reason: 'link_expired', ts: Date.now() }
+            pja_wd_verify_result: { hostname: session.hostname, success: false, reason: 'link_expired', ts: Date.now(),
+              evidence: { ...(evidence || {}), searchQuery: session.searchQuery || '', targetEmail: session.targetEmail || '' } },
+            pja_wd_last_gmail_result: { hostname: session.hostname, success: false, reason: 'link_expired', ts: Date.now(),
+              evidence: { ...(evidence || {}), searchQuery: session.searchQuery || '', targetEmail: session.targetEmail || '' } }
           });
           chrome.storage.local.remove('pja_wd_gmail_session');
           return;
@@ -4171,7 +4180,12 @@ ${questionList}`;
         setTimeout(() => chrome.tabs.remove(verifyTab.id).catch(() => {}), 2000);
         chrome.tabs.remove(gmailTabId).catch(() => {});
         await chrome.storage.local.set({
-          pja_wd_verify_result: { hostname: session.hostname, success: true, ts: Date.now() }
+          pja_wd_verify_result: { hostname: session.hostname, success: true, ts: Date.now(),
+            evidence: { ...(evidence || {}), searchQuery: session.searchQuery || '', targetEmail: session.targetEmail || '',
+              verifyHost: (() => { try { return new URL(verifyUrl).hostname; } catch (_) { return ''; } })() } },
+          pja_wd_last_gmail_result: { hostname: session.hostname, success: true, ts: Date.now(),
+            evidence: { ...(evidence || {}), searchQuery: session.searchQuery || '', targetEmail: session.targetEmail || '',
+              verifyHost: (() => { try { return new URL(verifyUrl).hostname; } catch (_) { return ''; } })() } }
         });
         // Navigate apply tab back to applyUrl for a clean resume
         const { pja_wd_pending_apply: pending } = await new Promise(r =>
@@ -4207,7 +4221,17 @@ ${questionList}`;
       await chrome.storage.local.set({
         pja_wd_verify_result: {
           hostname: session.hostname, success: false,
-          reason: msg.reason || 'email_not_found', ts: Date.now()
+          reason: msg.reason || 'email_not_found', ts: Date.now(),
+          evidence: { ...(msg.evidence || {}), pageUrl: msg.pageUrl || '', pageTitle: msg.pageTitle || '',
+            hash: msg.hash || '', hasSearchInput: !!msg.hasSearchInput,
+            searchQuery: session.searchQuery || '', targetEmail: session.targetEmail || '' }
+        },
+        pja_wd_last_gmail_result: {
+          hostname: session.hostname, success: false,
+          reason: msg.reason || 'email_not_found', ts: Date.now(),
+          evidence: { ...(msg.evidence || {}), pageUrl: msg.pageUrl || '', pageTitle: msg.pageTitle || '',
+            hash: msg.hash || '', hasSearchInput: !!msg.hasSearchInput,
+            searchQuery: session.searchQuery || '', targetEmail: session.targetEmail || '' }
         }
       });
       chrome.storage.local.remove('pja_wd_gmail_session');

@@ -96,6 +96,14 @@ module.exports = async (t) => {
     gmailSource.includes('looksOnlyApplicationReceipt') &&
     gmailSource.includes('contextualLink'),
   'Workday Gmail verification unwraps Gmail redirect links and accepts contextual Workday account links');
+  t.ok(gmailSource.includes('function collectWorkdayRowEvidence(row)') &&
+    gmailSource.includes('function collectOpenedWorkdayEmailEvidence()') &&
+    gmailSource.includes("sendNoEmail('email_not_found', { rowCount: 0") &&
+    gmailSource.includes("chrome.runtime.sendMessage({ type: 'WD_GMAIL_FOUND_LINK', verifyUrl, evidence })") &&
+    source.includes('pja_wd_last_gmail_result') &&
+    source.includes('targetEmail: msg.targetEmail ||') &&
+    source.includes('searchQuery: session.searchQuery ||'),
+  'Workday Gmail verification persists search/email/link evidence for success and failure diagnostics');
 
   t.ok(source.includes("chrome.storage.local.remove(['pja_email_code_result', 'pja_navigate_to']") &&
     source.includes('chrome.tabs.query({ url: `https://mail.google.com/mail/${acctPath}/*` }') &&

@@ -91,6 +91,47 @@ function pjaWorkdayTenantEmail(email, hostname) {
   return `${m[1]}+wd-${slug}@${m[2].toLowerCase()}`;
 }
 
+function visibleWorkdayAuthErrors() {
+  const textOf = el => String(el?.innerText || el?.textContent || el?.getAttribute?.('aria-label') || '').trim().replace(/\s+/g, ' ');
+  const nodes = Array.from(document.querySelectorAll(
+    '[data-automation-id*="error" i], [role="alert"], [aria-live], .error, [class*="error" i], button'
+  ));
+  return Array.from(new Set(nodes
+    .filter(el => pjaWdVisible(el))
+    .map(textOf)
+    .filter(txt => txt && !/^errors? found$/i.test(txt))
+    .filter(txt => /error|required|invalid|incorrect|password|verify|verification|account|exist|already|email|captcha|robot/i.test(txt))
+    .map(txt => txt.slice(0, 220))))
+    .slice(0, 8);
+}
+
+function workdayAuthScreenSummary(label) {
+  const screen = typeof detectScreen === 'function' ? detectScreen() : 'unknown';
+  const body = String(document.body?.innerText || '').replace(/\s+/g, ' ').slice(0, 500);
+  return {
+    label: label || '',
+    screen,
+    url: location.href,
+    title: document.title || '',
+    passwordFields: document.querySelectorAll('input[type=password]').length,
+    emailField: !!findWorkdayEmailInput(),
+    createSubmit: !!document.querySelector('[data-automation-id="createAccountSubmitButton"]'),
+    signInSubmit: !!document.querySelector('[data-automation-id="signInSubmitButton"], button[type=submit]'),
+    verifyRequest: Array.from(document.querySelectorAll('a, button, [role="button"], [data-automation-id]'))
+      .some(el => /request a verification email|resend( verification)?( email)?|send( me)? (a |the )?(verification|confirmation) email/i.test((el.innerText || el.getAttribute('aria-label') || '').trim())),
+    errors: visibleWorkdayAuthErrors(),
+    body
+  };
+}
+
+async function persistWorkdayAuthSnapshot(label, fields) {
+  try {
+    await new Promise(r => chrome.storage.local.set({
+      pja_wd_auth_diag: { ts: Date.now(), ...workdayAuthScreenSummary(label), ...(fields || {}) }
+    }, r));
+  } catch (_) {}
+}
+
 function findWorkdayEmailInput() {
   const candidates = Array.from(document.querySelectorAll(
     'input[data-automation-id="email"], input[type=email], input[autocomplete="username"], ' +
@@ -303,9 +344,13 @@ async function runGmailVerify(email, purpose, hostname) {
   // matched nothing (reason=email_not_found even though the email arrived). Match ANY Workday
   // sender OR a verify/confirm subject; findLinkInEmailBody() still validates that the clicked
   // email actually contains a myworkdayjobs.com link, so a broad search can't misfire.
+  const targetEmail = String(email || '').trim();
+  const emailClause = targetEmail && /@gmail\.com|@googlemail\.com/i.test(targetEmail)
+    ? `(to:${targetEmail} OR deliveredto:${targetEmail})`
+    : '';
   const searchQuery = purpose === 'reset'
-    ? '(from:(workday.com OR myworkday.com OR myworkdayjobs.com) OR subject:(reset password)) newer_than:20m'
-    : '(from:(workday.com OR myworkday.com OR myworkdayjobs.com) OR subject:(verify OR verification OR "confirm your email" OR activate OR "email address")) newer_than:20m';
+    ? [emailClause, '(from:(workday.com OR myworkday.com OR myworkdayjobs.com) OR subject:(reset password))'].filter(Boolean).join(' OR ') + ' newer_than:20m'
+    : [emailClause, '(from:(workday.com OR myworkday.com OR myworkdayjobs.com) OR subject:(verify OR verification OR "confirm your email" OR activate OR "email address"))'].filter(Boolean).join(' OR ') + ' newer_than:20m';
 
   const { pja_wd_gmail_session: existingSession } = await new Promise(r =>
     chrome.storage.local.get('pja_wd_gmail_session', r)
@@ -325,6 +370,7 @@ async function runGmailVerify(email, purpose, hostname) {
       searchQuery,
       hostname,
       purpose,
+      targetEmail,
     }, resolve)
   );
 
@@ -334,12 +380,22 @@ async function runGmailVerify(email, purpose, hostname) {
     return false;
   }
 
-  const verified = await waitForVerifyComplete(hostname, 90000);
-  dbg('runGmailVerify: waitForVerifyComplete → ' + verified);
+  const result = await waitForVerifyResult(hostname, 90000);
+  const verified = result?.success === true;
+  dbg('runGmailVerify: waitForVerifyComplete → ' + verified +
+    (result?.reason ? ' reason=' + result.reason : '') +
+    (result?.evidence?.subject ? ' subject=' + String(result.evidence.subject).slice(0, 80) : ''));
+  if (!verified && purpose !== 'reset' && /email_not_found|link_not_found|code_not_found/i.test(String(result?.reason || ''))) {
+    const clicked = await clickWorkdayVerificationRequest('gmail-retry');
+    if (clicked) {
+      dbg('runGmailVerify: retrying Gmail after request/resend click');
+      return await runGmailVerify(email, purpose + '_retry', hostname);
+    }
+  }
   return verified;
 }
 
-async function waitForVerifyComplete(hostname, timeoutMs) {
+async function waitForVerifyResult(hostname, timeoutMs) {
   const t0 = Date.now();
   while (Date.now() - t0 < timeoutMs) {
     await sleep(2000);
@@ -348,10 +404,30 @@ async function waitForVerifyComplete(hostname, timeoutMs) {
     );
     if (result && result.hostname === hostname && result.ts > t0) {
       await new Promise(r => chrome.storage.local.remove('pja_wd_verify_result', r));
-      return result.success === true;
+      return result;
     }
   }
-  return false;
+  return { hostname, success: false, reason: 'verify_wait_timeout', ts: Date.now() };
+}
+
+async function waitForVerifyComplete(hostname, timeoutMs) {
+  const result = await waitForVerifyResult(hostname, timeoutMs);
+  return result.success === true;
+}
+
+async function clickWorkdayVerificationRequest(label) {
+  try {
+    const reqBtn = Array.from(document.querySelectorAll('a, button, [role="button"], [data-automation-id]'))
+      .find(el => /request a verification email|resend( verification)?( email)?|send( me)? (a |the )?(verification|confirmation) email/i.test((el.innerText || el.getAttribute('aria-label') || '').trim()));
+    if (!reqBtn) return false;
+    dbg('clicking request-verification-email ' + (label || '') + ' "' + (reqBtn.innerText || reqBtn.getAttribute('aria-label') || '').trim().slice(0, 30) + '"');
+    if (!await trustedWorkdayClick(reqBtn, 'request-verification-email-' + (label || ''))) reqBtn.click();
+    await sleep(3500);
+    return true;
+  } catch (e) {
+    dbg('request-verification-email click error ' + String(e && e.message || e).slice(0, 80));
+    return false;
+  }
 }
 
 // ── Account creation ──────────────────────────────────────────────────────
@@ -390,6 +466,7 @@ async function runCreateAccount(profile, password) {
 
   const resp = await wdSubmitForm('createaccount', profile.email, password);
   dbg('runCreateAccount WORKDAY_SUBMIT_FORM resp=' + JSON.stringify(resp));
+  await persistWorkdayAuthSnapshot('createaccount-submit', { submitResp: resp || null });
 
   // Wait for page to leave create-account screen (navigates to signin or verify)
   const poll = await wdPollCreateAccount(15000);
@@ -414,6 +491,7 @@ async function runCreateAccount(profile, password) {
   await sleep(500);
   const screen = detectScreen();
   dbg('post-create screen=' + screen);
+  await persistWorkdayAuthSnapshot('post-create', { poll });
 
   if (screen === 'application_form') {
     await setAccount(hostname, { status: 'verified', verifiedAt: Date.now(), lastSignInAt: Date.now() });
@@ -438,7 +516,23 @@ async function runCreateAccount(profile, password) {
 
   if (screen === 'signin' || screen === 'signin_email_step' || screen === 'email_button_step') {
     dbg('account created, now on signin screen — signing in');
-    return await runSignIn(profile, password);
+    const signInResult = await runSignIn(profile, password);
+    if (signInResult === 'unverified') {
+      dbg('post-create signin says unverified — opening Gmail');
+      await setAccount(hostname, { status: 'pending_verification' });
+      const verified = await runGmailVerify(profile.email, 'verify', hostname);
+      if (verified) {
+        await setAccount(hostname, { status: 'verified', verifiedAt: Date.now(), failedAttempts: 0 });
+        return 'needs_gmail_verify';
+      }
+      await setAccount(hostname, { status: 'verification_failed' });
+      return 'error';
+    }
+    if (signInResult === 'sign_in_error') {
+      await persistWorkdayAuthSnapshot('post-create-signin-failed');
+      await setAccount(hostname, { status: 'creation_failed', notes: 'signin_after_create_failed' });
+    }
+    return signInResult;
   }
 
   if (screen === 'logged_in_home') {
@@ -466,7 +560,15 @@ async function runCreateAccount(profile, password) {
     }
     if (s2 === 'signin' || s2 === 'signin_email_step' || s2 === 'email_button_step') {
       dbg('delayed signin screen — signing in');
-      return await runSignIn(profile, password);
+      const signInResult = await runSignIn(profile, password);
+      if (signInResult === 'unverified') {
+        await setAccount(hostname, { status: 'pending_verification' });
+        const verified = await runGmailVerify(profile.email, 'verify', hostname);
+        if (verified) { await setAccount(hostname, { status: 'verified', verifiedAt: Date.now() }); return 'needs_gmail_verify'; }
+        await setAccount(hostname, { status: 'verification_failed' });
+        return 'error';
+      }
+      return signInResult;
     }
   }
 
@@ -512,6 +614,11 @@ async function runSignIn(profile, password) {
   }
 
   const errLower = (poll.error || '').toLowerCase();
+
+  if (/verify|verification|confirm.*email|email.*confirm|account.*not.*verified|not.*verified|activate.*account/i.test(errLower)) {
+    await setAccount(hostname, { status: 'pending_verification', notes: poll.error });
+    return 'unverified';
+  }
 
   if (/locked|too many.*attempt|too many.*login/i.test(errLower)) {
     await setAccount(hostname, { status: 'locked', notes: poll.error });
@@ -785,8 +892,8 @@ async function run(profile, password) {
     }
     if (s === 'email_button_step' || s === 'signin' || s === 'signin_email_step') {
       const signInResult = await runSignIn(profile, password);
-      if (signInResult === 'sign_in_error') {
-        dbg('pending_creation sign-in failed — attempting Gmail verification before failing');
+      if (signInResult === 'unverified') {
+        dbg('pending_creation sign-in says unverified — attempting Gmail verification');
         await setAccount(hostname, { email: profile.email, password, status: 'pending_verification',
           createdAt: existing.createdAt || Date.now() });
         const verified = await runGmailVerify(profile.email, 'verify', hostname);
@@ -794,6 +901,11 @@ async function run(profile, password) {
           await setAccount(hostname, { status: 'verified', verifiedAt: Date.now(), failedAttempts: 0 });
           return 'needs_gmail_verify';
         }
+      }
+      if (signInResult === 'sign_in_error') {
+        dbg('pending_creation sign-in failed without unverified signal — not opening Gmail');
+        await persistWorkdayAuthSnapshot('pending-creation-signin-failed');
+        await setAccount(hostname, { status: 'creation_failed', notes: 'pending_creation_signin_failed' });
       }
       return signInResult;
     }

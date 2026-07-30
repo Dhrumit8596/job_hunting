@@ -73,6 +73,17 @@ module.exports = async (t) => {
     backgroundSource.includes("save\\s*(?:and|&)\\s*continue") &&
     backgroundSource.includes("data-automation-id=\"pageFooterNextButton\""),
   'workday auth: background exposes MAIN-world Workday step advance fallback');
+  t.ok(workdayAuthSource.includes('function workdayAuthScreenSummary(label)') &&
+    workdayAuthSource.includes('pja_wd_auth_diag') &&
+    workdayAuthSource.includes("signInResult === 'unverified'") &&
+    workdayAuthSource.includes('pending_creation sign-in failed without unverified signal') &&
+    workdayAuthSource.includes("status: 'creation_failed', notes: 'pending_creation_signin_failed'"),
+  'workday auth: account creation persists screen diagnostics and does not blindly open Gmail after generic pending-creation sign-in failures');
+  t.ok(workdayAuthSource.includes('function visibleWorkdayAuthErrors()') &&
+    workdayAuthSource.includes("return 'unverified'") &&
+    workdayAuthSource.includes('account.*not.*verified') &&
+    workdayAuthSource.includes('post-create signin says unverified'),
+  'workday auth: only explicit Workday unverified-account errors trigger Gmail verification after create-account redirects to sign-in');
 
   const authWindow = loadContentScript(path.join(ROOT, 'content/workday-auth.js'));
   t.eq(authWindow.pjaWorkdayAuth.pjaWorkdayTenantEmail('candidate@gmail.com', 'kla.wd1.myworkdayjobs.com'),
