@@ -1726,10 +1726,20 @@
       if (/^(?:1)?\d{10}$/.test(raw)) return raw.slice(-10);
       return raw;
     };
+    const workdayPhoneNumberVariants = (sourceProfile) => {
+      const digits = workdayPhoneNumberDigits(sourceProfile);
+      if (!/^\d{10}$/.test(digits)) return digits ? [digits] : [];
+      return Array.from(new Set([
+        digits,
+        digits.slice(0, 3) + '-' + digits.slice(3, 6) + '-' + digits.slice(6),
+        '(' + digits.slice(0, 3) + ') ' + digits.slice(3, 6) + '-' + digits.slice(6)
+      ]));
+    };
     const forceWorkdayPhoneNumberTrustedCommit = async (sourceProfile, label) => {
       if (!/workday\.com|myworkdayjobs\.com/i.test(location.hostname)) return 0;
       const digits = workdayPhoneNumberDigits(sourceProfile);
       if (!digits) return 0;
+      const variants = workdayPhoneNumberVariants(sourceProfile);
       const inputs = pjaQueryAllExt('input:not([type=hidden]):not([type=file]):not([type=submit]):not([type=button]):not([type=checkbox]):not([type=radio])')
         .filter(el => {
           const r = el.getBoundingClientRect();
@@ -1746,17 +1756,29 @@
         const tempId = priorId || ('__pja_wd_phone_' + Date.now() + '_' + Math.random().toString(36).slice(2, 7));
         if (!priorId) el.id = tempId;
         try {
-          const resp = await new Promise(resolve => {
-            chrome.runtime.sendMessage({ type: 'WORKDAY_SET_SID', selector: '#' + CSS.escape(tempId), text: digits }, r => {
-              resolve(chrome.runtime.lastError ? { ok: false, error: chrome.runtime.lastError.message } : (r || {}));
+          let resp = { ok: false, reason: 'not-run' };
+          let ok = false;
+          let valDigits = '';
+          let invalid = '';
+          let used = '';
+          for (const text of variants) {
+            resp = await new Promise(resolve => {
+              chrome.runtime.sendMessage({ type: 'WORKDAY_SET_SID', selector: '#' + CSS.escape(tempId), text }, r => {
+                resolve(chrome.runtime.lastError ? { ok: false, error: chrome.runtime.lastError.message } : (r || {}));
+              });
             });
-          });
-          await sleep(250);
-          const valDigits = String(el.value || '').replace(/\D/g, '');
-          const ok = valDigits.includes(digits.slice(-7));
+            await sleep(350);
+            valDigits = String(el.value || '').replace(/\D/g, '');
+            invalid = el.getAttribute('aria-invalid') || '';
+            used = text;
+            ok = valDigits.includes(digits.slice(-7)) && invalid !== 'true';
+            if (ok) break;
+          }
           if (ok) committed++;
           await addDbg('[WD-MYINFO] trusted phoneNumber insertText ' + (label || '') +
-            ' ok=' + !!resp.ok + ' committed=' + ok + ' valLen=' + valDigits.length + (resp.error ? ' err=' + String(resp.error).slice(0, 50) : ''));
+            ' ok=' + !!resp.ok + ' committed=' + ok + ' invalid=' + invalid +
+            ' used=' + used.replace(/\D/g, '').length + ':' + (used.includes('-') ? 'fmt' : 'digits') +
+            ' valLen=' + valDigits.length + (resp.error ? ' err=' + String(resp.error).slice(0, 50) : ''));
         } catch (e) {
           await addDbg('[WD-MYINFO] trusted phoneNumber insertText error=' + String(e && e.message || e).slice(0, 80));
         } finally {
@@ -1881,7 +1903,9 @@
       if (stateWanted && stateTxt && unresolved(stateTxt)) gaps.push('state');
       if (phoneTypeTxt && !/mobile|cell|home|work/i.test(phoneTypeTxt)) gaps.push('phoneDeviceType');
       if (phoneCodeTxt && !(/united states/i.test(phoneCodeTxt) && /\+?1\b/.test(phoneCodeTxt))) gaps.push('phoneCountryCode');
-      if (phoneInput && phoneWanted && !String(phoneInput.value || '').replace(/\D/g, '').includes(phoneWanted.slice(-7))) gaps.push('phoneNumber');
+      if (phoneInput && phoneWanted &&
+          (phoneInput.getAttribute('aria-invalid') === 'true' ||
+           !String(phoneInput.value || '').replace(/\D/g, '').includes(phoneWanted.slice(-7)))) gaps.push('phoneNumber');
       if (referralTxt && unresolved(referralTxt)) gaps.push('referralSource');
       return Array.from(new Set(gaps));
     };
@@ -1973,6 +1997,18 @@
         d === parseInt(desired.day, 10) &&
         (y === parseInt(desired.year, 10) || y === parseInt(String(desired.year).slice(-2), 10));
     };
+    const workdaySidDateErrorPresent = () => {
+      const dateField = document.querySelector('[data-automation-id="formField-dateSignedOn"]') || document;
+      const visible = el => {
+        if (!el) return false;
+        const r = el.getBoundingClientRect();
+        const st = getComputedStyle(el);
+        return r.width > 0 && r.height > 0 && st.visibility !== 'hidden' && st.display !== 'none';
+      };
+      if (dateField.querySelector('[aria-invalid="true"]')) return true;
+      return Array.from(document.querySelectorAll('[data-automation-id="Error-Date"], button'))
+        .some(el => visible(el) && /error[-\s:]*date|^date$/i.test((el.getAttribute('data-automation-id') || el.textContent || '').trim()));
+    };
     const workdaySelfIdentifyDisabilitySelected = () => {
       const disField = document.querySelector('[data-automation-id="formField-disabilityStatus"]');
       if (!disField) return true;
@@ -1993,7 +2029,8 @@
       const gaps = [];
       if (!workdaySelfIdentifyDisabilitySelected()) gaps.push('disabilityStatus');
       if (!workdaySelfIdentifyNameCommitted(profileArg)) gaps.push('signatureName');
-      if (document.querySelector('[data-automation-id="formField-dateSignedOn"]') && !workdaySelfIdentifyDateValid()) gaps.push('dateSignedOn');
+      if (document.querySelector('[data-automation-id="formField-dateSignedOn"]') &&
+          (!workdaySelfIdentifyDateValid() || workdaySidDateErrorPresent())) gaps.push('dateSignedOn');
       return gaps;
     };
     const workdayCommitSelfIdentifyDisability = async (profileArg) => {
@@ -2099,26 +2136,38 @@
         await addDbg('[WD-SID] date no baseId');
         return { present: true, committed: false };
       }
-      const resp = await new Promise(resolve => {
-        chrome.runtime.sendMessage({
-          type: 'WORKDAY_TYPE_DATE',
-          baseId,
-          month: desired.month,
-          day: desired.day,
-          year: desired.year
-        }, r => resolve(chrome.runtime.lastError ? { ok: false, error: chrome.runtime.lastError.message } : (r || {})));
-      });
-      await sleep(500);
-      if (!workdaySelfIdentifyDateMatches(desired)) {
+      let resp = { ok: false, reason: 'not-run' };
+      for (let attempt = 0; attempt < 2; attempt++) {
+        resp = await new Promise(resolve => {
+          chrome.runtime.sendMessage({
+            type: 'WORKDAY_TYPE_DATE',
+            baseId,
+            month: desired.month,
+            day: desired.day,
+            year: desired.year
+          }, r => resolve(chrome.runtime.lastError ? { ok: false, error: chrome.runtime.lastError.message } : (r || {})));
+        });
+        await sleep(800);
+        if (workdaySelfIdentifyDateMatches(desired) && !workdaySidDateErrorPresent()) break;
         const nativeSet = setNativeDateDom();
-        await sleep(650);
-        await addDbg('[WD-SID] date nativeFallback n=' + nativeSet);
+        await sleep(750);
+        try {
+          const partsAfterNative = workdaySelfIdentifyDateParts();
+          const lastPart = partsAfterNative.year.el || partsAfterNative.day.el || partsAfterNative.month.el;
+          lastPart?.focus?.();
+          lastPart?.blur?.();
+        } catch (_) {}
+        await addDbg('[WD-SID] date nativeFallback n=' + nativeSet + ' attempt=' + attempt +
+          ' errorDate=' + workdaySidDateErrorPresent());
+        if (workdaySelfIdentifyDateMatches(desired) && !workdaySidDateErrorPresent()) break;
       }
-      const committed = workdaySelfIdentifyDateMatches(desired);
+      const dateError = workdaySidDateErrorPresent();
+      const committed = workdaySelfIdentifyDateMatches(desired) && !dateError;
       const parts = workdaySelfIdentifyDateParts();
       await addDbg('[WD-SID] date committed=' + committed + ' values=' +
         [parts.month.raw || '?', parts.day.raw || '?', parts.year.raw || '?'].join('/') +
         ' invalid=' + [parts.month.invalid ? 'm' : '', parts.day.invalid ? 'd' : '', parts.year.invalid ? 'y' : ''].join('') +
+        ' errorDate=' + dateError +
         ' ok=' + !!resp.ok + (resp.error ? ' err=' + String(resp.error).slice(0, 50) : ''));
       return { present: true, committed };
     };
@@ -2344,8 +2393,15 @@
               await addDbg('[WD] empty step shell hydrated; re-entering fill path');
               return runExternalApply(job, rawAnswers);
             }
-            const base = String(job.applyUrl || location.href).replace(/[?#].*$/, '').replace(/\/+$/, '');
-            const retryUrl = (/\/apply(?:\/|$)/i.test(base) ? base : base + '/apply/applyManually') +
+            const currentBase = String(location.href || '').replace(/[?#].*$/, '').replace(/\/+$/, '');
+            const jobBase = String(job.applyUrl || '').replace(/[?#].*$/, '').replace(/\/+$/, '');
+            const sourceBase = /\/apply(?:\/|$)/i.test(currentBase) ? currentBase : (jobBase || currentBase);
+            const manualBase = /\/apply\/applyManually$/i.test(sourceBase)
+              ? sourceBase
+              : /\/apply$/i.test(sourceBase)
+                ? sourceBase.replace(/\/apply$/i, '/apply/applyManually')
+                : sourceBase + '/apply/applyManually';
+            const retryUrl = manualBase +
               '?pja_wd_entry_retry=1&pja_wd_hydrate_retry=' + (deadEndTries + 1);
             await addDbg('[WD] empty step shell persisted; navigating apply route retry=' + (deadEndTries + 1));
             location.assign(retryUrl);

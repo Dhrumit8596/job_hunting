@@ -186,6 +186,13 @@ module.exports = async (t) => {
     source.includes("const padded = isYear ? String(value).padStart(4, '0') : String(value)"),
   'background: Workday CDP date typing does not zero-pad month/day spinbuttons');
 
+  t.ok(source.includes('Strategy 3: explicit MAIN-world Workday/React commit') &&
+    source.includes('[cdp] date s3=') &&
+    source.includes("'onDatePicked', 'onDateSelected', 'onDateChange'") &&
+    source.includes('{ year: y, month: m - 1, day: d }') &&
+    source.includes('errorDate'),
+  'background: Workday CDP date typing runs a main-world React/date callback recovery pass and reports Error-Date state');
+
   t.ok(source.includes("const rankedOwnsQueueJob = !!(ranked && ranked.status === 'applying' && job.runId && ranked.runId === job.runId)") &&
     source.includes('if (rankedOwnsQueueJob)'),
   'apply watchdog: runId alone does not make a manual external queue ranked-owned');

@@ -101,13 +101,16 @@ module.exports = (t) => {
     externalSource.includes('postfill phoneNumber commit'),
   'external-apply: Workday force-commits the real phone number field without filling phone extension');
   t.ok(externalSource.includes('const workdayPhoneNumberDigits = (sourceProfile) =>') &&
+    externalSource.includes('const workdayPhoneNumberVariants = (sourceProfile) =>') &&
     externalSource.includes('raw.slice(-10)') &&
     externalSource.includes('Workday stores country code separately') &&
+    externalSource.includes("phoneInput.getAttribute('aria-invalid') === 'true'") &&
+    externalSource.includes("digits.slice(0, 3) + '-' + digits.slice(3, 6) + '-' + digits.slice(6)") &&
     externalSource.includes('getBoundingClientRect()') &&
     externalSource.includes('forceWorkdayPhoneNumberTrustedCommit') &&
     externalSource.includes("type: 'WORKDAY_SET_SID'") &&
     externalSource.includes('without an immediate blur'),
-  'external-apply: Workday phone-number commit uses national digits, visible input verification, and trusted insertText without blur');
+  'external-apply: Workday phone-number commit uses national/formatted digits, invalid-marker verification, and trusted insertText without blur');
   t.ok(externalSource.includes('[WD-MYINFO] ') &&
     externalSource.includes('skipped step=') &&
     externalSource.includes('!initialGaps.length && !/my information/i.test(stepLine)'),
@@ -150,9 +153,11 @@ module.exports = (t) => {
   'external-apply: Workday Self Identify detection ignores inactive step navigation and requires checked disability input when rendered');
   t.ok(externalSource.includes('const setNativeDateDom = () =>') &&
     externalSource.includes('[WD-SID] date nativeFallback n=') &&
+    externalSource.includes('const workdaySidDateErrorPresent = () =>') &&
+    externalSource.includes('errorDate=') &&
     externalSource.includes("type: 'WORKDAY_TYPE_DATE'") &&
     externalSource.includes('workdaySelfIdentifyDateMatches(desired)'),
-  'external-apply: Workday Self Identify date uses a native DOM fallback after CDP date hook/typing leaves stale or invalid visible spinners');
+  'external-apply: Workday Self Identify date treats visible Error-Date as a gap and uses a native DOM fallback after CDP date hook/typing leaves stale or invalid visible spinners');
   t.ok(externalSource.includes('const yearOk = (y >= 2020 && y <= 2100) || (y >= 20 && y <= 99)') &&
     externalSource.includes('!parts.month.invalid && !parts.day.invalid && !parts.year.invalid'),
   'external-apply: Workday Self Identify date validation accepts Workday two-digit years when controls are not invalid');
@@ -243,9 +248,11 @@ module.exports = (t) => {
     externalSource.includes('empty step shell hydrated; re-entering fill path') &&
     externalSource.includes('empty step shell persisted; navigating apply route retry=') &&
     externalSource.includes('pja_wd_hydrate_retry=') &&
+    externalSource.includes("sourceBase.replace(/\\/apply$/i, '/apply/applyManually')") &&
+    externalSource.includes("sourceBase + '/apply/applyManually'") &&
     externalSource.includes("reason: 'stuck_budget', fields: ['workday_empty_shell']") &&
     !externalSource.includes('back-to-job-posting'),
-  'external-apply: Workday empty step shell waits, retries direct apply route, then fails fast');
+  'external-apply: Workday empty step shell waits, retries applyManually route, then fails fast');
   t.ok(externalSource.includes("const retryKey = 'pja_wd_block_retry_' + (job.runId || 'norun')") &&
     externalSource.includes("(reasonHint || 'blocked')") &&
     externalSource.includes("(stepBefore || 'nostep')"),

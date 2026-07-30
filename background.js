@@ -2331,6 +2331,135 @@ async function cdpTypeDateSpinner(tabId, { baseId, month, day, year }) {
     chrome.storage.local.set({ pja_dbg: arr }, r);
   }));
 
+  // Strategy 3: explicit MAIN-world Workday/React commit. In live Workday runs the
+  // spinbutton DOM can show the correct values while Workday still leaves the
+  // date field on Error-Date. This pass sets the DOM values again from the page
+  // world and calls any reachable React date callbacks with several common
+  // payload shapes used across Workday tenant builds.
+  let s3Result = null;
+  try {
+    const [s3] = await chrome.scripting.executeScript({
+      target: { tabId },
+      world: 'MAIN',
+      func: (month, day, year) => {
+        const m = parseInt(month, 10);
+        const d = parseInt(day, 10);
+        const y = parseInt(year, 10);
+        const ymd = String(y).padStart(4, '0') + '-' + String(m).padStart(2, '0') + '-' + String(d).padStart(2, '0');
+        const nativeSet = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set;
+        const visible = el => {
+          if (!el) return false;
+          const r = el.getBoundingClientRect();
+          const st = getComputedStyle(el);
+          return r.width > 0 && r.height > 0 && st.visibility !== 'hidden' && st.display !== 'none';
+        };
+        const field = document.querySelector('[data-automation-id="formField-dateSignedOn"]') ||
+          document.querySelector('[data-automation-id="dateInputWrapper"]') ||
+          document;
+        const setPart = (sel, value) => {
+          const el = field.querySelector(sel) || document.querySelector(sel);
+          if (!el) return false;
+          try { el.scrollIntoView({ block: 'center', behavior: 'instant' }); } catch (_) {}
+          try { el.focus(); } catch (_) {}
+          try { nativeSet ? nativeSet.call(el, String(value)) : (el.value = String(value)); } catch (_) { el.value = String(value); }
+          try { el.setAttribute('aria-valuenow', String(value)); } catch (_) {}
+          try { el.setAttribute('aria-valuetext', String(value)); } catch (_) {}
+          for (const type of ['beforeinput', 'input']) {
+            try { el.dispatchEvent(new InputEvent(type, { bubbles: true, composed: true, inputType: 'insertText', data: String(value) })); } catch (_) {}
+          }
+          for (const type of ['change', 'blur', 'focusout']) {
+            try { el.dispatchEvent(new Event(type, { bubbles: true, composed: true })); } catch (_) {}
+          }
+          return true;
+        };
+        const sets = {
+          month: setPart('input[data-automation-id="dateSectionMonth-input"], [role="spinbutton"][aria-label="Month"]', m),
+          day: setPart('input[data-automation-id="dateSectionDay-input"], [role="spinbutton"][aria-label="Day"]', d),
+          year: setPart('input[data-automation-id="dateSectionYear-input"], [role="spinbutton"][aria-label="Year"]', y)
+        };
+        const anchors = Array.from(new Set([
+          field,
+          document.querySelector('[data-automation-id="dateInputWrapper"]'),
+          document.querySelector('[role="spinbutton"][aria-label="Month"]'),
+          document.querySelector('[role="spinbutton"][aria-label="Day"]'),
+          document.querySelector('[role="spinbutton"][aria-label="Year"]')
+        ].filter(Boolean)));
+        const propNames = [
+          'onDatePicked', 'onDateSelected', 'onDateChange', 'handleDatePicked', 'handleDateChange',
+          'onChange', 'onInput', 'onBlur'
+        ];
+        const dateObj = new Date(y, m - 1, d);
+        const eventLike = { target: { value: ymd }, currentTarget: { value: ymd }, preventDefault() {}, stopPropagation() {} };
+        const payloads = [
+          { year: y, month: m, day: d },
+          { year: y, month: m - 1, day: d },
+          { value: ymd, year: y, month: m, day: d },
+          { date: dateObj, year: y, month: m, day: d },
+          dateObj,
+          ymd,
+          eventLike
+        ];
+        const visited = new Set();
+        const calls = [];
+        const queueFiber = f => { if (f && !visited.has(f)) visited.add(f); };
+        const callHandlers = f => {
+          if (!f || !visited.has(f)) return;
+          const propsList = [f.memoizedProps, f.pendingProps].filter(Boolean);
+          for (const props of propsList) {
+            for (const propName of propNames) {
+              if (typeof props[propName] !== 'function') continue;
+              let ok = false;
+              let err = '';
+              for (const payload of payloads) {
+                try { props[propName](payload); ok = true; } catch (e) { err = String(e && e.message || e).slice(0, 60); }
+              }
+              calls.push({ propName, ok, err });
+              if (calls.length >= 12) return;
+            }
+          }
+        };
+        for (const anchor of anchors) {
+          const key = Object.keys(anchor).find(k => k.startsWith('__reactFiber'));
+          if (!key) continue;
+          let up = anchor[key];
+          for (let i = 0; i < 35 && up; i++, up = up.return) {
+            queueFiber(up);
+            callHandlers(up);
+            if (calls.length >= 12) break;
+          }
+          const downQueue = [anchor[key]];
+          for (let i = 0; i < 80 && downQueue.length && calls.length < 12; i++) {
+            const f = downQueue.shift();
+            queueFiber(f);
+            callHandlers(f);
+            if (f?.child) downQueue.push(f.child);
+            if (f?.sibling) downQueue.push(f.sibling);
+          }
+        }
+        const parts = ['Month', 'Day', 'Year'].map(label => {
+          const el = field.querySelector('[role="spinbutton"][aria-label="' + label + '"], input[aria-label="' + label + '"]') ||
+            document.querySelector('[role="spinbutton"][aria-label="' + label + '"], input[aria-label="' + label + '"]');
+          return String(el?.value || el?.getAttribute('aria-valuenow') || el?.getAttribute('aria-valuetext') || '');
+        });
+        try { field.dispatchEvent(new Event('change', { bubbles: true, composed: true })); } catch (_) {}
+        try { field.dispatchEvent(new Event('blur', { bubbles: true, composed: true })); } catch (_) {}
+        const errorDate = Array.from(document.querySelectorAll('[data-automation-id="Error-Date"], button'))
+          .some(el => visible(el) && /error[-\s:]*date|^date$/i.test((el.getAttribute('data-automation-id') || el.textContent || '').trim()));
+        return { ok: true, sets, calls: calls.slice(0, 6), parts, errorDate };
+      },
+      args: [month, day, year]
+    });
+    s3Result = s3?.result || null;
+  } catch (e) {
+    s3Result = { ok: false, error: String(e && e.message || e).slice(0, 120) };
+  }
+
+  await new Promise(r => chrome.storage.local.get('pja_dbg', d => {
+    const arr = (d.pja_dbg || []).slice(-19);
+    arr.push('[cdp] date s3=' + JSON.stringify(s3Result).slice(0, 700));
+    chrome.storage.local.set({ pja_dbg: arr }, r);
+  }));
+
   try { await chrome.debugger.detach({ tabId }); } catch (_) {}
 }
 
