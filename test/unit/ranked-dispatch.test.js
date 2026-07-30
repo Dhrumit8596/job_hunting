@@ -41,6 +41,12 @@ module.exports = async (t) => {
     source.includes('ranked = await pjaReconcileRankedLedger(ranked'),
   'ranked dispatch: terminal ledger events are replayed into pja_ranked_apply if master advance was missed');
 
+  t.ok(source.includes("event.reason || 'ready_to_submit_review'") &&
+    source.includes("!/^(submitting|pending|queued|started|in_progress)$/.test(e.status)") &&
+    source.includes("/^(submitting|pending|queued|started|in_progress)$/.test(event.status) && !/ready_to_submit/i.test(event.reason || '')") &&
+    source.includes("ready_to_submit/i.test(event.reason || '')"),
+  'ranked dispatch: stop-before-submit ready_to_submit_review is terminal, not an ignored pending event');
+
   t.ok(source.includes('async function pjaRecoverRankedLastFailure(master)') &&
     source.includes("recoveredReason = isSuccessFactors && reason === 'no_submit_btn' ? 'no_apply_path' : reason") &&
     source.includes('await pjaAppendApplicationEvent(event)') &&

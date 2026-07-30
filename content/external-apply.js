@@ -234,11 +234,55 @@
       console.log('PJA ext-apply: TRIGGERED for', job.company, '@', location.hostname, 'idx:', queue.currentIndex);
       sessionStorage.setItem('pja_last_action', 'triggered:' + job.company);
 
-      waitForForm().then(() => runExternalApply(job, data.pja_answers || {}))
+      startExternalApply(job, data.pja_answers || {}, 'initial')
         .catch(e => console.log('PJA ext-apply outer promise catch:', e.message, e.stack?.slice(0,200)));
     });
   } catch(e) {
     console.log('PJA ext-apply: outer storage.get failed (context invalidated?):', e.message);
+  }
+
+  async function startExternalApply(job, rawAnswers, reason) {
+    const currentUrl = location.href;
+    if (window.__pjaExtApplyInFlight && window.__pjaExtApplyInFlightUrl === currentUrl) return;
+    window.__pjaExtApplyInFlight = true;
+    window.__pjaExtApplyInFlightUrl = currentUrl;
+    try {
+      if (/workday\.com|myworkdayjobs\.com/i.test(location.hostname)) {
+        await new Promise(r => chrome.storage.local.get('pja_dbg', d => {
+          const a = (d.pja_dbg || []).slice(-40);
+          a.push('[WD] ext runner start reason=' + reason + ' url=' + currentUrl.slice(0, 220));
+          chrome.storage.local.set({ pja_dbg: a }, r);
+        }));
+      }
+      await waitForForm();
+      return await runExternalApply(job, rawAnswers || {});
+    } finally {
+      if (window.__pjaExtApplyInFlightUrl === currentUrl) {
+        window.__pjaExtApplyInFlight = false;
+      }
+    }
+  }
+
+  if (/workday\.com|myworkdayjobs\.com/i.test(location.hostname)) {
+    let lastWorkdayWatchKey = '';
+    setInterval(() => {
+      if (!/\/apply(?:\/|$)/i.test(location.pathname)) return;
+      const key = location.href.replace(/[?#].*$/, '');
+      if (key === lastWorkdayWatchKey && window.__pjaExtApplyInFlight && window.__pjaExtApplyInFlightUrl === location.href) return;
+      chrome.storage.local.get(['pja_ext_current', 'pja_answers', 'pja_ext_queue'], data => {
+        const job = data.pja_ext_current;
+        const queue = data.pja_ext_queue;
+        if (!job || !queue || queue.status !== 'applying') return;
+        if (queue.runId) job.runId = queue.runId;
+        try {
+          const expectedHost = new URL(job.applyUrl || location.href, location.href).hostname;
+          if (expectedHost !== location.hostname) return;
+        } catch (_) {}
+        lastWorkdayWatchKey = key;
+        startExternalApply(job, data.pja_answers || {}, 'workday-url-watch')
+          .catch(e => console.log('PJA ext-apply Workday watch catch:', e.message, e.stack?.slice(0,200)));
+      });
+    }, 2000);
   }
 
   async function waitForForm() {
@@ -996,8 +1040,30 @@
           }));
           const continueHref = continueBtn.href || continueBtn.getAttribute('href') || '';
           if (continueHref) {
-            location.assign(continueHref);
-            return;
+            const continueUrl = new URL(continueHref, location.href).href;
+            const currentUrl = new URL(location.href, location.href).href;
+            await new Promise(r => chrome.storage.local.get('pja_dbg', d => {
+              const a = (d.pja_dbg || []).slice(-40);
+              a.push('[WD] description Continue href=' + continueUrl.slice(0, 220));
+              chrome.storage.local.set({ pja_dbg: a }, r);
+            }));
+            if (continueUrl.replace(/[?#].*$/, '') !== currentUrl.replace(/[?#].*$/, '')) {
+              location.href = continueUrl;
+              await sleep(1200);
+              if (location.href.replace(/[?#].*$/, '') !== continueUrl.replace(/[?#].*$/, '')) {
+                try { location.assign(continueUrl); } catch (_) {}
+                await sleep(1200);
+              }
+              if (location.href.replace(/[?#].*$/, '') !== continueUrl.replace(/[?#].*$/, '')) {
+                try { location.replace(continueUrl); } catch (_) {}
+                await sleep(1200);
+              }
+              if (location.href.replace(/[?#].*$/, '') === continueUrl.replace(/[?#].*$/, '')) {
+                return runExternalApply(job, rawAnswers);
+              }
+            }
+            await sleep(1000);
+            return runExternalApply(job, rawAnswers);
           }
           if (!await trustedWorkdayClick(continueBtn, 'continue-application')) {
             try { continueBtn.click(); } catch (_) {}
@@ -2536,8 +2602,14 @@
       await addDbg('[ext] step ' + steps + ' clicking Next step=' + stepTextBefore + ' wdMissing=' + wdSelectMissing.map(m=>m.label).join('|') + ' btn=' + nextBtnAid + '/' + nextBtnText + (nextBtnDisabled ? '[DISABLED]' : '') + (isWorkdaySidStep ? '[SID-CDP]' : ''));
       if (isWorkdayHost) {
         if (isWorkdaySidStep) {
-          const sidReady = await withTimeout(workdaySelfIdentifyTransaction(profile, 'pre-click-' + steps), 45000, 'wd-sid-pre-click-' + steps);
-          if (!sidReady.ok) await addDbg('[WD-SID] pre-click gaps remain=' + sidReady.gaps.join('|'));
+          const sidReadyRaw = await withTimeout(workdaySelfIdentifyTransaction(profile, 'pre-click-' + steps), 45000, 'wd-sid-pre-click-' + steps);
+          const sidReady = sidReadyRaw && typeof sidReadyRaw === 'object'
+            ? sidReadyRaw
+            : { ok: false, gaps: ['sid_transaction_no_result'] };
+          if (!sidReady.ok) {
+            const sidGaps = Array.isArray(sidReady.gaps) ? sidReady.gaps : ['sid_transaction_failed'];
+            await addDbg('[WD-SID] pre-click gaps remain=' + sidGaps.join('|'));
+          }
         } else {
           await finalizeWorkdayMyInformation('pre-click-' + steps);
           if (typeof pjaForceWorkdayTermsCheckbox === 'function') await withTimeout(pjaForceWorkdayTermsCheckbox('pre-click-' + steps), 12000, 'wd-terms-pre-click-' + steps);

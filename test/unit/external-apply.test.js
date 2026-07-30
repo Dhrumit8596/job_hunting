@@ -141,6 +141,8 @@ module.exports = (t) => {
     externalSource.includes("withTimeout(pjaFillWorkdayWorkExperience(profile), 12000, 'wd-workexp-step-' + steps)") &&
     externalSource.includes("withTimeout(pjaForceWorkdayTermsCheckbox('step-' + steps), 12000, 'wd-terms-step-' + steps)") &&
     externalSource.includes("workdaySelfIdentifyTransaction(profile, 'pre-click-' + steps)") &&
+    externalSource.includes('sid_transaction_no_result') &&
+    externalSource.includes('sid_transaction_failed') &&
     externalSource.includes("workdaySelfIdentifyTransaction(profile, 'validation-error-' + steps)") &&
     externalSource.includes('do not run generic form/My Info fillers'),
   'external-apply: Workday Self Identify step loop uses the SID transaction instead of generic My Info/form fillers');
@@ -260,7 +262,17 @@ module.exports = (t) => {
   t.ok(externalSource.includes('description entry → applyManually nav attempt=') &&
     externalSource.includes('description entry → clicking Continue Application attempt=') &&
     externalSource.includes('const continueHref = continueBtn.href') &&
-    externalSource.includes('location.assign(continueHref)') &&
+    externalSource.includes('const continueUrl = new URL(continueHref, location.href).href') &&
+    externalSource.includes('description Continue href=') &&
+    externalSource.includes("location.href = continueUrl") &&
+    externalSource.includes('location.replace(continueUrl)') &&
+    externalSource.includes('startExternalApply(job, data.pja_answers || {},') &&
+    externalSource.includes('ext runner start reason=') &&
+    externalSource.includes("'workday-url-watch'") &&
+    externalSource.includes('setInterval(() =>') &&
+    externalSource.includes('pja_ext_current') &&
+    externalSource.includes('return runExternalApply(job, rawAnswers)') &&
+    externalSource.includes('location.assign(continueUrl)') &&
     externalSource.includes("trustedWorkdayClick(continueBtn, 'continue-application')") &&
     externalSource.includes("cleanUrl + '/apply/applyManually'") &&
     externalSource.includes('continue application') &&

@@ -366,6 +366,9 @@ function pjaRankedApplyTerminal(master, job, event) {
   }
   const confirmed = self.PJAApplicationLedger.confirmationKinds(event).length > 0;
   if (confirmed) master.results.confirmed.push({ ...job, confirmedAt: event.confirmedAt });
+  else if (/ready_to_submit/i.test(event.reason || '')) {
+    master.results.skipped.push({ ...job, reason: event.reason || 'ready_to_submit_review' });
+  }
   else if (/^already_applied\b/i.test(event.reason || '')) {
     master.results.skipped.push({ ...job, reason: event.reason || 'already_applied' });
   }
@@ -385,7 +388,8 @@ async function pjaReconcileRankedLedger(master, ledger) {
   }
   const events = Object.values(ledger.events || {})
     .map(e => self.PJAApplicationLedger.normalizeEvent(e))
-    .filter(e => e && e.runId === master.runId && !/^(submitting|pending|queued|started|in_progress)$/.test(e.status))
+    .filter(e => e && e.runId === master.runId &&
+      (!/^(submitting|pending|queued|started|in_progress)$/.test(e.status) || /ready_to_submit/i.test(e.reason || '')))
     .sort((a, b) => (a.occurredAt || 0) - (b.occurredAt || 0));
   let changed = false;
   for (const event of events) {
@@ -596,7 +600,7 @@ async function pjaDispatchRankedCurrent(master) {
 
 async function pjaAdvanceRankedRun(rawEvent, ledger) {
   const event = self.PJAApplicationLedger && self.PJAApplicationLedger.normalizeEvent(rawEvent);
-  if (!event || /^(submitting|pending|queued|started|in_progress)$/.test(event.status)) return;
+  if (!event || (/^(submitting|pending|queued|started|in_progress)$/.test(event.status) && !/ready_to_submit/i.test(event.reason || ''))) return;
   const d = await new Promise(r => chrome.storage.local.get('pja_ranked_apply', r));
   const master = d.pja_ranked_apply;
   if (!master || master.status !== 'applying' || event.runId !== master.runId) return;
