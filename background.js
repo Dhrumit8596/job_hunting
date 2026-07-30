@@ -969,9 +969,19 @@ if (DEV_MODE) {
                       const label = el => (el.getAttribute('aria-label') || el.getAttribute('title') || el.textContent || el.value || '').trim().replace(/\s+/g, ' ').slice(0, 100);
                       const controls = [...document.querySelectorAll('button,[role=button],input[type=submit],a')].filter(visible).map(el => ({ tag: el.tagName, type: el.getAttribute('type') || '', role: el.getAttribute('role') || '', disabled: !!el.disabled || el.getAttribute('aria-disabled') === 'true', text: label(el) })).filter(x => x.text).slice(0, 80);
                       const required = [...document.querySelectorAll('[required],[aria-required=true]')].filter(visible).map(el => ({ tag: el.tagName, type: el.getAttribute('type') || '', name: (el.getAttribute('name') || '').slice(0, 80), invalid: el.getAttribute('aria-invalid') || '', checked: 'checked' in el ? !!el.checked : undefined, empty: 'value' in el ? !String(el.value || '').trim() : undefined })).slice(0, 80);
+                      const dateParts = [...document.querySelectorAll('[role="spinbutton"], input[data-automation-id^="dateSection"]')]
+                        .filter(visible)
+                        .map(el => ({
+                          tag: el.tagName,
+                          id: (el.id || '').slice(0, 120),
+                          aid: (el.getAttribute('data-automation-id') || '').slice(0, 80),
+                          label: (el.getAttribute('aria-label') || '').slice(0, 80),
+                          value: String(el.value || el.getAttribute('aria-valuenow') || el.getAttribute('aria-valuetext') || '').slice(0, 40),
+                          invalid: el.getAttribute('aria-invalid') || '',
+                        })).slice(0, 40);
                       const radios = [...document.querySelectorAll('input[type=radio]')].map(el => ({ id: (el.id || '').slice(0, 80), name: (el.name || '').slice(0, 80), value: String(el.value || '').slice(0, 80), checked: !!el.checked, ariaLabel: (el.getAttribute('aria-label') || '').slice(0, 100), labelledBy: (el.getAttribute('aria-labelledby') || '').slice(0, 100), parentText: (el.parentElement?.textContent || '').trim().replace(/\s+/g, ' ').slice(0, 100) })).slice(0, 80);
                       const errors = [...document.querySelectorAll('[role=alert],[aria-invalid=true],[class*=error],[class*=invalid]')].filter(visible).map(label).filter(Boolean).slice(0, 30);
-                      return { url: location.href, title: document.title, controls, required, radios, errors, textTail: (document.body?.innerText || '').trim().replace(/\s+/g, ' ').slice(-1200) };
+                      return { url: location.href, title: document.title, controls, required, dateParts, radios, errors, textTail: (document.body?.innerText || '').trim().replace(/\s+/g, ' ').slice(-1200) };
                     }});
                     out.push({ tabId: tab.id, url: tab.url, frames: frames.map(x => x.result).filter(Boolean) });
                   } catch (e) { out.push({ tabId: tab.id, url: tab.url, error: e.message }); }
