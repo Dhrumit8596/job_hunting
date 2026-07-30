@@ -976,6 +976,9 @@
         .filter(Boolean);
       const hasApplyEntry = pageControls.some(txt => /^apply$/i.test(txt) || /apply now|start application|continue application|sign in/i.test(txt));
       if (hasApplyEntry) {
+        const continueBtn = Array.from(document.querySelectorAll('a,button,[role=button]'))
+          .filter(el => el.offsetParent !== null)
+          .find(el => /continue application/i.test(el.textContent || el.getAttribute('aria-label') || ''));
         const sourceUrl = String(job.applyUrl || location.href || '').trim();
         const cleanUrl = sourceUrl.replace(/[?#].*$/, '').replace(/\/+$/, '');
         const manualUrl = /\/apply(?:\/|$)/i.test(cleanUrl) ? sourceUrl : cleanUrl + '/apply/applyManually';
@@ -983,6 +986,25 @@
           String(job.applyUrl || location.pathname || '').replace(/[^\w-]+/g, '_').slice(-80);
         let navs = 0;
         try { navs = parseInt(sessionStorage.getItem(navKey) || '0', 10); } catch (_) {}
+        if (continueBtn && navs < 6) {
+          try { sessionStorage.setItem(navKey, String(navs + 1)); } catch (_) {}
+          await new Promise(r => chrome.storage.local.get('pja_dbg', d => {
+            const a = (d.pja_dbg || []).slice(-40);
+            a.push('[WD] description entry → clicking Continue Application attempt=' + (navs + 1) +
+              ' controls=[' + pageControls.slice(0, 8).join('|') + ']');
+            chrome.storage.local.set({ pja_dbg: a }, r);
+          }));
+          const continueHref = continueBtn.href || continueBtn.getAttribute('href') || '';
+          if (continueHref) {
+            location.assign(continueHref);
+            return;
+          }
+          if (!await trustedWorkdayClick(continueBtn, 'continue-application')) {
+            try { continueBtn.click(); } catch (_) {}
+          }
+          await sleep(3000);
+          return runExternalApply(job, rawAnswers);
+        }
         if (manualUrl && manualUrl !== location.href && navs < 6) {
           try { sessionStorage.setItem(navKey, String(navs + 1)); } catch (_) {}
           const retryUrl = manualUrl + (manualUrl.includes('?') ? '&' : '?') + 'pja_wd_entry_retry=' + (navs + 1);
@@ -1653,22 +1675,32 @@
     const forceWorkdayReferralSource = async () => {
       if (!/workday\.com|myworkdayjobs\.com/i.test(location.hostname)) return 0;
       let filled = 0;
-      const referralCommitted = text =>
-        /linkedin|careers? website|company website|career site|indeed|facebook|social media|job board|online|internet/i.test(String(text || '')) &&
-        !/select one|select\.\.\.|required only/i.test(String(text || ''));
+      const referralCommitted = text => {
+        const cleaned = String(text || '')
+          .replace(/\bExpanded\b/ig, ' ')
+          .replace(/\s+/g, ' ')
+          .trim();
+        if (!cleaned) return false;
+        if (/^(select one|select\.{0,3}|choose|search|type to search|required only)$/i.test(cleaned)) return false;
+        if (/select one|select\.\.\.|choose an option|required only/i.test(cleaned)) return false;
+        if (/how did you hear|where did you (hear|find)|referral source|source of (this )?application/i.test(cleaned)) return false;
+        return true;
+      };
+      const selectedReferralText = el => (el.closest('[data-uxi-widget-type="multiselect"], [data-automation-id^="formField-"]')
+        ?.querySelector('[data-automation-id="selectedItemList"], [data-automation-id="selectedItem"], [data-automation-id="promptOption"]')
+        ?.textContent || '').replace(/\s+/g, ' ').trim();
       if (typeof pjaFillCombobox === 'function') {
-        const inputs = pjaQueryAllExt('input[data-uxi-widget-type="selectinput"], input[role="combobox"]').filter(el => {
+        const referralInputs = pjaQueryAllExt('input[data-uxi-widget-type="selectinput"], input[role="combobox"]').filter(el => {
           const id = el.id || el.name || el.getAttribute('data-automation-id') || '';
           const label = (typeof getLabelFor === 'function' ? getLabelFor(el) : '') || el.getAttribute('aria-label') || id || '';
           const fieldText = (el.closest('[data-automation-id^="formField-"], [data-uxi-widget-type="multiselect"], div')?.textContent || '')
             .replace(/\s+/g, ' ');
           const text = [id, label, fieldText].join(' ');
-          if (!/source--source/i.test(id) && !/how did you hear|referral source|source of (this )?application|\bsource\b/i.test(text)) return false;
-          const selected = (el.closest('[data-uxi-widget-type="multiselect"]')
-            ?.querySelector('[data-automation-id="selectedItemList"], [data-automation-id="selectedItem"], [data-automation-id="promptOption"]')
-            ?.textContent || '').trim();
-          return !referralCommitted(selected) && !referralCommitted(fieldText);
+          return /source--source/i.test(id) || /how did you hear|referral source|source of (this )?application|\bsource\b/i.test(text);
         });
+        const committedInputs = referralInputs.filter(el => referralCommitted(selectedReferralText(el)));
+        if (committedInputs.length) await addDbg('[WD] forced referralSource already committed');
+        const inputs = referralInputs.filter(el => !referralCommitted(selectedReferralText(el)));
         for (const el of inputs) {
           pjaFillCombobox(el, profile.referralSource || 'LinkedIn', 'referralSource');
           filled++;
@@ -2377,6 +2409,23 @@
             return r.width > 0 && r.height > 0;
           }).length === 0;
         if (isWorkdayDeadEnd) {
+          const bodyTextNow = document.body.innerText || '';
+          const hasWorkdayErrorShell = /something went wrong/i.test(bodyTextNow) &&
+            /refresh the page and then try again/i.test(bodyTextNow);
+          if (hasWorkdayErrorShell) {
+            const errorRetryKey = 'pja_wd_error_shell_retry_' + (job.runId || 'norun') + '_' + (job.id || job.jobId || job.applyUrl || '');
+            const errorTries = parseInt(sessionStorage.getItem(errorRetryKey) || '0', 10);
+            if (errorTries < 2) {
+              sessionStorage.setItem(errorRetryKey, String(errorTries + 1));
+              await addDbg('[WD] error shell; refreshing apply route retry=' + (errorTries + 1));
+              location.reload();
+              return;
+            }
+            await addDbg('[WD] error shell persisted; recording stuck_budget');
+            await recordResult(job, { success: false, reason: 'stuck_budget', fields: ['workday_error_shell'] });
+            navigateBack(job);
+            return;
+          }
           const deadEndRetryKey = 'pja_wd_deadend_retry_' + (job.id || job.jobId || job.applyUrl || '');
           const deadEndTries = parseInt(sessionStorage.getItem(deadEndRetryKey) || '0', 10);
           if (deadEndTries < 3) {
@@ -2519,15 +2568,41 @@
         : '';
       if (isWorkdayHost) {
         const clickLabel = nextBtnAid || nextBtnText || 'next';
-        const clicked = await Promise.race([
-          trustedWorkdayClick(nextBtn, clickLabel),
-          sleep(10000).then(async () => { await addDbg('[WD] trusted click ' + clickLabel + ' TIMEOUT 10000ms'); return false; })
-        ]);
-        if (!clicked) {
-          ['pointerdown','mousedown','pointerup','mouseup','click'].forEach(evtType => {
-            const evt = new MouseEvent(evtType, { bubbles: true, cancelable: true, view: window });
-            nextBtn.dispatchEvent(evt);
-          });
+        const waitForWorkdayAdvance = timeoutMs => new Promise(resolve => {
+          let waited = 0;
+          const poll = setInterval(() => {
+            waited += 250;
+            const errFound = Array.from(document.querySelectorAll('button')).some(b => /^errors found$/i.test(b.textContent.trim()));
+            const stepNow = document.body.innerText.match(/current step (\d+)/i)?.[1] || '';
+            const advanced = stepTextBefore ? stepNow !== stepTextBefore : false;
+            const urlChanged = location.href !== preClickUrl;
+            if (errFound || advanced || urlChanged || waited >= timeoutMs) {
+              clearInterval(poll);
+              resolve({ errFound, advanced, urlChanged, stepNow });
+            }
+          }, 250);
+        });
+        let advanceObserved = false;
+        if (isWorkdaySidStep || nextBtnAid === 'pageFooterNextButton' || nextBtnAid === 'bottomNavigationNext' || /submit/i.test(nextBtnText)) {
+          const mainOk = await mainWorldWorkdayAdvance(nextBtn, clickLabel);
+          if (mainOk) {
+            const observed = await waitForWorkdayAdvance(isWorkdaySidStep ? 6000 : 3000);
+            advanceObserved = !!(observed.errFound || observed.advanced || observed.urlChanged);
+            await addDbg('[WD] main-first observed=' + advanceObserved + ' step=' + (observed.stepNow || '') +
+              (observed.urlChanged ? ' urlChanged=true' : '') + (observed.errFound ? ' errors=true' : ''));
+          }
+        }
+        if (!advanceObserved) {
+          const clicked = await Promise.race([
+            trustedWorkdayClick(nextBtn, clickLabel),
+            sleep(10000).then(async () => { await addDbg('[WD] trusted click ' + clickLabel + ' TIMEOUT 10000ms'); return false; })
+          ]);
+          if (!clicked) {
+            ['pointerdown','mousedown','pointerup','mouseup','click'].forEach(evtType => {
+              const evt = new MouseEvent(evtType, { bubbles: true, cancelable: true, view: window });
+              nextBtn.dispatchEvent(evt);
+            });
+          }
         }
       } else if (isSmartRecruitersHost) {
         const clicked = await trustedPointClick(nextBtn);
@@ -4054,11 +4129,24 @@
 
   async function pjaForceWorkdayTermsCheckbox(phase) {
     if (!/workday\.com|myworkdayjobs\.com/i.test(location.hostname)) return { filled: 0, remainingInvalid: 0 };
+    const dbg = msg => new Promise(resolve => {
+      try {
+        chrome.storage.local.get('pja_dbg', d => {
+          const arr = (d.pja_dbg || []).slice(-40);
+          arr.push(msg);
+          chrome.storage.local.set({ pja_dbg: arr }, resolve);
+        });
+      } catch (_) {
+        resolve();
+      }
+    });
     const checkboxes = Array.from(document.querySelectorAll(
       'input[type="checkbox"][required], input[type="checkbox"][aria-required="true"], #termsAndConditions--acceptTermsAndAgreements'
     )).filter(cb => {
+      const explicitWorkdayTerms = /termsAndConditions--acceptTermsAndAgreements|acceptTermsAndAgreements/i
+        .test([cb.id || '', cb.name || '', cb.getAttribute('data-automation-id') || ''].join(' '));
       const parentFieldset = cb.closest('fieldset');
-      if (parentFieldset && parentFieldset.querySelectorAll('input[type="checkbox"]').length > 1) return false;
+      if (!explicitWorkdayTerms && parentFieldset && parentFieldset.querySelectorAll('input[type="checkbox"]').length > 1) return false;
       const label = [
         typeof pjaGetLabel === 'function' ? pjaGetLabel(cb) : '',
         cb.id || '',
@@ -4066,6 +4154,7 @@
         cb.getAttribute('aria-label') || '',
         cb.closest('label, [data-automation-id^="formField"], div')?.textContent || ''
       ].join(' ').replace(/\s+/g, ' ');
+      if (explicitWorkdayTerms) return true;
       return /privacy notice|privacy policy|read and agree|declare that you have read|terms|terms and conditions|accept terms|consent to the terms|termsAndConditions|acceptTermsAndAgreements|acknowledge the terms/i.test(label);
     });
     let filled = 0;
@@ -4090,7 +4179,7 @@
       if (cb.checked) filled++;
     }
     const remainingInvalid = checkboxes.filter(cb => cb.getAttribute('aria-invalid') === 'true' || !cb.checked).length;
-    if (checkboxes.length) await addDbg('[WD] terms checkbox phase=' + (phase || '') +
+    if (checkboxes.length) await dbg('[WD] terms checkbox phase=' + (phase || '') +
       ' filled=' + filled + '/' + checkboxes.length + ' remainingInvalid=' + remainingInvalid);
     return { filled, remainingInvalid };
   }

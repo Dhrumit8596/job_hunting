@@ -149,7 +149,9 @@ module.exports = async (t) => {
   'combobox: Workday referral-source does not press Enter after scheduling an option click');
   t.ok(autofillSource.includes('Job Board: 104 Job Bank') &&
     autofillSource.includes('company-specific source taxonomies') &&
-    autofillSource.includes('! /select one|select\\.\\.\\.|choose|expanded|required only/i.test(selectedText)'.replace('! ', '!')),
+    autofillSource.includes('pjaWorkdayReferralCommittedText(selectedText)') &&
+    autofillSource.includes('referralSource selected chip already committed; skip reopen') &&
+    autofillSource.includes('pjaFillForm skip referralSource selected chip already committed'),
   'combobox: Workday referral-source accepts tenant-specific selected chips as committed');
   t.ok(autofillSource.includes('Type to Add Skills') &&
     autofillSource.includes('Leave skills untouched unless a future dedicated skills filler is added') &&

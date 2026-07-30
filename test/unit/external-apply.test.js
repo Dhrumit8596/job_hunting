@@ -147,6 +147,13 @@ module.exports = (t) => {
   t.ok(externalSource.includes('[ext] WD appQ fill: SID skipped; transaction-owned') &&
     externalSource.indexOf('[ext] WD appQ fill: SID skipped; transaction-owned') < externalSource.indexOf('const fields = Array.from(new Set(['),
   'external-apply: legacy Workday app-question filler exits on Self Identify pages so it cannot corrupt transaction-owned SID fields');
+  t.ok(externalSource.includes('waitForWorkdayAdvance') &&
+    externalSource.includes("if (isWorkdaySidStep || nextBtnAid === 'pageFooterNextButton'") &&
+    externalSource.includes('const mainOk = await mainWorldWorkdayAdvance(nextBtn, clickLabel)') &&
+    externalSource.includes('main-first observed=') &&
+    externalSource.indexOf('const mainOk = await mainWorldWorkdayAdvance(nextBtn, clickLabel)') <
+      externalSource.indexOf('trustedWorkdayClick(nextBtn, clickLabel)'),
+  'external-apply: Workday footer advance tries MAIN-world first before trusted click fallback');
   t.ok(externalSource.includes('Do not match the Workday left/top step navigation text alone') &&
     externalSource.includes('public burden statement|omb control number|please check one of the boxes below') &&
     externalSource.includes('if (inputs.length) return inputs.some(input => input.checked)'),
@@ -195,7 +202,8 @@ module.exports = (t) => {
     externalSource.includes("window._pjaComboChain.catch") &&
     externalSource.includes('Careers Website') &&
     externalSource.includes('const referralCommitted = text =>') &&
-    externalSource.includes('facebook') &&
+    externalSource.includes('selectedReferralText') &&
+    externalSource.includes('forced referralSource already committed') &&
     externalSource.includes('await closeWorkdayTransientMenus()'),
   'external-apply: Workday referral-source force path commits selectinput fields, not only button prompts');
   t.ok(externalSource.includes('recoverSmartRecruitersEmptyStep') &&
@@ -250,6 +258,10 @@ module.exports = (t) => {
     externalSource.indexOf('pja_wd_pending_apply') < externalSource.indexOf('const authResult = await window.pjaWorkdayAuth.run'),
   'external-apply: Workday pending-apply context is written before Gmail verification starts');
   t.ok(externalSource.includes('description entry → applyManually nav attempt=') &&
+    externalSource.includes('description entry → clicking Continue Application attempt=') &&
+    externalSource.includes('const continueHref = continueBtn.href') &&
+    externalSource.includes('location.assign(continueHref)') &&
+    externalSource.includes("trustedWorkdayClick(continueBtn, 'continue-application')") &&
     externalSource.includes("cleanUrl + '/apply/applyManually'") &&
     externalSource.includes('continue application') &&
     externalSource.includes("pja_wd_desc_manual_nav_") &&
@@ -260,6 +272,10 @@ module.exports = (t) => {
     externalSource.includes('empty step shell hydrated; re-entering fill path') &&
     externalSource.includes('empty step shell persisted; navigating apply route retry=') &&
     externalSource.includes('pja_wd_hydrate_retry=') &&
+    externalSource.includes('something went wrong') &&
+    externalSource.includes('refresh the page and then try again') &&
+    externalSource.includes('error shell; refreshing apply route retry=') &&
+    externalSource.includes("fields: ['workday_error_shell']") &&
     externalSource.includes("sourceBase.replace(/\\/apply$/i, '/apply/applyManually')") &&
     externalSource.includes("sourceBase + '/apply/applyManually'") &&
     externalSource.includes("reason: 'stuck_budget', fields: ['workday_empty_shell']") &&
@@ -329,6 +345,8 @@ module.exports = (t) => {
   'external-apply: Workday app-question filler scans and corrects questionnaire buttons with Workday error/body labels');
   t.ok(externalSource.includes('async function pjaForceWorkdayTermsCheckbox') &&
     externalSource.includes("trustedWorkdayClick(target, 'terms-checkbox')") &&
+    externalSource.includes('explicitWorkdayTerms') &&
+    externalSource.includes('if (explicitWorkdayTerms) return true') &&
     externalSource.includes('remainingInvalid') &&
     externalSource.includes('acceptTermsAndAgreements'),
   'external-apply: Workday terms checkbox uses trusted click, native fallback, and verification');

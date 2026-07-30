@@ -152,6 +152,29 @@ function pjaIsApplicationPage() {
   ].some(p => url.includes(p));
 }
 
+function pjaWorkdaySelectedChipText(el) {
+  try {
+    const root = el?.closest?.('[data-uxi-widget-type="multiselect"], [data-automation-id^="formField"], [data-automation-id^="question"]');
+    return (root?.querySelector?.('[data-automation-id="selectedItemList"], [data-automation-id="selectedItem"], [data-automation-id="promptOption"]')?.textContent || '')
+      .replace(/\s+/g, ' ')
+      .trim();
+  } catch (_) {
+    return '';
+  }
+}
+
+function pjaWorkdayReferralCommittedText(text) {
+  const cleaned = String(text || '')
+    .replace(/\bExpanded\b/ig, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  if (!cleaned) return false;
+  if (/^(select one|select\.{0,3}|choose|search|type to search|required only)$/i.test(cleaned)) return false;
+  if (/select one|select\.\.\.|choose an option|required only/i.test(cleaned)) return false;
+  if (/how did you hear|where did you (hear|find)|referral source|source of (this )?application/i.test(cleaned)) return false;
+  return true;
+}
+
 // ── Extract label text for a form element ─────────────────────────────────
 function pjaGetLabel(el) {
   // Use the element's own root (shadow root or document) for all lookups so
@@ -1960,19 +1983,21 @@ function pjaFillCombobox(input, value, key) {
       try {
         const msContainer = input.closest('[data-uxi-widget-type="multiselect"]');
         const fieldContainer = input.closest('[data-automation-id^="formField"], [data-automation-id^="question"]');
-        const selectedText = (
-          msContainer?.querySelector('[data-automation-id="selectedItemList"], [data-automation-id="selectedItem"], [data-automation-id="promptOption"]')?.textContent ||
-          fieldContainer?.querySelector('[data-automation-id="selectedItemList"], [data-automation-id="selectedItem"], [data-automation-id="promptOption"]')?.textContent ||
-          fieldContainer?.textContent ||
-          ''
-        ).trim();
+        const selectedText = key === 'referralSource'
+          ? pjaWorkdaySelectedChipText(input)
+          : (
+            msContainer?.querySelector('[data-automation-id="selectedItemList"], [data-automation-id="selectedItem"], [data-automation-id="promptOption"]')?.textContent ||
+            fieldContainer?.querySelector('[data-automation-id="selectedItemList"], [data-automation-id="selectedItem"], [data-automation-id="promptOption"]')?.textContent ||
+            fieldContainer?.textContent ||
+            ''
+          ).trim();
         if (!selectedText) return false;
         if (key === 'phoneCountryCode') return /united states/i.test(selectedText) && /\+?1\b/.test(selectedText);
         if (key === 'referralSource') {
           // Workday tenants use company-specific source taxonomies ("Job Board: 104 Job Bank",
           // "Applied Materials Corporate Website", etc.). Once a selected chip is present and it
           // is not a placeholder, treat it as committed instead of retrying until timeout.
-          return /\S/.test(selectedText) && !/select one|select\.\.\.|choose|expanded|required only/i.test(selectedText);
+          return pjaWorkdayReferralCommittedText(selectedText);
         }
         return /\S/.test(selectedText);
       } catch (_) {
@@ -2071,6 +2096,20 @@ function pjaFillCombobox(input, value, key) {
               arr.push('[WD] cleared non-US phoneCountryCode selected="' + selectedText.slice(0, 60) + '"');
               chrome.storage.local.set({ pja_dbg: arr });
             });
+          }
+        } catch (_) {}
+      }
+      if (key === 'referralSource') {
+        try {
+          const selectedText = pjaWorkdaySelectedChipText(input);
+          if (pjaWorkdayReferralCommittedText(selectedText)) {
+            chrome.storage.local.get('pja_dbg', d => {
+              const arr = (d.pja_dbg || []).slice(-160);
+              arr.push('[WD] referralSource selected chip already committed; skip reopen');
+              chrome.storage.local.set({ pja_dbg: arr });
+            });
+            resolve();
+            return;
           }
         } catch (_) {}
       }
@@ -2846,6 +2885,14 @@ function pjaFillForm(profile, answers) {
         try { chrome.storage.local.get('pja_dbg', d => {
           const arr = (d.pja_dbg || []).slice(-160);
           arr.push('[WD] pjaFillForm skip phone code selected chip already US');
+          chrome.storage.local.set({ pja_dbg: arr });
+        }); } catch (_) {}
+        return;
+      }
+      if (wdForcedKey === 'referralSource' && pjaWorkdayReferralCommittedText(wdSelectedChipText)) {
+        try { chrome.storage.local.get('pja_dbg', d => {
+          const arr = (d.pja_dbg || []).slice(-160);
+          arr.push('[WD] pjaFillForm skip referralSource selected chip already committed');
           chrome.storage.local.set({ pja_dbg: arr });
         }); } catch (_) {}
         return;
