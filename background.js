@@ -250,11 +250,29 @@ function pjaScheduleRankedReinject(runId, index, tabId, delayMs) {
   }, delayMs);
 }
 
-async function pjaRankedTabExists(tabId) {
+function pjaRankedTabMatchesJob(tab, job) {
+  if (!tab || !tab.url) return false;
+  if (!job || !job.applyUrl) return true;
+  try {
+    const tabUrl = new URL(tab.url);
+    const applyUrl = new URL(job.applyUrl);
+    if (tabUrl.hostname !== applyUrl.hostname) return false;
+    // Workday rewrites `/job/...` to `/apply/.../applyManually` during the same application.
+    // Same-host Workday tabs are valid; unrelated same-id tabs on other hosts are stale.
+    if (/workday\.com|myworkdayjobs\.com/i.test(tabUrl.hostname)) return true;
+    const tabKey = self.PJAApplySelect?.applyUrlKey(tab.url || '') || String(tab.url || '');
+    const jobKey = self.PJAApplySelect?.applyUrlKey(job.applyUrl || '') || String(job.applyUrl || '');
+    return !!(tabKey && jobKey && (tabKey === jobKey || tabKey.startsWith(jobKey) || jobKey.startsWith(tabKey)));
+  } catch (_) {
+    return false;
+  }
+}
+
+async function pjaRankedTabExists(tabId, job) {
   if (tabId == null) return false;
   return new Promise(resolve => {
     try {
-      chrome.tabs.get(tabId, tab => resolve(!!tab && !chrome.runtime.lastError));
+      chrome.tabs.get(tabId, tab => resolve(!!tab && !chrome.runtime.lastError && pjaRankedTabMatchesJob(tab, job)));
     } catch (_) {
       resolve(false);
     }
@@ -524,7 +542,7 @@ async function pjaDispatchRankedCurrent(master) {
     return master;
   }
   if (master.inFlightIndex === master.currentIndex) {
-    if (await pjaRankedTabExists(master.inFlightTabId)) return master;
+    if (await pjaRankedTabExists(master.inFlightTabId, master.jobs[master.currentIndex])) return master;
     console.warn('PJA ranked apply: in-flight tab missing; relaunching current job', master.currentIndex);
     master.inFlightIndex = null;
     master.inFlightTabId = null;
@@ -642,7 +660,21 @@ async function pjaApplyWatchdogTick() {
     ranked = await pjaReconcileRankedLedger(ranked, ledgerData[PJA_APPLICATION_LEDGER_KEY]);
   }
   ranked = await pjaReconcileRankedExtCurrent(ranked);
-  const rankedCapMs = ranked && ranked.e2eSafe ? 3 * 60 * 1000 : 10 * 60 * 1000;
+  if (ranked && ranked.status === 'applying' && ranked.inFlightIndex === ranked.currentIndex &&
+      ranked.inFlightTabId && !await pjaRankedTabExists(ranked.inFlightTabId, ranked.jobs && ranked.jobs[ranked.currentIndex])) {
+    console.warn('PJA apply-watchdog: in-flight tab missing; redispatching current ranked job', ranked.currentIndex);
+    ranked.inFlightIndex = null;
+    ranked.inFlightTabId = null;
+    ranked.inFlightAt = null;
+    await pjaSetLocal({ pja_ranked_apply: ranked });
+    await pjaDispatchRankedCurrent(ranked);
+    return;
+  }
+  const rankedJob = ranked && ranked.jobs && ranked.jobs[ranked.currentIndex];
+  const rankedIsWorkday = !!(rankedJob && /workday\.com|myworkdayjobs\.com|workday/i.test(
+    String(rankedJob.applyUrl || '') + ' ' + String(rankedJob.ats || rankedJob.channel || rankedJob.strategy || '')
+  ));
+  const rankedCapMs = rankedIsWorkday ? 20 * 60 * 1000 : (ranked && ranked.e2eSafe ? 3 * 60 * 1000 : 10 * 60 * 1000);
   if (ranked && ranked.status === 'applying' && ranked.inFlightIndex != null &&
       Date.now() - (ranked.inFlightAt || Date.now()) > rankedCapMs) {
     const stuck = ranked.jobs[ranked.currentIndex];
@@ -659,7 +691,13 @@ async function pjaApplyWatchdogTick() {
   const d = await new Promise(r => chrome.storage.local.get(['pja_ext_queue', 'pja_apply_wd'], r));
   const q = d.pja_ext_queue;
   const now = Date.now();
-  const dec = self.PJAApplySelect.watchdogDecision(q, d.pja_apply_wd, now, {});
+  const qIdx = q && (q.currentIndex || 0);
+  const qJob = q && (q.jobs || [])[qIdx];
+  const qIsWorkday = !!(qJob && /workday\.com|myworkdayjobs\.com|workday/i.test(
+    String(qJob.applyUrl || '') + ' ' + String(qJob.ats || qJob.channel || qJob.strategy || '')
+  ));
+  const dec = self.PJAApplySelect.watchdogDecision(q, d.pja_apply_wd, now,
+    qIsWorkday ? { capMs: 20 * 60 * 1000 } : {});
   if (dec.action === 'idle' || dec.action === 'wait') return;
   if (dec.action === 'reset') { await new Promise(r => chrome.storage.local.set({ pja_apply_wd: dec.wd }, r)); return; }
   // action === 'advance' → the active job has been stuck past the cap; force the queue forward.
@@ -917,9 +955,14 @@ if (DEV_MODE) {
             } else if (msg.cmd === 'inspectActiveApply') {
               const reply = data => { try { _wsReloadSocket.send(JSON.stringify({ cmd: 'inspectActiveApplyReply', reqId: msg.reqId, data })); } catch (_) {} };
               chrome.tabs.query({}, async tabs => {
+                const st = await new Promise(r => chrome.storage.local.get(['pja_ranked_apply', 'pja_last_apply_failure'], r));
+                const ranked = st.pja_ranked_apply || null;
                 const ats = tabs.filter(t => /greenhouse\.io|lever\.co|ashbyhq\.com|myworkdayjobs|workday\.com|icims\.com|jobvite\.com|smartrecruiters\.com|indeed\.com/i.test(t.url || ''));
+                const inFlightTab = ranked?.inFlightTabId != null ? tabs.find(t => t.id === ranked.inFlightTabId) : null;
+                const inspectTabs = ats.slice(-3);
+                if (inFlightTab && !inspectTabs.some(t => t.id === inFlightTab.id)) inspectTabs.push(inFlightTab);
                 const out = [];
-                for (const tab of ats.slice(-3)) {
+                for (const tab of inspectTabs) {
                   try {
                     const frames = await chrome.scripting.executeScript({ target: { tabId: tab.id, allFrames: true }, func: () => {
                       const visible = el => { const r = el.getBoundingClientRect(); return r.width > 0 && r.height > 0; };
@@ -933,8 +976,6 @@ if (DEV_MODE) {
                     out.push({ tabId: tab.id, url: tab.url, frames: frames.map(x => x.result).filter(Boolean) });
                   } catch (e) { out.push({ tabId: tab.id, url: tab.url, error: e.message }); }
                 }
-                const st = await new Promise(r => chrome.storage.local.get(['pja_ranked_apply', 'pja_last_apply_failure'], r));
-                const ranked = st.pja_ranked_apply || null;
                 const slimResults = rows => (rows || []).map(row => ({
                   company: row.company || '', title: row.title || '', ats: row.ats || row.strategy || '',
                   reason: row.reason || '', status: row.status || '', applyUrl: row.applyUrl || '',
@@ -2228,7 +2269,10 @@ async function cdpTypeDateSpinner(tabId, { baseId, month, day, year }) {
     });
     await new Promise(r => setTimeout(r, 100));
 
-    const padded = String(value).padStart(isYear ? 4 : 2, '0');
+    // Workday's month/day spinbuttons can treat a leading zero as a standalone value
+    // and drop the second digit (observed live: "07" became month "0"). Type natural
+    // month/day digits; only the year needs four digits.
+    const padded = isYear ? String(value).padStart(4, '0') : String(value);
     console.log('PJA typing padded=', padded, 'for', focused.result.usedId);
     for (const d of padded) {
       const kc = d.charCodeAt(0);

@@ -108,6 +108,10 @@ module.exports = (t) => {
     externalSource.includes("type: 'WORKDAY_SET_SID'") &&
     externalSource.includes('without an immediate blur'),
   'external-apply: Workday phone-number commit uses national digits, visible input verification, and trusted insertText without blur');
+  t.ok(externalSource.includes('[WD-MYINFO] ') &&
+    externalSource.includes('skipped step=') &&
+    externalSource.includes('!initialGaps.length && !/my information/i.test(stepLine)'),
+  'external-apply: Workday My Information finalizer skips non-My-Information steps so disclosure/review pages can advance');
   t.ok(externalSource.includes('const hasUsefulTextValue = (el) =>') &&
     externalSource.includes('const hasWorkExperienceSection =') &&
     externalSource.includes('dateSectionDay-input') &&
@@ -116,9 +120,9 @@ module.exports = (t) => {
   'external-apply: Workday work-experience dates fill day, overwrite placeholders, and stay scoped to Work Experience');
   t.ok(externalSource.includes('async function pjaFillWorkdaySelfIdentifyDate(profile)') &&
     externalSource.includes('public burden statement|omb control number') &&
-    externalSource.includes("profile?.signatureDate ? new Date(profile.signatureDate) : new Date()") &&
+    externalSource.includes('Always sign Workday self-identification forms with today') &&
     externalSource.includes('[WD] self-identify date filled='),
-  'external-apply: Workday Self Identify signature date uses the current date and can overwrite stale values');
+  'external-apply: Workday Self Identify signature date uses today and can overwrite stale/invalid values');
   t.ok(externalSource.includes('const workdaySelfIdentifyTransaction = async (profileArg, phase) =>') &&
     externalSource.includes('[WD-SID] transaction start phase=') &&
     externalSource.includes('await workdayCommitSelfIdentifyDisability(profileArg)') &&
@@ -131,6 +135,8 @@ module.exports = (t) => {
   'external-apply: Workday Self Identify commits signature name after date to recover from CDP date focus races');
   t.ok(externalSource.includes('const sidStepAtTop = isWorkdaySelfIdentifyStep()') &&
     externalSource.includes("workdaySelfIdentifyTransaction(profile, 'step-' + steps)") &&
+    externalSource.includes("withTimeout(pjaFillWorkdayWorkExperience(profile), 12000, 'wd-workexp-step-' + steps)") &&
+    externalSource.includes("withTimeout(pjaForceWorkdayTermsCheckbox('step-' + steps), 12000, 'wd-terms-step-' + steps)") &&
     externalSource.includes("workdaySelfIdentifyTransaction(profile, 'pre-click-' + steps)") &&
     externalSource.includes("workdaySelfIdentifyTransaction(profile, 'validation-error-' + steps)") &&
     externalSource.includes('do not run generic form/My Info fillers'),
@@ -145,8 +151,8 @@ module.exports = (t) => {
   t.ok(externalSource.includes('const setNativeDateDom = () =>') &&
     externalSource.includes('[WD-SID] date nativeFallback n=') &&
     externalSource.includes("type: 'WORKDAY_TYPE_DATE'") &&
-    externalSource.includes('workdaySelfIdentifyDateValid()'),
-  'external-apply: Workday Self Identify date uses a native DOM fallback after CDP date hook/typing leaves invalid visible spinners');
+    externalSource.includes('workdaySelfIdentifyDateMatches(desired)'),
+  'external-apply: Workday Self Identify date uses a native DOM fallback after CDP date hook/typing leaves stale or invalid visible spinners');
   t.ok(externalSource.includes('const yearOk = (y >= 2020 && y <= 2100) || (y >= 20 && y <= 99)') &&
     externalSource.includes('!parts.month.invalid && !parts.day.invalid && !parts.year.invalid'),
   'external-apply: Workday Self Identify date validation accepts Workday two-digit years when controls are not invalid');
@@ -274,6 +280,7 @@ module.exports = (t) => {
     externalSource.includes("retry_greenhouse_react_selects','retry_smartrecruiters_custom_fields','retry_answer_required") &&
     externalSource.includes('retry_workday_sid_transaction') &&
     externalSource.includes('retry_workday_auth_reset') &&
+    externalSource.includes('pjaForceWorkdayTermsCheckbox') &&
     externalSource.includes('async function runApplyRecoveryLoop') &&
     externalSource.includes('pja_recovery_log') &&
     externalSource.includes('recoveryAttempt: attempt') &&
@@ -284,16 +291,42 @@ module.exports = (t) => {
     externalSource.includes("const recoveryKey = 'pja_recovery_submit_'") &&
     externalSource.includes('postRetrySuccess'),
   'external-apply: LLM recovery loop is still scoped once per job for missing-required and submit-unclear paths');
+  t.ok(externalSource.includes("runApplyRecoveryLoop('watchdog_timeout'") &&
+    externalSource.includes("runApplyRecoveryLoop('stuck_budget'") &&
+    externalSource.includes('[budget] recovered stuck_budget; continuing active job') &&
+    externalSource.includes('[watchdog] recovered timeout; keeping job active'),
+  'external-apply: timeout and stuck-budget paths execute LLM recovery before recording terminal failure');
   t.ok(externalSource.includes('button[aria-invalid="true"], [role="button"][aria-invalid="true"]') &&
     externalSource.includes('button[id^="primaryQuestionnaire--"]') &&
     externalSource.includes('function pjaCollectWorkdayErrorLabels()') &&
     externalSource.includes('Error:\\s*The field') &&
     externalSource.includes('pjaNearestQuestionTextBefore') &&
     externalSource.includes('mustCorrectSelected') &&
+    externalSource.includes('/sponsor|veteran|relatives?') &&
     externalSource.includes('wd-appq-blocked-retry') &&
+    externalSource.includes('labelCandidates') &&
     externalSource.includes('pairedErrorLabel') &&
     externalSource.includes('invalidButtonOrdinal'),
   'external-apply: Workday app-question filler scans and corrects questionnaire buttons with Workday error/body labels');
+  t.ok(externalSource.includes('async function pjaForceWorkdayTermsCheckbox') &&
+    externalSource.includes("trustedWorkdayClick(target, 'terms-checkbox')") &&
+    externalSource.includes('remainingInvalid') &&
+    externalSource.includes('acceptTermsAndAgreements'),
+  'external-apply: Workday terms checkbox uses trusted click, native fallback, and verification');
+  t.ok(externalSource.includes("pjaForceWorkdayTermsCheckbox('initial')") &&
+    externalSource.includes("pjaForceWorkdayTermsCheckbox('step-' + steps)") &&
+    externalSource.includes("withTimeout(pjaForceWorkdayTermsCheckbox('pre-click-' + steps), 12000, 'wd-terms-pre-click-' + steps)") &&
+    externalSource.includes("pjaForceWorkdayTermsCheckbox('validation-error-' + steps)") &&
+    externalSource.includes("pjaForceWorkdayTermsCheckbox('url-advance-' + steps)"),
+  'external-apply: Workday terms checkbox committer runs throughout the step loop, not only in app-question fill');
+  t.ok(externalSource.includes("type: 'WORKDAY_ADVANCE_STEP'") &&
+    externalSource.includes('[WD] trusted click fallback') &&
+    externalSource.includes('/submit|advance|continue|next|retry|recover/i'),
+  'external-apply: Workday trusted click falls back to MAIN-world advance/submit selector recovery');
+  t.ok(externalSource.includes('[WD] trusted click \' + clickLabel + \' TIMEOUT 10000ms') &&
+    externalSource.includes('[WD] trusted click submit TIMEOUT 10000ms') &&
+    externalSource.includes('Promise.race(['),
+  'external-apply: Workday next/submit trusted-click waits are bounded and fall back on timeout');
 
   const a = (label) => w.pjaWorkdayAnswerForLabel(label.toLowerCase(), P);
 
@@ -317,6 +350,7 @@ module.exports = (t) => {
 
   // --- misc ---
   t.eq(a('Are you 18 years of age or older?'), 'Yes', '18+ -> Yes');
+  t.eq(a('Have you signed a document with your current and/or former employers restricting your ability to work with or be employed by a competitor?'), 'No', 'signed competitor restriction -> No');
   t.eq(a('Are you currently or have you within the last 12 months worked at the company?'), 'No', 'worked-here -> No');
   t.eq(a('Can you safely and efficiently perform the essential functions of the position for which you applied?'), 'Yes', 'essential functions -> Yes');
   t.eq(a('Are you a Temp or a Contractor'), 'No', 'temp/contractor -> No');
@@ -347,6 +381,8 @@ module.exports = (t) => {
   // --- pjaPickAnswerOption: plain includes match (case-insensitive) ---
   t.eq(w.pjaPickAnswerOption('No', ['Yes', 'No'], P), 'No', 'plain Yes/No');
   t.eq(w.pjaPickAnswerOption('I AM NOT A VETERAN', ['I am a protected veteran', 'I AM NOT A VETERAN'], P), 'I AM NOT A VETERAN', 'plain caps match');
+  t.eq(w.pjaPickAnswerOption('I AM NOT A VETERAN', ['I Identify As A Veteran, Just Not A Protected Veteran', 'I do not wish to answer'], P), 'I do not wish to answer', 'non-veteran does not claim veteran when only veteran/decline options exist');
+  t.eq(w.pjaPickAnswerOption('I AM NOT A VETERAN', ['I am a protected veteran', 'I am not a protected veteran'], P), 'I am not a protected veteran', 'non-veteran can use neutral not-protected-veteran option');
   t.eq(w.pjaPickAnswerOption('Yes', ['Select One', 'Agree', 'Disagree'], P), 'Agree', 'Yes maps to Agree when Workday uses agreement options');
   t.eq(w.pjaPickAnswerOption('No', ['Select One', 'Agree', 'Disagree'], P), 'Disagree', 'No maps to Disagree when Workday uses agreement options');
 

@@ -6,7 +6,10 @@ const ROOT = path.resolve(__dirname, '../..');
 
 module.exports = async (t) => {
   const source = fs.readFileSync(path.join(ROOT, 'background.js'), 'utf8');
-  t.ok(source.includes('async function pjaRankedTabExists(tabId)') &&
+  t.ok(source.includes('function pjaRankedTabMatchesJob(tab, job)') &&
+    source.includes('tabUrl.hostname !== applyUrl.hostname') &&
+    source.includes('Same-host Workday tabs are valid') &&
+    source.includes('async function pjaRankedTabExists(tabId, job)') &&
     source.includes('chrome.tabs.get(tabId') &&
     source.includes('in-flight tab missing; relaunching current job') &&
     source.includes('master.inFlightIndex = null') &&
@@ -169,15 +172,27 @@ module.exports = async (t) => {
     source.includes('pjaScheduleRankedReinject(master.runId, master.currentIndex, tabId, 150000)'),
   'ranked dispatch: active ATS tabs get bounded guard-reset reinjection watchdogs while still in-flight');
 
-  t.ok(source.includes('const rankedCapMs = ranked && ranked.e2eSafe ? 3 * 60 * 1000 : 10 * 60 * 1000') &&
+  t.ok(source.includes('PJA apply-watchdog: in-flight tab missing; redispatching current ranked job') &&
+    source.includes('await pjaDispatchRankedCurrent(ranked);'),
+  'apply watchdog: missing in-flight tabs are redispatched instead of leaving a stale active run');
+
+  t.ok(source.includes('const rankedIsWorkday = !!(rankedJob && /workday') &&
+    source.includes('const rankedCapMs = rankedIsWorkday ? 20 * 60 * 1000 : (ranked && ranked.e2eSafe ? 3 * 60 * 1000 : 10 * 60 * 1000)') &&
+    source.includes('qIsWorkday ? { capMs: 20 * 60 * 1000 } : {}') &&
     source.includes('Date.now() - (ranked.inFlightAt || Date.now()) > rankedCapMs'),
-  'ranked dispatch: E2E-safe ranked runs use the short watchdog cap instead of waiting 10 minutes');
+  'ranked dispatch: Workday ranked runs get an ATS-aware longer watchdog cap while other E2E-safe runs stay short');
+
+  t.ok(source.includes("Workday's month/day spinbuttons can treat a leading zero") &&
+    source.includes("const padded = isYear ? String(value).padStart(4, '0') : String(value)"),
+  'background: Workday CDP date typing does not zero-pad month/day spinbuttons');
 
   t.ok(source.includes("const rankedOwnsQueueJob = !!(ranked && ranked.status === 'applying' && job.runId && ranked.runId === job.runId)") &&
     source.includes('if (rankedOwnsQueueJob)'),
   'apply watchdog: runId alone does not make a manual external queue ranked-owned');
 
   t.ok(source.includes("chrome.storage.local.get(['pja_ranked_apply', 'pja_last_apply_failure']") &&
+    source.includes('const inFlightTab = ranked?.inFlightTabId') &&
+    source.includes('inspectTabs.push(inFlightTab)') &&
     source.includes('totalJobs: ranked.jobs && ranked.jobs.length') &&
     source.includes('lastFailure: st.pja_last_apply_failure') &&
     source.includes('const slimResults = rows =>') &&

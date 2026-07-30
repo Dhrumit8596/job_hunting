@@ -2623,13 +2623,22 @@ async function pjaFillWorkdayPromptButtons(profile) {
         if (/two or more|multiracial|multiple/i.test(e)) return /two or more|multiracial|multiple/i.test(t);
         return t.includes(e);
       } });
+    } else if (/gender|what is your sex|\bsex\b|male or female/i.test(label) && unresolved) {
+      specs.push({ button, key: 'gender', match: txt => {
+        const t = txt.toLowerCase().replace(/\s+/g, ' ').trim();
+        const g = String(profile && profile.gender || '').toLowerCase();
+        if (/female|woman/.test(g)) return /female|woman/i.test(t);
+        if (/male|man/.test(g)) return /male|man/i.test(t) && !/female|woman/i.test(t);
+        return declineEeo(t);
+      } });
     } else if (/veteran/i.test(label) && unresolved) {
       specs.push({ button, key: 'veteran', match: txt => {
         const t = txt.toLowerCase().replace(/\s+/g, ' ').trim();
         const v = veteran.toLowerCase();
         if (!v || declineEeo(v)) return declineEeo(t);
         if (/not a protected veteran|not.*veteran|^no\b|i am not a veteran/i.test(v)) {
-          return /not a protected veteran|not.*veteran|^no\b|i am not a veteran/i.test(t);
+          return (/not a protected veteran|not.*veteran|^no\b|i am not a veteran/i.test(t) &&
+            !/identify as (a )?veteran|i am a veteran|as a veteran/i.test(t)) || declineEeo(t);
         }
         if (/protected veteran|disabled veteran|recently separated|active duty|armed forces/i.test(v)) {
           return /protected veteran|disabled veteran|recently separated|active duty|armed forces/i.test(t) &&

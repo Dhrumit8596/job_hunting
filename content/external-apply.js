@@ -528,7 +528,9 @@
               await withTimeout(pjaFillWorkdayAppQuestions(profile), 45000, 'recover-wd-appq');
             }
           } else if (type === 'retry_workday_terms_checkbox') {
-            if (/workday\.com|myworkdayjobs\.com/i.test(location.hostname) && typeof pjaAutoCheckConsent === 'function') {
+            if (/workday\.com|myworkdayjobs\.com/i.test(location.hostname) && typeof pjaForceWorkdayTermsCheckbox === 'function') {
+              await withTimeout(pjaForceWorkdayTermsCheckbox('recover'), 20000, 'recover-wd-terms');
+            } else if (typeof pjaAutoCheckConsent === 'function') {
               pjaAutoCheckConsent();
             }
           } else if (type === 'retry_workday_sid_transaction') {
@@ -739,12 +741,25 @@
     // navigates away and this timer dies with the page. Raised 4min→7min: forms with many
     // AI-answered screening questions (each a dev-server round-trip ~3-5s) + combobox retries
     // legitimately need longer than 4min, and were being force-skipped mid-fill (watchdog_timeout).
+    const pageWatchdogMs = /workday\.com|myworkdayjobs\.com/i.test(location.hostname) ? 12 * 60 * 1000 : 7 * 60 * 1000;
     setTimeout(() => {
+      void (async () => {
       try { sessionStorage.setItem('pja_last_action', 'watchdog_timeout:' + job.company); } catch (_) {}
-      void maybeRequestApplyHelp('watchdog_timeout', {
-        formSummary: 'watchdog timer fired before submit or skip',
-        stuckForMs: 7 * 60 * 1000,
-      });
+      const recovery = await runApplyRecoveryLoop('watchdog_timeout', {
+          formSummary: 'watchdog timer fired before submit or skip',
+          stuckForMs: pageWatchdogMs,
+        }, {
+          maxAttempts: /workday\.com|myworkdayjobs\.com/i.test(location.hostname) ? 2 : 1,
+          settleMs: 2500,
+          verify: ({ before, after, recovery: rec }) => !!(rec.advanceReason ||
+            after?.url !== before?.url ||
+            after?.workday?.step !== before?.workday?.step ||
+            ((before?.errors || []).length && (after?.errors || []).length < (before?.errors || []).length))
+        });
+      if (recovery.recovered || recovery.retrySubmit) {
+        await addDbg('[watchdog] recovered timeout; keeping job active');
+        return;
+      }
       // A hung form (filled but never submits) is the dominant degraded-CDP signal — report it so
       // the self-heal ladder can escalate. If a react-select-commit control is still erroring, flag it.
       try {
@@ -754,7 +769,8 @@
       } catch (_) {}
       try { recordResult(job, { success: false, reason: 'watchdog_timeout' }).then(() => navigateBack(job), () => navigateBack(job)); }
       catch (_) { try { navigateBack(job); } catch (__) {} }
-    }, 420000);
+      })();
+    }, pageWatchdogMs);
 
     // Persistent cross-reload budget: the setTimeout watchdog above is reset every time the page
     // reloads, so a job that reload-loops (e.g. a required react-select that never commits, like the
@@ -779,21 +795,39 @@
       entry.loads += 1;
       clock[clockKey] = entry;
       await new Promise(r => chrome.storage.local.set({ pja_ext_jobclock: clock }, r));
+      const workdayBudgetOpts = /workday\.com|myworkdayjobs\.com/i.test(location.hostname)
+        ? { budgetMs: 12 * 60 * 1000, maxLoads: 12 }
+        : {};
       const overBudget = (typeof window.PJAApplySelect !== 'undefined' && window.PJAApplySelect.exceededBudget)
-        ? window.PJAApplySelect.exceededBudget(entry, now, {})
+        ? window.PJAApplySelect.exceededBudget(entry, now, workdayBudgetOpts)
         : (now - entry.firstSeen > 240000 || entry.loads > 4);
       if (overBudget) {
         try { chrome.runtime.sendMessage({ type: 'PJA_APPLY_OUTCOME', outcome: { filled: true, submitted: false, reactSelectError: true }, applyUrl: job.applyUrl }); } catch (_) {}
         const detail = entry.loads > 4 ? entry.loads + ' loads' : Math.round((now - entry.firstSeen) / 1000) + 's';
         console.log('PJA ext-apply: stuck_budget exceeded (' + detail + ') — deferring', job.company);
-        await maybeRequestApplyHelp('stuck_budget', {
+        const recovery = await runApplyRecoveryLoop('stuck_budget', {
           formSummary: 'cross-reload budget exceeded',
           stuckForMs: now - entry.firstSeen,
           visibleErrors: [detail],
+        }, {
+          maxAttempts: /workday\.com|myworkdayjobs\.com/i.test(location.hostname) ? 2 : 1,
+          settleMs: 2500,
+          verify: ({ before, after, recovery: rec }) => !!(rec.advanceReason ||
+            after?.url !== before?.url ||
+            after?.workday?.step !== before?.workday?.step ||
+            ((before?.errors || []).length && (after?.errors || []).length < (before?.errors || []).length))
         });
+        if (recovery.recovered || recovery.retrySubmit) {
+          entry.firstSeen = Date.now();
+          entry.loads = 0;
+          clock[clockKey] = entry;
+          await new Promise(r => chrome.storage.local.set({ pja_ext_jobclock: clock }, r));
+          await addDbg('[budget] recovered stuck_budget; continuing active job');
+        } else {
         await recordResult(job, { success: false, reason: 'stuck_budget', fields: ['budget:' + detail] });
         navigateBack(job);
         return;
+        }
       }
     } catch (_) {}
 
@@ -1466,6 +1500,9 @@
 
     // --- Workday Application Questions (formField-* dropdowns) ---
     await withTimeout(pjaFillWorkdayAppQuestions(profile), 45000, 'wd-appq');
+    if (/workday\.com|myworkdayjobs\.com/i.test(location.hostname)) {
+      await withTimeout(pjaForceWorkdayTermsCheckbox('initial'), 20000, 'wd-terms-initial');
+    }
 
     // --- Workday Work Experience subsection (My Experience step) ---
     await withTimeout(pjaFillWorkdayWorkExperience(profile), 45000, 'wd-workexp');
@@ -1521,7 +1558,24 @@
           });
         });
         await addDbg('[WD] trusted click ' + (label || '') + ' ok=' + !!resp.ok + (resp.error ? ' err=' + String(resp.error).slice(0, 60) : ''));
-        return !!resp.ok;
+        if (resp.ok) return true;
+        if (/submit|advance|continue|next|retry|recover/i.test(String(label || ''))) {
+          const fallback = await new Promise(resolve => {
+            try {
+              chrome.runtime.sendMessage({
+                type: 'WORKDAY_ADVANCE_STEP',
+                selector: '#' + CSS.escape(tempId),
+                label: label || ''
+              }, r => resolve(chrome.runtime.lastError ? { ok: false, error: chrome.runtime.lastError.message } : (r || {})));
+            } catch (e) {
+              resolve({ ok: false, error: e.message });
+            }
+          });
+          await addDbg('[WD] trusted click fallback ' + (label || '') + ' ok=' + !!fallback.ok +
+            (fallback.reason || fallback.error ? ' reason=' + String(fallback.reason || fallback.error).slice(0, 60) : ''));
+          return !!fallback.ok;
+        }
+        return false;
       } catch (e) {
         await addDbg('[WD] trusted click ' + (label || '') + ' threw=' + String(e && e.message || e).slice(0, 60));
         return false;
@@ -1833,6 +1887,12 @@
     };
     const finalizeWorkdayMyInformation = async (label) => {
       if (!/workday\.com|myworkdayjobs\.com/i.test(location.hostname)) return [];
+      const stepLine = (document.body?.innerText || '').match(/current step \d+ of \d+\s+([^\n]+)/i)?.[1] || '';
+      const initialGaps = workdayMyInfoCommitGaps();
+      if (!initialGaps.length && !/my information/i.test(stepLine)) {
+        await addDbg('[WD-MYINFO] ' + (label || '') + ' skipped step=' + (stepLine || 'unknown'));
+        return [];
+      }
       await closeWorkdayTransientMenus();
       // Country/state prompt commits can trigger Workday to re-render and clear downstream address
       // fields. My Information values are dependent: country/state prompt commits can re-render and clear
@@ -1896,6 +1956,22 @@
       const yearOk = (y >= 2020 && y <= 2100) || (y >= 20 && y <= 99);
       return !parts.month.invalid && !parts.day.invalid && !parts.year.invalid &&
         m >= 1 && m <= 12 && d >= 1 && d <= 31 && yearOk;
+    };
+    const workdayTodaySignatureDate = () => {
+      // Workday's "Date Signed" validator is tenant-side and commonly rejects stale
+      // profile.signatureDate values. A job application signature should be today's date.
+      const today = new Date();
+      return { month: today.getMonth() + 1, day: today.getDate(), year: today.getFullYear() };
+    };
+    const workdaySelfIdentifyDateMatches = (desired) => {
+      const parts = workdaySelfIdentifyDateParts();
+      const m = parseInt(parts.month.raw, 10);
+      const d = parseInt(parts.day.raw, 10);
+      const y = parseInt(parts.year.raw, 10);
+      return workdaySelfIdentifyDateValid() &&
+        m === parseInt(desired.month, 10) &&
+        d === parseInt(desired.day, 10) &&
+        (y === parseInt(desired.year, 10) || y === parseInt(String(desired.year).slice(-2), 10));
     };
     const workdaySelfIdentifyDisabilitySelected = () => {
       const disField = document.querySelector('[data-automation-id="formField-disabilityStatus"]');
@@ -1997,12 +2073,7 @@
     const workdayCommitSelfIdentifyDate = async (profileArg) => {
       const dateField = document.querySelector('[data-automation-id="formField-dateSignedOn"]');
       if (!dateField) return { present: false, committed: true };
-      const sourceDate = profileArg?.signatureDate ? new Date(profileArg.signatureDate) : new Date();
-      const desired = {
-        month: sourceDate.getMonth() + 1,
-        day: sourceDate.getDate(),
-        year: sourceDate.getFullYear()
-      };
+      const desired = workdayTodaySignatureDate();
       const setNativeDateDom = () => {
         const fresh = workdaySelfIdentifyDateParts();
         const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set;
@@ -2038,15 +2109,16 @@
         }, r => resolve(chrome.runtime.lastError ? { ok: false, error: chrome.runtime.lastError.message } : (r || {})));
       });
       await sleep(500);
-      if (!workdaySelfIdentifyDateValid()) {
+      if (!workdaySelfIdentifyDateMatches(desired)) {
         const nativeSet = setNativeDateDom();
-        await sleep(300);
+        await sleep(650);
         await addDbg('[WD-SID] date nativeFallback n=' + nativeSet);
       }
-      const committed = workdaySelfIdentifyDateValid();
+      const committed = workdaySelfIdentifyDateMatches(desired);
       const parts = workdaySelfIdentifyDateParts();
       await addDbg('[WD-SID] date committed=' + committed + ' values=' +
         [parts.month.raw || '?', parts.day.raw || '?', parts.year.raw || '?'].join('/') +
+        ' invalid=' + [parts.month.invalid ? 'm' : '', parts.day.invalid ? 'd' : '', parts.year.invalid ? 'y' : ''].join('') +
         ' ok=' + !!resp.ok + (resp.error ? ' err=' + String(resp.error).slice(0, 50) : ''));
       return { present: true, committed };
     };
@@ -2301,8 +2373,9 @@
       if (sidStepAtTop) {
         await withTimeout(workdaySelfIdentifyTransaction(profile, 'step-' + steps), 45000, 'wd-sid-step-' + steps);
       } else {
-        if (typeof pjaFillWorkdayWorkExperience === 'function') { await pjaFillWorkdayWorkExperience(profile); await sleep(300); }
-        if (typeof pjaFillWorkdaySelfIdentifyDate === 'function') { await pjaFillWorkdaySelfIdentifyDate(profile); await sleep(150); }
+        if (typeof pjaFillWorkdayWorkExperience === 'function') { await withTimeout(pjaFillWorkdayWorkExperience(profile), 12000, 'wd-workexp-step-' + steps); await sleep(300); }
+        if (typeof pjaFillWorkdaySelfIdentifyDate === 'function') { await withTimeout(pjaFillWorkdaySelfIdentifyDate(profile), 12000, 'wd-selfid-date-step-' + steps); await sleep(150); }
+        if (typeof pjaForceWorkdayTermsCheckbox === 'function') await withTimeout(pjaForceWorkdayTermsCheckbox('step-' + steps), 12000, 'wd-terms-step-' + steps);
         await finalizeWorkdayMyInformation('step-' + steps);
         await addDbg('[WD] post-prompt step text refill done');
       }
@@ -2317,8 +2390,9 @@
         if (isWorkdaySelfIdentifyStep()) {
           await withTimeout(workdaySelfIdentifyTransaction(profile, 'hardMissing-refill'), 45000, 'wd-sid-hardMissing-refill');
         } else {
-          if (typeof pjaFillWorkdayWorkExperience === 'function') await pjaFillWorkdayWorkExperience(profile);
-          if (typeof pjaFillWorkdaySelfIdentifyDate === 'function') await pjaFillWorkdaySelfIdentifyDate(profile);
+          if (typeof pjaFillWorkdayWorkExperience === 'function') await withTimeout(pjaFillWorkdayWorkExperience(profile), 12000, 'wd-workexp-hardMissing');
+          if (typeof pjaFillWorkdaySelfIdentifyDate === 'function') await withTimeout(pjaFillWorkdaySelfIdentifyDate(profile), 12000, 'wd-selfid-date-hardMissing');
+          if (typeof pjaForceWorkdayTermsCheckbox === 'function') await withTimeout(pjaForceWorkdayTermsCheckbox('hardMissing-refill'), 12000, 'wd-terms-hardMissing');
           pjaFillForm(profile, answers);
           if (window._pjaComboChain && typeof window._pjaComboChain.then === 'function') {
             await Promise.race([window._pjaComboChain.catch(() => {}), sleep(30000)]);
@@ -2353,6 +2427,7 @@
           if (!sidReady.ok) await addDbg('[WD-SID] pre-click gaps remain=' + sidReady.gaps.join('|'));
         } else {
           await finalizeWorkdayMyInformation('pre-click-' + steps);
+          if (typeof pjaForceWorkdayTermsCheckbox === 'function') await withTimeout(pjaForceWorkdayTermsCheckbox('pre-click-' + steps), 12000, 'wd-terms-pre-click-' + steps);
         }
       }
       // If THIS click is the final Submit (Workday multi-step forms submit via the footer/bottom
@@ -2369,7 +2444,11 @@
         ? String(document.body?.innerText || '').replace(/\s+/g, ' ').slice(0, 4000)
         : '';
       if (isWorkdayHost) {
-        const clicked = await trustedWorkdayClick(nextBtn, nextBtnAid || nextBtnText || 'next');
+        const clickLabel = nextBtnAid || nextBtnText || 'next';
+        const clicked = await Promise.race([
+          trustedWorkdayClick(nextBtn, clickLabel),
+          sleep(10000).then(async () => { await addDbg('[WD] trusted click ' + clickLabel + ' TIMEOUT 10000ms'); return false; })
+        ]);
         if (!clicked) {
           ['pointerdown','mousedown','pointerup','mouseup','click'].forEach(evtType => {
             const evt = new MouseEvent(evtType, { bubbles: true, cancelable: true, view: window });
@@ -2501,8 +2580,8 @@
         if (isWorkdaySelfIdentifyStep()) {
           await withTimeout(workdaySelfIdentifyTransaction(profile, 'validation-error-' + steps), 45000, 'wd-sid-validation-' + steps);
         } else {
-          await pjaFillWorkdayWorkExperience(profile);
-          await pjaFillWorkdaySelfIdentifyDate(profile);
+          await withTimeout(pjaFillWorkdayWorkExperience(profile), 12000, 'wd-workexp-validation');
+          await withTimeout(pjaFillWorkdaySelfIdentifyDate(profile), 12000, 'wd-selfid-date-validation');
           if (typeof pjaFillForm === 'function') pjaFillForm(profile, answers);
           if (window._pjaComboChain && typeof window._pjaComboChain.then === 'function') {
             await Promise.race([window._pjaComboChain.catch(() => {}), sleep(30000)]);
@@ -2510,6 +2589,7 @@
           await sleep(300);
           await finalizeWorkdayMyInformation('validation-error-' + steps);
           await pjaFillWorkdayAppQuestions(profile);
+          if (typeof pjaForceWorkdayTermsCheckbox === 'function') await withTimeout(pjaForceWorkdayTermsCheckbox('validation-error-' + steps), 12000, 'wd-terms-validation');
           pjaFillRequiredComboboxFallback(profile, answers);
           if (typeof pjaFillRequiredRadioFallback === 'function') pjaFillRequiredRadioFallback();
         }
@@ -2596,6 +2676,7 @@
           await sleep(500);
           if (typeof pjaAutoCheckConsent === 'function') pjaAutoCheckConsent();
           await pjaFillWorkdayAppQuestions(profile);
+          if (typeof pjaForceWorkdayTermsCheckbox === 'function') await pjaForceWorkdayTermsCheckbox('url-advance-' + steps);
           continue;
         }
         if (stepTextAfter === stepTextBefore) {
@@ -3118,7 +3199,10 @@
     console.log('PJA ext-apply: clicking submit:', submitBtn.textContent.trim().slice(0,40));
     sessionStorage.setItem('pja_last_action', 'submit_clicked:' + job.company);
     if (/workday\.com|myworkdayjobs\.com/i.test(location.hostname)) {
-      const clicked = await trustedWorkdayClick(submitBtn, 'submit');
+      const clicked = await Promise.race([
+        trustedWorkdayClick(submitBtn, 'submit'),
+        sleep(10000).then(async () => { await addDbg('[WD] trusted click submit TIMEOUT 10000ms'); return false; })
+      ]);
       if (!clicked) submitBtn.click();
     } else if (/greenhouse\.io|ashbyhq\.com/i.test(location.hostname)) {
       // Several Remix tenants accept synthetic field events but reject a synthetic final click:
@@ -3455,12 +3539,15 @@
     const dayInputs = Array.from(qAll('input[data-automation-id="dateSectionDay-input"]'));
     const yearInputs = Array.from(qAll('input[data-automation-id="dateSectionYear-input"]'));
     if (!monthInputs[0] && !dayInputs[0] && !yearInputs[0]) return 0;
-    const now = profile?.signatureDate ? new Date(profile.signatureDate) : new Date();
+    // Always sign Workday self-identification forms with today's date. Reusing a
+    // profile-stored signature date can look visibly filled but fail tenant validation.
+    const now = new Date();
     const mm = String(now.getMonth() + 1);
     const dd = String(now.getDate());
     const yyyy = String(now.getFullYear());
     const setTextForce = (el, val) => {
-      if (!el || !val || String(el.value || '').trim() === String(val)) return false;
+      if (!el || !val) return false;
+      if (String(el.value || '').trim() === String(val) && el.getAttribute('aria-invalid') !== 'true') return false;
       try { el.focus(); } catch (_) {}
       if (typeof pjaFillTextViaFiber === 'function') { try { pjaFillTextViaFiber(el, val); return true; } catch (_) {} }
       if (typeof pjaSetNative === 'function') { pjaSetNative(el, val); return true; }
@@ -3530,6 +3617,8 @@
       return 'No';
     } else if (/worked (at|for)|employed (at|by)|are you (currently|now).*(employee|work)|former.*employee|previously work|current.*employee/i.test(label)) {
       return 'No';
+    } else if (/signed (a )?document[\s\S]{0,120}restrict[\s\S]{0,120}(ability to work|employ|competitor)|agreement[\s\S]{0,140}(prohibit|limit|restrict)[\s\S]{0,100}(employment|work)/i.test(label)) {
+      return 'No';
     } else if (/18 years|over 18|at least 18|age of 18/i.test(label)) {
       return 'Yes';
     } else if (/hispanic|latino/i.test(label)) {
@@ -3592,6 +3681,14 @@
     if (/^(no|false)$/i.test(String(answer || ''))) {
       const disagree = candidates.find(txt => /^(disagree|i disagree|do not agree)/i.test(txt));
       if (disagree) return disagree;
+    }
+    if (/^i am not a veteran$/i.test(String(answer || ''))) {
+      const nonVeteran = candidates.find(txt => /(^|\b)(i am )?not a veteran\b|do not identify as (a )?veteran|no,?\s*i am not/i.test(txt));
+      if (nonVeteran) return nonVeteran;
+      const notProtected = candidates.find(txt => /not a protected veteran/i.test(txt) &&
+        !/identify as (a )?veteran|i am a veteran|as a veteran/i.test(txt));
+      if (notProtected) return notProtected;
+      return candidates.find(txt => /wish (not )?to|decline|prefer not|not to (disclose|answer|identify)|do not wish|choose not/i.test(txt)) || null;
     }
     return candidates.find(txt => { const ot = txt.toLowerCase(); return ot === al || ot.includes(al) || al.includes(ot); }) || null;
   }
@@ -3703,8 +3800,26 @@
         : /personalInfoUS--gender/i.test(buttonId) ? 'Please select your gender.'
         : /personalInfoUS--veteranStatus/i.test(buttonId) ? 'Please select your veteran status.'
         : '';
-      const label = (idLabel || richLabel || nearbyQuestion || pairedErrorLabel || btnAriaLabel.replace(/:\s*select one.*$/i, '') || buttonId).toLowerCase();
-      const answer = pjaWorkdayAnswerForLabel(label, profile);
+      const labelCandidates = [
+        idLabel,
+        pairedErrorLabel,
+        richLabel,
+        nearbyQuestion,
+        btnAriaLabel.replace(/:\s*select one.*$/i, ''),
+        buttonId
+      ].map(s => String(s || '').trim())
+        .filter(s => s && !/^select one required$/i.test(s));
+      let label = '';
+      let answer = null;
+      for (const candidate of labelCandidates) {
+        const candidateLabel = candidate.toLowerCase();
+        const candidateAnswer = pjaWorkdayAnswerForLabel(candidateLabel, profile);
+        if (candidateAnswer) {
+          label = candidateLabel;
+          answer = candidateAnswer;
+          break;
+        }
+      }
       if (!answer) continue;
       const selectedText = (btn.textContent || btnAriaLabel || '').trim();
       const selectedStateText = (selectedText + ' ' + btnAriaLabel).replace(/\bRequired\b/ig, '').trim();
@@ -3712,7 +3827,7 @@
         btn.getAttribute('aria-invalid') === 'true' || /source--source/i.test(buttonId);
       const selectedClean = selectedText.replace(/\bRequired\b/ig, '').trim();
       const selectedMatchesAnswer = !!selectedClean && !!pjaPickAnswerOption(answer, [selectedClean], profile);
-      const mustCorrectSelected = /sponsor|relatives?[\s\S]{0,60}work|immediate family[\s\S]{0,80}(employee|work)|agreement[\s\S]{0,140}(prohibit|limit|restrict)[\s\S]{0,100}(employment|work)/i.test(label) &&
+      const mustCorrectSelected = /sponsor|veteran|relatives?[\s\S]{0,60}work|immediate family[\s\S]{0,80}(employee|work)|agreement[\s\S]{0,140}(prohibit|limit|restrict)[\s\S]{0,100}(employment|work)/i.test(label) &&
         !selectedMatchesAnswer;
       if (!unresolved && selectedText && selectedText !== 'Select One' && !mustCorrectSelected) continue;
       // Close any stale open listbox before opening this field's dropdown
@@ -3827,16 +3942,8 @@
         log.push('dateSignedOn→no baseId');
       }
     }
-    // Check any required terms/consent checkboxes on this step.
-    // Skip checkboxes inside a multi-checkbox fieldset (disability/race/etc. option groups)
-    // — those are mutually-exclusive option pickers, not consent checkboxes.
-    for (const cb of document.querySelectorAll('input[type="checkbox"][required], input[type="checkbox"][aria-required="true"], #termsAndConditions--acceptTermsAndAgreements')) {
-      if (cb.checked) continue;
-      const parentFieldset = cb.closest('fieldset');
-      if (parentFieldset && parentFieldset.querySelectorAll('input[type="checkbox"]').length > 1) continue;
-      cb.click();
-      log.push('terms-checkbox checked');
-    }
+    const terms = await pjaForceWorkdayTermsCheckbox('appq');
+    if (terms.filled) log.push('terms-checkbox checked');
     // Diagnostic: capture SID form state (spinbutton values, checkbox state, name value)
     if (dateField) {
       const spinVals = Array.from(dateField.querySelectorAll('[role="spinbutton"]')).map(el => {
@@ -3859,6 +3966,49 @@
         chrome.storage.local.set({ pja_dbg: arr }, r);
       }));
     }
+  }
+
+  async function pjaForceWorkdayTermsCheckbox(phase) {
+    if (!/workday\.com|myworkdayjobs\.com/i.test(location.hostname)) return { filled: 0, remainingInvalid: 0 };
+    const checkboxes = Array.from(document.querySelectorAll(
+      'input[type="checkbox"][required], input[type="checkbox"][aria-required="true"], #termsAndConditions--acceptTermsAndAgreements'
+    )).filter(cb => {
+      const parentFieldset = cb.closest('fieldset');
+      if (parentFieldset && parentFieldset.querySelectorAll('input[type="checkbox"]').length > 1) return false;
+      const label = [
+        typeof pjaGetLabel === 'function' ? pjaGetLabel(cb) : '',
+        cb.id || '',
+        cb.name || '',
+        cb.getAttribute('aria-label') || '',
+        cb.closest('label, [data-automation-id^="formField"], div')?.textContent || ''
+      ].join(' ').replace(/\s+/g, ' ');
+      return /privacy notice|privacy policy|read and agree|declare that you have read|terms|terms and conditions|accept terms|consent to the terms|termsAndConditions|acceptTermsAndAgreements|acknowledge the terms/i.test(label);
+    });
+    let filled = 0;
+    for (const cb of checkboxes) {
+      const labelEl = cb.id ? document.querySelector('label[for="' + CSS.escape(cb.id) + '"]') : null;
+      const target = labelEl || cb.closest('label') || cb;
+      const invalidBefore = cb.getAttribute('aria-invalid') === 'true';
+      if (!cb.checked || invalidBefore) {
+        if (!await trustedWorkdayClick(target, 'terms-checkbox')) {
+          try { cb.click(); } catch (_) {}
+        }
+        await sleep(500);
+      }
+      if (!cb.checked || cb.getAttribute('aria-invalid') === 'true') {
+        const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'checked')?.set;
+        try { setter ? setter.call(cb, true) : (cb.checked = true); } catch (_) { cb.checked = true; }
+        cb.dispatchEvent(new InputEvent('input', { bubbles: true, composed: true }));
+        cb.dispatchEvent(new Event('change', { bubbles: true, composed: true }));
+        try { cb.blur(); } catch (_) {}
+        await sleep(500);
+      }
+      if (cb.checked) filled++;
+    }
+    const remainingInvalid = checkboxes.filter(cb => cb.getAttribute('aria-invalid') === 'true' || !cb.checked).length;
+    if (checkboxes.length) await addDbg('[WD] terms checkbox phase=' + (phase || '') +
+      ' filled=' + filled + '/' + checkboxes.length + ' remainingInvalid=' + remainingInvalid);
+    return { filled, remainingInvalid };
   }
 
   // ── Best-effort resume file injection ────────────────────────────────────
@@ -4905,7 +5055,7 @@
     // Non-compete: honest No for a California-based candidate — CA Bus. & Prof. Code §16600 voids
     // non-compete agreements, so a CA applicant is not bound by an enforceable one.
     if (/non-?compete|noncompete/i.test(t) && /\b(bound|subject|signed|have|are you)\b/i.test(t)) return 'No';
-    if (/agreement[\s\S]{0,140}(prohibit|limit|restrict)[\s\S]{0,100}(employment|work)|prohibit or limit your employment/i.test(t)) return 'No';
+    if (/agreement[\s\S]{0,140}(prohibit|limit|restrict)[\s\S]{0,100}(employment|work)|prohibit or limit your employment|signed (a )?document[\s\S]{0,120}restrict[\s\S]{0,120}(ability to work|employ|competitor)/i.test(t)) return 'No';
     if (/referred\b.*\b(employee|internal)|\b(employee|internal)\b.*\brefer/i.test(t)) return 'No';
     if (/how did you hear|where did you (hear|find)|referral source|source of (this )?application/i.test(t)) return 'LinkedIn';
     if (/desired (?:base )?salary|salary expectation|expected (?:base )?(?:salary|compensation)|compensation expectation/i.test(t))

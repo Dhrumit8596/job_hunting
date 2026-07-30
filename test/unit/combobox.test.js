@@ -126,6 +126,11 @@ module.exports = async (t) => {
     autofillSource.includes("key: 'hispanicOrLatino'") &&
     autofillSource.includes('not hispanic|not latino'),
   'combobox: Workday Hispanic/Latino EEO prompt uses explicit profile/answer-bank value');
+  t.ok(autofillSource.includes("key: 'gender'") &&
+    autofillSource.includes('/gender|what is your sex|\\bsex\\b|male or female/i') &&
+    autofillSource.includes("!/female|woman/i.test(t)") &&
+    autofillSource.includes('identify as (a )?veteran'),
+  'combobox: Workday EEO prompt filler handles gender and avoids claiming veteran status for non-veterans');
   t.ok(autofillSource.includes('selectedWithoutLabel') &&
     autofillSource.includes('State California Required') &&
     autofillSource.includes('reopen already-committed prompt buttons'),
