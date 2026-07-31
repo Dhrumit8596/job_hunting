@@ -141,6 +141,8 @@ module.exports = (t) => {
     externalSource.includes("withTimeout(pjaFillWorkdayWorkExperience(profile), 12000, 'wd-workexp-step-' + steps)") &&
     externalSource.includes("withTimeout(pjaForceWorkdayTermsCheckbox('step-' + steps), 12000, 'wd-terms-step-' + steps)") &&
     externalSource.includes("workdaySelfIdentifyTransaction(profile, 'pre-click-' + steps)") &&
+    externalSource.includes('then(value => { phaseLog(label +') &&
+    externalSource.includes('return value;') &&
     externalSource.includes('sid_transaction_no_result') &&
     externalSource.includes('sid_transaction_failed') &&
     externalSource.includes("workdaySelfIdentifyTransaction(profile, 'validation-error-' + steps)") &&
@@ -259,7 +261,7 @@ module.exports = (t) => {
     externalSource.includes('stale') &&
     externalSource.indexOf('pja_wd_pending_apply') < externalSource.indexOf('const authResult = await window.pjaWorkdayAuth.run'),
   'external-apply: Workday pending-apply context is written before Gmail verification starts');
-  t.ok(externalSource.includes('description entry → applyManually nav attempt=') &&
+  t.ok(externalSource.includes('description entry → apply route nav attempt=') &&
     externalSource.includes('description entry → clicking Continue Application attempt=') &&
     externalSource.includes('const continueHref = continueBtn.href') &&
     externalSource.includes('const continueUrl = new URL(continueHref, location.href).href') &&
@@ -274,12 +276,14 @@ module.exports = (t) => {
     externalSource.includes('return runExternalApply(job, rawAnswers)') &&
     externalSource.includes('location.assign(continueUrl)') &&
     externalSource.includes("trustedWorkdayClick(continueBtn, 'continue-application')") &&
-    externalSource.includes("cleanUrl + '/apply/applyManually'") &&
+    externalSource.includes("cleanUrl + '/apply'") &&
+    externalSource.includes('__pjaExtApplyInFlightToken') &&
+    externalSource.includes('ext runner skip reason=') &&
     externalSource.includes('continue application') &&
     externalSource.includes("pja_wd_desc_manual_nav_") &&
     externalSource.includes('navs < 6') &&
     externalSource.includes('location.replace(retryUrl)'),
-  'external-apply: Workday job-description pages with Apply/Continue controls navigate to applyManually before no_submit');
+  'external-apply: Workday job-description pages enter via /apply and suppress overlapping URL-watch runners');
   t.ok(externalSource.includes('empty step shell; waiting for hydration before recovery') &&
     externalSource.includes('empty step shell hydrated; re-entering fill path') &&
     externalSource.includes('empty step shell persisted; navigating draft apply route retry=') &&

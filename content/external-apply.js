@@ -243,9 +243,23 @@
 
   async function startExternalApply(job, rawAnswers, reason) {
     const currentUrl = location.href;
-    if (window.__pjaExtApplyInFlight && window.__pjaExtApplyInFlightUrl === currentUrl) return;
+    if (window.__pjaExtApplyInFlight) {
+      if (/workday\.com|myworkdayjobs\.com/i.test(location.hostname)) {
+        try {
+          await new Promise(r => chrome.storage.local.get('pja_dbg', d => {
+            const a = (d.pja_dbg || []).slice(-40);
+            a.push('[WD] ext runner skip reason=' + reason + ' activeUrl=' +
+              String(window.__pjaExtApplyInFlightUrl || '').slice(0, 120) + ' newUrl=' + currentUrl.slice(0, 120));
+            chrome.storage.local.set({ pja_dbg: a }, r);
+          }));
+        } catch (_) {}
+      }
+      return;
+    }
+    const runToken = Date.now() + ':' + Math.random().toString(36).slice(2, 8);
     window.__pjaExtApplyInFlight = true;
     window.__pjaExtApplyInFlightUrl = currentUrl;
+    window.__pjaExtApplyInFlightToken = runToken;
     try {
       if (/workday\.com|myworkdayjobs\.com/i.test(location.hostname)) {
         await new Promise(r => chrome.storage.local.get('pja_dbg', d => {
@@ -257,8 +271,10 @@
       await waitForForm();
       return await runExternalApply(job, rawAnswers || {});
     } finally {
-      if (window.__pjaExtApplyInFlightUrl === currentUrl) {
+      if (window.__pjaExtApplyInFlightToken === runToken) {
         window.__pjaExtApplyInFlight = false;
+        window.__pjaExtApplyInFlightUrl = '';
+        window.__pjaExtApplyInFlightToken = '';
       }
     }
   }
@@ -1026,7 +1042,11 @@
           .find(el => /continue application/i.test(el.textContent || el.getAttribute('aria-label') || ''));
         const sourceUrl = String(job.applyUrl || location.href || '').trim();
         const cleanUrl = sourceUrl.replace(/[?#].*$/, '').replace(/\/+$/, '');
-        const manualUrl = /\/apply(?:\/|$)/i.test(cleanUrl) ? sourceUrl : cleanUrl + '/apply/applyManually';
+        const entryUrl = /\/apply\/applyManually(?:\/|$)/i.test(cleanUrl)
+          ? cleanUrl.replace(/\/apply\/applyManually$/i, '/apply')
+          : /\/apply(?:\/|$)/i.test(cleanUrl)
+            ? sourceUrl
+            : cleanUrl + '/apply';
         const navKey = 'pja_wd_desc_manual_nav_' + (job.id || job.jobId || '') + '_' +
           String(job.applyUrl || location.pathname || '').replace(/[^\w-]+/g, '_').slice(-80);
         let navs = 0;
@@ -1072,12 +1092,12 @@
           await sleep(3000);
           return runExternalApply(job, rawAnswers);
         }
-        if (manualUrl && manualUrl !== location.href && navs < 6) {
+        if (entryUrl && entryUrl !== location.href && navs < 6) {
           try { sessionStorage.setItem(navKey, String(navs + 1)); } catch (_) {}
-          const retryUrl = manualUrl + (manualUrl.includes('?') ? '&' : '?') + 'pja_wd_entry_retry=' + (navs + 1);
+          const retryUrl = entryUrl + (entryUrl.includes('?') ? '&' : '?') + 'pja_wd_entry_retry=' + (navs + 1);
           await new Promise(r => chrome.storage.local.get('pja_dbg', d => {
             const a = (d.pja_dbg || []).slice(-40);
-            a.push('[WD] description entry → applyManually nav attempt=' + (navs + 1) + ' controls=[' + pageControls.slice(0, 8).join('|') + ']');
+            a.push('[WD] description entry → apply route nav attempt=' + (navs + 1) + ' controls=[' + pageControls.slice(0, 8).join('|') + ']');
             chrome.storage.local.set({ pja_dbg: a }, r);
           }));
           location.replace(retryUrl);
@@ -1523,7 +1543,10 @@
     const withTimeout = (p, ms, label) => {
       let to;
       const timeout = new Promise(res => { to = setTimeout(() => { phaseLog(label + ' TIMEOUT ' + ms + 'ms'); res(); }, ms); });
-      const wrapped = Promise.resolve(p).then(() => phaseLog(label + ' done')).catch(e => phaseLog(label + ' err ' + ((e && e.message) || e))).finally(() => clearTimeout(to));
+      const wrapped = Promise.resolve(p)
+        .then(value => { phaseLog(label + ' done'); return value; })
+        .catch(e => { phaseLog(label + ' err ' + ((e && e.message) || e)); return undefined; })
+        .finally(() => clearTimeout(to));
       return Promise.race([wrapped, timeout]);
     };
 

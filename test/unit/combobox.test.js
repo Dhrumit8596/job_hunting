@@ -156,7 +156,8 @@ module.exports = async (t) => {
   t.ok(autofillSource.includes('selectedItem = cleaned.match') &&
     autofillSource.includes('\\b\\d+\\s+items?\\s+selected') &&
     autofillSource.includes('waitWorkdaySelectionCommitted') &&
-    autofillSource.includes("key === 'referralSource' ? 3500 : 1800"),
+    autofillSource.includes("key === 'referralSource' ? 1300") &&
+    autofillSource.includes("key === 'referralSource' ? 5500 : 1800"),
   'combobox: Workday referral-source waits for delayed selected chips and parses "1 item selected" wrappers');
   t.ok(autofillSource.includes('const pageRoots = pjaQueryAll') &&
     autofillSource.includes('filter(root => wanted.test') &&

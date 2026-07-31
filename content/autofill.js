@@ -2164,12 +2164,12 @@ function pjaFillCombobox(input, value, key) {
                 chrome.storage.local.set({ pja_dbg: arr });
               }); } catch (_) {}
             }
-            await _sleep((key === 'phoneCountryCode' || key === 'referralSource') ? 900 : 450);
+            await _sleep(key === 'referralSource' ? 1300 : key === 'phoneCountryCode' ? 900 : 450);
             // For Workday phone-code/referral-source, a click being scheduled is not evidence of
             // success: trusted clicks can miss or land on a non-leaf/group row. Require the actual
             // selected chip before resolving so the retry path remains active.
             if (key === 'phoneCountryCode' || key === 'referralSource') {
-              return await waitWorkdaySelectionCommitted(key === 'referralSource' ? 3500 : 1800);
+              return await waitWorkdaySelectionCommitted(key === 'referralSource' ? 5500 : 1800);
             }
             return clicked || workdaySelectionCommitted();
           };

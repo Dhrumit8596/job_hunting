@@ -204,6 +204,7 @@ module.exports = async (t) => {
     source.includes('[cdp] date s3=') &&
     source.includes("'onDatePicked', 'onDateSelected', 'onDateChange'") &&
     source.includes('{ year: y, month: m - 1, day: d }') &&
+    source.includes("err: ok ? '' : firstErr") &&
     source.includes('errorDate'),
   'background: Workday CDP date typing runs a main-world React/date callback recovery pass and reports Error-Date state');
 

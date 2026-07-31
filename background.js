@@ -2413,11 +2413,13 @@ async function cdpTypeDateSpinner(tabId, { baseId, month, day, year }) {
             for (const propName of propNames) {
               if (typeof props[propName] !== 'function') continue;
               let ok = false;
-              let err = '';
+              let firstErr = '';
               for (const payload of payloads) {
-                try { props[propName](payload); ok = true; } catch (e) { err = String(e && e.message || e).slice(0, 60); }
+                try { props[propName](payload); ok = true; } catch (e) {
+                  if (!firstErr) firstErr = String(e && e.message || e).slice(0, 60);
+                }
               }
-              calls.push({ propName, ok, err });
+              calls.push({ propName, ok, err: ok ? '' : firstErr });
               if (calls.length >= 12) return;
             }
           }

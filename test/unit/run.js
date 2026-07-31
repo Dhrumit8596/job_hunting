@@ -28,4 +28,5 @@ const files = fs.readdirSync(dir).filter(f => f.endsWith('.test.js')).sort();
   console.log(`\n${pass} passed, ${fail} failed  (${files.length} test files)`);
   if (fail) { console.log('\nFAILURES:'); fails.forEach(x => console.log('  ✗ ' + x)); process.exit(1); }
   console.log('All green.');
+  process.exit(0);
 })();
