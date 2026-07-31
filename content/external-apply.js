@@ -440,6 +440,7 @@
       'no_submit_btn', 'no_apply_btn_on_description', 'no_submit_after_spa',
       'wd_selectinput_blocked', 'workday_auth_sign_in_error', 'needs_login',
       'workday_create_rejected_no_visible_error', 'workday_account_exists_wrong_password',
+      'workday_duplicate_record',
       'apply_btn_no_form', 'posting_not_found', 'missing_required', 'email_verification_required', 'chatbot_apply_manual'
     ]);
     const isSmartRecruitersHost = /smartrecruiters\.com/i.test(location.hostname);
@@ -1403,9 +1404,11 @@
             await new Promise(r => chrome.storage.local.get('pja_dbg', d => { const a=(d.pja_dbg||[]).slice(-19); a.push('[ext] post-signin re-nav to applyUrl attempt ' + (renav+1)); chrome.storage.local.set({pja_dbg:a}, r); }));
             const sourceUrl = String(job.applyUrl || '').trim();
             const cleanUrl = sourceUrl.replace(/[?#].*$/, '').replace(/\/+$/, '');
-            const resumeUrl = /\/apply(?:\/|$)/i.test(cleanUrl)
-              ? sourceUrl
-              : cleanUrl + '/apply/applyManually';
+            const resumeUrl = /\/apply\/applyManually$/i.test(cleanUrl)
+              ? cleanUrl.replace(/\/apply\/applyManually$/i, '/apply')
+              : /\/apply(?:\/|$)/i.test(cleanUrl)
+                ? sourceUrl
+                : cleanUrl + '/apply';
             location.href = resumeUrl;
             return; // page reloads; external-apply re-runs, now signed in → reaches the form
           }
@@ -1742,19 +1745,22 @@
       if (!/workday\.com|myworkdayjobs\.com/i.test(location.hostname)) return 0;
       let filled = 0;
       const referralCommitted = text => {
-        const cleaned = String(text || '')
+        let cleaned = String(text || '')
           .replace(/\bExpanded\b/ig, ' ')
           .replace(/\s+/g, ' ')
           .trim();
+        const selectedItem = cleaned.match(/\b\d+\s+items?\s+selected,?\s+(.+)$/i);
+        if (selectedItem) cleaned = selectedItem[1].trim();
         if (!cleaned) return false;
         if (/^(select one|select\.{0,3}|choose|search|type to search|required only)$/i.test(cleaned)) return false;
         if (/select one|select\.\.\.|choose an option|required only/i.test(cleaned)) return false;
         if (/how did you hear|where did you (hear|find)|referral source|source of (this )?application/i.test(cleaned)) return false;
         return true;
       };
-      const selectedReferralText = el => (el.closest('[data-uxi-widget-type="multiselect"], [data-automation-id^="formField-"]')
-        ?.querySelector('[data-automation-id="selectedItemList"], [data-automation-id="selectedItem"], [data-automation-id="promptOption"]')
-        ?.textContent || '').replace(/\s+/g, ' ').trim();
+      const selectedReferralText = el => ((typeof pjaWorkdaySelectedChipText === 'function' ? pjaWorkdaySelectedChipText(el) : '') ||
+        (el.closest('[data-uxi-widget-type="multiselect"], [data-automation-id^="formField-"]')
+          ?.querySelector('[data-automation-id="selectedItemList"], [data-automation-id="selectedItem"], [data-automation-id="promptOption"]')
+          ?.textContent || '')).replace(/\s+/g, ' ').trim();
       if (typeof pjaFillCombobox === 'function') {
         const referralInputs = pjaQueryAllExt('input[data-uxi-widget-type="selectinput"], input[role="combobox"]').filter(el => {
           const id = el.id || el.name || el.getAttribute('data-automation-id') || '';
@@ -2293,6 +2299,35 @@
       await addDbg('[WD-SID] verify phase=' + (phase || '') + ' gaps=' + (gaps.join('|') || 'none'));
       return { ok: !gaps.length, gaps };
     };
+    const hasWorkdayDuplicateRecordError = () => {
+      if (!/workday\.com|myworkdayjobs\.com/i.test(location.hostname)) return false;
+      const txt = String(document.body?.innerText || '').replace(/\s+/g, ' ');
+      return /previous worker information already exists for this application|an address already exists for this application|update existing previous worker information|update or delete the address/i.test(txt);
+    };
+    const workdayDraftApplyUrl = () => {
+      const base = String(location.href || job.applyUrl || '').replace(/[?#].*$/, '').replace(/\/+$/, '');
+      const draftBase = /\/apply\/applyManually$/i.test(base)
+        ? base.replace(/\/apply\/applyManually$/i, '/apply')
+        : /\/apply$/i.test(base)
+          ? base
+          : base + '/apply';
+      return draftBase + '?pja_wd_draft_retry=1';
+    };
+    const workdayDuplicateRetryKey = () => 'pja_wd_duplicate_draft_retry_' +
+      (job.runId || 'norun') + '_' + (job.id || job.jobId || job.applyUrl || '');
+    const rerouteWorkdayDuplicateDraft = async (phaseLabel) => {
+      if (!hasWorkdayDuplicateRecordError() || !/\/apply\/applyManually(?:\/|$)/i.test(location.pathname)) return false;
+      const duplicateRetryKey = workdayDuplicateRetryKey();
+      if (sessionStorage.getItem(duplicateRetryKey) === '1') {
+        await addDbg('[WD] duplicate record validation still present after draft retry; manual deferral');
+        return false;
+      }
+      sessionStorage.setItem(duplicateRetryKey, '1');
+      const draftUrl = workdayDraftApplyUrl();
+      await addDbg('[WD] duplicate record validation ' + (phaseLabel || 'on applyManually') + '; retrying draft /apply route');
+      location.assign(draftUrl);
+      return true;
+    };
     const retryWorkdayBlockedAdvance = async (reasonHint) => {
       if (!/workday\.com|myworkdayjobs\.com/i.test(location.hostname)) return { advanced: false };
       const stepBefore = document.body.innerText.match(/current step (\d+)/i)?.[1] || '';
@@ -2307,6 +2342,11 @@
       await summarizeWorkdayCriticalSelects('before-retry ' + (reasonHint || 'blocked'));
       await addDbg('[WD] blocked advance retry start reason=' + (reasonHint || 'blocked') + ' step=' + (stepBefore || '?'));
       try {
+        if (reasonHint === 'resume') {
+          await addDbg('[WD] blocked advance retry: retrying resume upload');
+          await withTimeout(tryInjectResume(profile, answers), 90000, 'wd-resume-blocked-retry');
+          await sleep(1200);
+        }
         if (isWorkdaySelfIdentifyStep()) {
           await withTimeout(workdaySelfIdentifyTransaction(profile, 'blocked-retry'), 45000, 'wd-sid-blocked-retry');
         } else {
@@ -2363,6 +2403,9 @@
         let completed = /\/completed\/|\/confirmation/i.test(location.pathname) ||
           /view my applications|your application (has been|was) submitted|thank you for applying|application received/i.test(document.body?.innerText || '');
         let advanced = completed || submitFound || location.href !== urlBefore || (stepBefore && stepAfter !== stepBefore);
+        if (!advanced && await rerouteWorkdayDuplicateDraft('on applyManually')) {
+          return { advanced: true, rerouted: true };
+        }
         if (!advanced && await trustedWorkdayEnter(reNext, 'blocked-retry-' + label)) {
           await new Promise(resolve => {
             let waited = 0;
@@ -2388,6 +2431,9 @@
           completed = /\/completed\/|\/confirmation/i.test(location.pathname) ||
             /view my applications|your application (has been|was) submitted|thank you for applying|application received/i.test(document.body?.innerText || '');
           advanced = completed || submitFound || location.href !== urlBefore || (stepBefore && stepAfter !== stepBefore);
+          if (!advanced && await rerouteWorkdayDuplicateDraft('after Enter')) {
+            return { advanced: true, rerouted: true };
+          }
         }
         await addDbg('[WD] blocked advance retry result advanced=' + !!advanced + ' submit=' + !!submitFound + ' completed=' + !!completed + ' step=' + (stepBefore || '?') + '→' + (stepAfter || '?'));
         return { advanced, submitFound, completed };
@@ -2519,14 +2565,14 @@
             const currentBase = String(location.href || '').replace(/[?#].*$/, '').replace(/\/+$/, '');
             const jobBase = String(job.applyUrl || '').replace(/[?#].*$/, '').replace(/\/+$/, '');
             const sourceBase = /\/apply(?:\/|$)/i.test(currentBase) ? currentBase : (jobBase || currentBase);
-            const manualBase = /\/apply\/applyManually$/i.test(sourceBase)
-              ? sourceBase
+            const draftBase = /\/apply\/applyManually$/i.test(sourceBase)
+              ? sourceBase.replace(/\/apply\/applyManually$/i, '/apply')
               : /\/apply$/i.test(sourceBase)
-                ? sourceBase.replace(/\/apply$/i, '/apply/applyManually')
-                : sourceBase + '/apply/applyManually';
-            const retryUrl = manualBase +
+                ? sourceBase
+                : sourceBase + '/apply';
+            const retryUrl = draftBase +
               '?pja_wd_entry_retry=1&pja_wd_hydrate_retry=' + (deadEndTries + 1);
-            await addDbg('[WD] empty step shell persisted; navigating apply route retry=' + (deadEndTries + 1));
+            await addDbg('[WD] empty step shell persisted; navigating draft apply route retry=' + (deadEndTries + 1));
             location.assign(retryUrl);
             await sleep(5000);
             return runExternalApply(job, rawAnswers);
@@ -2794,6 +2840,12 @@
         const disabInput = document.querySelector('[data-automation-id^="selfIdentifiedDisabilityData--disabilit"] input, [data-automation-id="formField-disabilityStatus"] input');
         const disabVal = disabInput ? disabInput.value : 'not found';
         await addDbg('[ext] SID err markers: ' + (errMarkers.join('|')||'none') + ' disab="' + disabVal.slice(0,30) + '"');
+        if (hasWorkdayDuplicateRecordError()) {
+          if (await rerouteWorkdayDuplicateDraft('on applyManually')) return;
+          await addDbg('[WD] duplicate record validation cannot be auto-cleared; recording workday_duplicate_record');
+          stuckOnWdSelectinput = 'workday_duplicate_record';
+          break;
+        }
 
         // General recovery: re-run the correct scoped filler, then retry Next. On the
         // Workday Self Identify page, do not run generic form/My Info fillers; they can
@@ -3251,10 +3303,13 @@
         }
         const wdFields = missing.map(m => m.label);
         const isResume = stuckOnWdSelectinput === 'resume';
+        const isDuplicateRecord = stuckOnWdSelectinput === 'workday_duplicate_record' || hasWorkdayDuplicateRecordError();
         const reason = isResume ? 'missing_resume'
+          : isDuplicateRecord ? 'workday_duplicate_record'
           : stuckOnWdSelectinput === 'smartrecruiters' ? 'missing_required'
           : 'wd_selectinput_blocked';
         const fields = isResume ? ['resume_required']
+          : isDuplicateRecord ? ['workday_duplicate_previous_worker_or_address']
           : wdFields.length ? wdFields
           : stuckOnWdSelectinput === 'smartrecruiters' ? ['smartrecruiters_blocked_advance']
           : ['unknown_wd_fields'];
@@ -3264,6 +3319,8 @@
           missingRequired: fields,
           formSummary: stuckOnWdSelectinput === 'smartrecruiters'
             ? 'SmartRecruiters required controls blocked step advance'
+            : isDuplicateRecord
+              ? 'Workday duplicate Previous Worker or Address draft record blocked step advance'
             : 'workday selectinput or resume gate blocked advance',
         });
         if (missing.length) await saveMissingQuestions(missing, job);

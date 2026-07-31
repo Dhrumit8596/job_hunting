@@ -154,20 +154,46 @@ function pjaIsApplicationPage() {
 
 function pjaWorkdaySelectedChipText(el) {
   try {
-    const root = el?.closest?.('[data-uxi-widget-type="multiselect"], [data-automation-id^="formField"], [data-automation-id^="question"]');
-    return (root?.querySelector?.('[data-automation-id="selectedItemList"], [data-automation-id="selectedItem"], [data-automation-id="promptOption"]')?.textContent || '')
-      .replace(/\s+/g, ' ')
-      .trim();
+    const chipSelector = '[data-automation-id="selectedItemList"], [data-automation-id="selectedItem"], [data-automation-id="promptOption"]';
+    const clean = text => String(text || '').replace(/\s+/g, ' ').trim();
+    const readChip = root => clean(root?.querySelector?.(chipSelector)?.textContent || '');
+    const roots = [];
+    const pushRoot = root => { if (root && !roots.includes(root)) roots.push(root); };
+    pushRoot(el?.closest?.('[data-uxi-widget-type="multiselect"], [data-automation-id^="formField"], [data-automation-id^="question"]'));
+    pushRoot(el?.closest?.('fieldset'));
+    pushRoot(el?.parentElement?.closest?.('[data-automation-id^="formField"], [data-uxi-widget-type="multiselect"]'));
+    for (const root of roots) {
+      const text = readChip(root);
+      if (text) return text;
+    }
+    const label = clean((typeof pjaGetLabel === 'function' ? pjaGetLabel(el) : '') ||
+      el?.getAttribute?.('aria-label') || el?.id || el?.name || '');
+    const isReferral = /how did you hear|where did you (hear|find)|referral source|source of (this )?application|\bsource\b/i.test(label);
+    const isPhoneCode = /(country|territory).{0,60}phone.{0,30}code|phone.{0,30}(country|territory).{0,30}code|dial(?:ing|ling) code/i.test(label);
+    if (isReferral || isPhoneCode) {
+      const wanted = isReferral
+        ? /how did you hear|where did you (hear|find)|referral source|source of (this )?application|\bsource\b/i
+        : /(country|territory).{0,60}phone.{0,30}code|phone.{0,30}(country|territory).{0,30}code|dial(?:ing|ling) code/i;
+      const pageRoots = pjaQueryAll('[data-automation-id^="formField"], [data-uxi-widget-type="multiselect"], fieldset')
+        .filter(root => wanted.test(clean(root.textContent || '')));
+      for (const root of pageRoots) {
+        const text = readChip(root);
+        if (text) return text;
+      }
+    }
   } catch (_) {
-    return '';
+    // fall through
   }
+  return '';
 }
 
 function pjaWorkdayReferralCommittedText(text) {
-  const cleaned = String(text || '')
+  let cleaned = String(text || '')
     .replace(/\bExpanded\b/ig, ' ')
     .replace(/\s+/g, ' ')
     .trim();
+  const selectedItem = cleaned.match(/\b\d+\s+items?\s+selected,?\s+(.+)$/i);
+  if (selectedItem) cleaned = selectedItem[1].trim();
   if (!cleaned) return false;
   if (/^(select one|select\.{0,3}|choose|search|type to search|required only)$/i.test(cleaned)) return false;
   if (/select one|select\.\.\.|choose an option|required only/i.test(cleaned)) return false;
@@ -2004,6 +2030,14 @@ function pjaFillCombobox(input, value, key) {
         return false;
       }
     };
+    const waitWorkdaySelectionCommitted = async (timeoutMs) => {
+      const started = Date.now();
+      while (Date.now() - started < timeoutMs) {
+        if (workdaySelectionCommitted()) return true;
+        await _sleep(250);
+      }
+      return workdaySelectionCommitted();
+    };
 
     // Open via CDP trusted click (bypasses Workday's isTrusted check).
     // Assign a temporary unique ID to the inputContainer so background.js can find it.
@@ -2134,7 +2168,9 @@ function pjaFillCombobox(input, value, key) {
             // For Workday phone-code/referral-source, a click being scheduled is not evidence of
             // success: trusted clicks can miss or land on a non-leaf/group row. Require the actual
             // selected chip before resolving so the retry path remains active.
-            if (key === 'phoneCountryCode' || key === 'referralSource') return workdaySelectionCommitted();
+            if (key === 'phoneCountryCode' || key === 'referralSource') {
+              return await waitWorkdaySelectionCommitted(key === 'referralSource' ? 3500 : 1800);
+            }
             return clicked || workdaySelectionCommitted();
           };
           if (await selectAttempt('initial')) { resolve(); return; }
@@ -2878,9 +2914,7 @@ function pjaFillForm(profile, answers) {
         .test(rawLabel + ' ' + wdFieldText);
       if (isPhoneCodeField) wdForcedKey = 'phoneCountryCode';
       else if (/how did you hear|where did you (hear|find)|referral source|source of (this )?application|\bsource\b/i.test(rawLabel + ' ' + wdFieldText)) wdForcedKey = 'referralSource';
-      const wdSelectedChipText = (el.closest('[data-uxi-widget-type="multiselect"]')
-        ?.querySelector('[data-automation-id="selectedItemList"], [data-automation-id="selectedItem"], [data-automation-id="promptOption"]')
-        ?.textContent || '').trim();
+      const wdSelectedChipText = pjaWorkdaySelectedChipText(el);
       if (isPhoneCodeField && /united states/i.test(wdSelectedChipText) && /\+?1\b/.test(wdSelectedChipText)) {
         try { chrome.storage.local.get('pja_dbg', d => {
           const arr = (d.pja_dbg || []).slice(-160);

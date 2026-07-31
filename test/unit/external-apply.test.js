@@ -282,21 +282,38 @@ module.exports = (t) => {
   'external-apply: Workday job-description pages with Apply/Continue controls navigate to applyManually before no_submit');
   t.ok(externalSource.includes('empty step shell; waiting for hydration before recovery') &&
     externalSource.includes('empty step shell hydrated; re-entering fill path') &&
-    externalSource.includes('empty step shell persisted; navigating apply route retry=') &&
+    externalSource.includes('empty step shell persisted; navigating draft apply route retry=') &&
     externalSource.includes('pja_wd_hydrate_retry=') &&
     externalSource.includes('something went wrong') &&
     externalSource.includes('refresh the page and then try again') &&
     externalSource.includes('error shell; refreshing apply route retry=') &&
     externalSource.includes("fields: ['workday_error_shell']") &&
-    externalSource.includes("sourceBase.replace(/\\/apply$/i, '/apply/applyManually')") &&
-    externalSource.includes("sourceBase + '/apply/applyManually'") &&
+    externalSource.includes("sourceBase.replace(/\\/apply\\/applyManually$/i, '/apply')") &&
+    externalSource.includes("sourceBase + '/apply'") &&
+    externalSource.includes('navigating draft apply route retry=') &&
     externalSource.includes("reason: 'stuck_budget', fields: ['workday_empty_shell']") &&
     !externalSource.includes('back-to-job-posting'),
-  'external-apply: Workday empty step shell waits, retries applyManually route, then fails fast');
+  'external-apply: Workday empty step shell waits, retries draft /apply route, then fails fast');
   t.ok(externalSource.includes("const retryKey = 'pja_wd_block_retry_' + (job.runId || 'norun')") &&
     externalSource.includes("(reasonHint || 'blocked')") &&
     externalSource.includes("(stepBefore || 'nostep')"),
   'external-apply: Workday blocked retry key is scoped by runId and recovery phase so fresh retries are not suppressed');
+  t.ok(externalSource.includes('hasWorkdayDuplicateRecordError') &&
+    externalSource.includes('previous worker information already exists for this application') &&
+    externalSource.includes('rerouteWorkdayDuplicateDraft') &&
+    externalSource.includes("'on applyManually'") &&
+    externalSource.includes("'after Enter'") &&
+    externalSource.includes('duplicate record validation cannot be auto-cleared; recording workday_duplicate_record') &&
+    externalSource.includes('workday_duplicate_record'),
+  'external-apply: Workday duplicate-record validation reroutes applyManually drafts and is separately classified');
+  t.ok(externalSource.includes("reasonHint === 'resume'") &&
+    externalSource.includes('blocked advance retry: retrying resume upload') &&
+    externalSource.includes("withTimeout(tryInjectResume(profile, answers), 90000, 'wd-resume-blocked-retry')"),
+  'external-apply: Workday resume-gate blocked advance retries resume upload before missing_resume');
+  t.ok(externalSource.includes('selectedItem = cleaned.match') &&
+    externalSource.includes('\\b\\d+\\s+items?\\s+selected') &&
+    externalSource.includes('forced referralSource already committed'),
+  'external-apply: Workday referral fallback parses selected-item wrappers before reopening');
   t.ok(!externalSource.includes('promptAriaInstruction') &&
     externalSource.includes("el.closest('[data-automation-id=\"activeListContainer\"], [role=\"listbox\"]')") &&
     externalSource.includes("el.closest('[data-uxi-widget-type=\"multiselect\"]')"),

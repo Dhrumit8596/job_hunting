@@ -83,7 +83,7 @@ module.exports = async (t) => {
     autofillSource.includes('observed: referral "Social Media"'),
   'combobox: Workday phone-code does not press Enter after scheduling the exact US option click');
   t.ok(autofillSource.includes("const filterValue = key === 'phoneCountryCode' ? 'United States'") &&
-    autofillSource.includes("if (key === 'phoneCountryCode' || key === 'referralSource') return workdaySelectionCommitted()"),
+    autofillSource.includes('return await waitWorkdaySelectionCommitted'),
   'combobox: Workday phone-code requires verified United States +1 commit, not just a scheduled click');
   t.ok(autofillSource.includes('phoneCountryCode selected chip US; skip reopen') &&
     autofillSource.includes('[data-automation-id="selectedItemList"], [data-automation-id="selectedItem"], [data-automation-id="promptOption"]'),
@@ -153,6 +153,15 @@ module.exports = async (t) => {
     autofillSource.includes('referralSource selected chip already committed; skip reopen') &&
     autofillSource.includes('pjaFillForm skip referralSource selected chip already committed'),
   'combobox: Workday referral-source accepts tenant-specific selected chips as committed');
+  t.ok(autofillSource.includes('selectedItem = cleaned.match') &&
+    autofillSource.includes('\\b\\d+\\s+items?\\s+selected') &&
+    autofillSource.includes('waitWorkdaySelectionCommitted') &&
+    autofillSource.includes("key === 'referralSource' ? 3500 : 1800"),
+  'combobox: Workday referral-source waits for delayed selected chips and parses "1 item selected" wrappers');
+  t.ok(autofillSource.includes('const pageRoots = pjaQueryAll') &&
+    autofillSource.includes('filter(root => wanted.test') &&
+    autofillSource.includes('const wdSelectedChipText = pjaWorkdaySelectedChipText(el)'),
+  'combobox: Workday selected-chip lookup can find chips outside the local input wrapper');
   t.ok(autofillSource.includes('Type to Add Skills') &&
     autofillSource.includes('Leave skills untouched unless a future dedicated skills filler is added') &&
     autofillSource.includes('return;'),
