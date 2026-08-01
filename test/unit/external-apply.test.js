@@ -77,7 +77,11 @@ module.exports = (t) => {
     externalSource.includes("await trustedWorkdayClick(reNext, 'validation-retry')") &&
     externalSource.includes('const trustedWorkdayEnter = async (el, label) =>') &&
     externalSource.includes("type: 'WORKDAY_TRUSTED_ENTER'") &&
-    externalSource.includes("trustedWorkdayEnter(reNext, 'blocked-retry-' + label)"),
+    externalSource.includes("const mainOk = await mainWorldWorkdayAdvance(reNext, 'blocked-retry-' + label)") &&
+    externalSource.includes('blocked advance main-first ok=') &&
+    externalSource.includes("trustedWorkdayEnter(reNext, 'blocked-retry-' + label)") &&
+    externalSource.indexOf("const mainOk = await mainWorldWorkdayAdvance(reNext, 'blocked-retry-' + label)") <
+      externalSource.indexOf("trustedWorkdayClick(reNext, 'blocked-retry-' + label)"),
   'external-apply: Workday My Information state is finalized and trusted-clicked before Save/Continue retries');
   t.ok(externalSource.includes('const mainWorldWorkdayAdvance = async (el, label) =>') &&
     externalSource.includes("type: 'WORKDAY_ADVANCE_STEP'") &&

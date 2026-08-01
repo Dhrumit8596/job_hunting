@@ -2397,12 +2397,7 @@
         }
         const urlBefore = location.href;
         const label = reNext.getAttribute('data-automation-id') || (reNext.textContent || reNext.getAttribute('aria-label') || '').trim().slice(0, 30);
-        if (!(await trustedWorkdayClick(reNext, 'blocked-retry-' + label))) {
-          ['pointerdown','mousedown','pointerup','mouseup','click'].forEach(evtType => {
-            reNext.dispatchEvent(new MouseEvent(evtType, { bubbles: true, cancelable: true, view: window }));
-          });
-        }
-        await new Promise(resolve => {
+        const waitForBlockedAdvance = timeoutMs => new Promise(resolve => {
           let waited = 0;
           const poll = setInterval(() => {
             waited += 250;
@@ -2412,20 +2407,48 @@
                 .some(el => /submit.*application|apply now|^submit$/i.test(el.getAttribute('aria-label') || ''));
             const doneNow = /\/completed\/|\/confirmation/i.test(location.pathname) ||
               /view my applications|your application (has been|was) submitted|thank you for applying|application received/i.test(document.body?.innerText || '');
-            if ((stepBefore && stepNow !== stepBefore) || location.href !== urlBefore || submitNow || doneNow || waited >= 10000) {
+            if ((stepBefore && stepNow !== stepBefore) || location.href !== urlBefore || submitNow || doneNow || waited >= timeoutMs) {
               clearInterval(poll);
               resolve();
             }
           }, 250);
         });
-        let stepAfter = document.body.innerText.match(/current step (\d+)/i)?.[1] || '';
-        let submitFound = !!document.querySelector('[data-automation-id="bottomNavigationSubmit"]') ||
-          Array.from(document.querySelectorAll('[data-automation-id="click_filter"]'))
-            .some(el => /submit.*application|apply now|^submit$/i.test(el.getAttribute('aria-label') || '')) ||
-          !!findButton(/submit.*application|submit.*app|apply now|send application|complete application|^submit$|^submit application$/i);
-        let completed = /\/completed\/|\/confirmation/i.test(location.pathname) ||
-          /view my applications|your application (has been|was) submitted|thank you for applying|application received/i.test(document.body?.innerText || '');
-        let advanced = completed || submitFound || location.href !== urlBefore || (stepBefore && stepAfter !== stepBefore);
+        const readBlockedAdvanceState = () => {
+          const stepAfterNow = document.body.innerText.match(/current step (\d+)/i)?.[1] || '';
+          const submitFoundNow = !!document.querySelector('[data-automation-id="bottomNavigationSubmit"]') ||
+            Array.from(document.querySelectorAll('[data-automation-id="click_filter"]'))
+              .some(el => /submit.*application|apply now|^submit$/i.test(el.getAttribute('aria-label') || '')) ||
+            !!findButton(/submit.*application|submit.*app|apply now|send application|complete application|^submit$|^submit application$/i);
+          const completedNow = /\/completed\/|\/confirmation/i.test(location.pathname) ||
+            /view my applications|your application (has been|was) submitted|thank you for applying|application received/i.test(document.body?.innerText || '');
+          return {
+            stepAfter: stepAfterNow,
+            submitFound: submitFoundNow,
+            completed: completedNow,
+            advanced: completedNow || submitFoundNow || location.href !== urlBefore || (stepBefore && stepAfterNow !== stepBefore)
+          };
+        };
+        const mainOk = await mainWorldWorkdayAdvance(reNext, 'blocked-retry-' + label);
+        await addDbg('[WD] blocked advance main-first ok=' + !!mainOk + ' label=' + label);
+        if (mainOk) await waitForBlockedAdvance(isWorkdaySelfIdentifyStep() ? 8000 : 5000);
+        let retryState = readBlockedAdvanceState();
+        let stepAfter = retryState.stepAfter;
+        let submitFound = retryState.submitFound;
+        let completed = retryState.completed;
+        let advanced = retryState.advanced;
+        if (!advanced) {
+          if (!(await trustedWorkdayClick(reNext, 'blocked-retry-' + label))) {
+            ['pointerdown','mousedown','pointerup','mouseup','click'].forEach(evtType => {
+              reNext.dispatchEvent(new MouseEvent(evtType, { bubbles: true, cancelable: true, view: window }));
+            });
+          }
+          await waitForBlockedAdvance(10000);
+          retryState = readBlockedAdvanceState();
+          stepAfter = retryState.stepAfter;
+          submitFound = retryState.submitFound;
+          completed = retryState.completed;
+          advanced = retryState.advanced;
+        }
         if (!advanced && await rerouteWorkdayDuplicateDraft('on applyManually')) {
           return { advanced: true, rerouted: true };
         }
