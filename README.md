@@ -57,6 +57,12 @@ curl http://localhost:6174/health
 
 Automation is intentionally conservative. It should not fabricate qualifications, skills, work authorization, citizenship, or employment history. If a question cannot be answered from the user's profile/resume/answer bank, the extension should pause, record the missing question, or mark the job as needing manual review.
 
+Current high-level goal for this project is documented in [PROJECT_GOAL.md](PROJECT_GOAL.md), and is now the north-star for planned changes:
+
+- One-click discover → score → route → apply flow for LinkedIn Easy Apply, Indeed Easy Apply, and external ATS handlers.
+- Unified launch from both popup and CLI (`/apply-all` / `npm run apply:all`).
+- Deterministic drop logging for failed/skipped jobs so developers can quickly fix blockers and improve coverage.
+
 ## Current important limitations
 
 - CAPTCHA is an acceptable blocker. The extension records it and advances/skips instead of trying to bypass it.
@@ -348,11 +354,37 @@ curl -s -X POST http://localhost:6174/apply-all \
   --data '{
     "targetConfirmed":20,
     "threshold":70,
+    "maxGaps":20,
     "perCompanyCap":2,
     "includeAssisted":true,
     "e2eSafe":true
   }' | jq .
 ```
+
+The same one-click flow is also available as a first-class CLI wrapper:
+
+```bash
+npm run apply:all -- --target 20 --threshold 70
+npm run apply:all:dry-run -- --query "metrology engineer"
+npm run apply:status
+npm run apply:report
+npm run apply:preflight
+```
+
+Both the popup button and CLI run a readiness preflight first. The preflight fails closed when the
+extension is disconnected, the candidate profile/resume is not configured, or another ranked apply
+run is already active.
+
+Apply-run responses and exported reports include planning-drop diagnostics for corpus jobs that were
+not launched, grouped by reasons such as low score, missing hydrated description, prior blocked host,
+unsupported route, or run caps.
+Dry runs and planned-zero outcomes also write a sanitized markdown planning report under `reports/`
+so developer-visible drop evidence is preserved even when no browser tabs are opened.
+
+Prior captcha/auth/duplicate-record blockers are suppressed from normal one-click planning. Use
+`--retry-blocked` only after a developer or user has manually repaired that tenant/account state.
+To retest a single repaired tenant without reopening every known blocker, use
+`--retry-blocked-host abbott.wd5.myworkdayjobs.com` (repeat the flag for multiple hosts).
 
 Use `/apply-all` for normal batches. It runs `/source-v2` first, then `/apply-run`, so it can route
 eligible jobs through LinkedIn Easy Apply, Indeed Apply, and external ATS/company-site flows. Use
@@ -447,7 +479,10 @@ Common endpoints:
 | `/apply-all` | POST | Sources jobs and starts a ranked application run across all supported channels. |
 | `/source-v2` | POST | Builds/imports a sourced job corpus. |
 | `/apply-run` | POST | Starts a ranked application run from the corpus. |
+| `/apply-status` | GET | Returns compact active/last ranked-run progress and auto-exports a report for terminal runs. |
 | `/inspect-apply` | GET | Returns sanitized active-run diagnostics. |
+| `/one-click-preflight` | GET/POST | Checks extension connection, candidate profile readiness, and active-run conflicts. |
+| `/export-apply-report` | POST | Writes a sanitized developer-readable markdown report under `reports/`, including failure/drop groups by reason, ATS, and channel. |
 | `/get-storage` | POST | Reads selected extension storage keys for debugging. |
 | `/set-storage` | POST | Writes selected extension storage keys for debugging. Body is flat. |
 

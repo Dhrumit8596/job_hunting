@@ -91,6 +91,121 @@
     return '';
   }
 
+  function compactPlanJob(id, p, st, reason, extra = {}) {
+    let strategy = extra.strategy || '';
+    if (!strategy && p) strategy = detectAts(p.applyUrl) || p.detectedAts || p.ats || '';
+    let channel = extra.channel || p && p.channel || '';
+    if (!channel && p && (p.isEasyApply || (p.ats === 'linkedin' && p.sourcePlatform === 'linkedin'))) channel = p.isEasyApply ? 'linkedin_easy_apply' : '';
+    if (!channel && p && p.indeedApply) channel = 'indeed_apply';
+    if (!channel) channel = 'external';
+    return {
+      id,
+      company: p && p.company || '',
+      title: p && p.title || '',
+      channel,
+      ats: p && (p.ats || p.detectedAts) || strategy || '',
+      strategy,
+      fitScore: st && st.fitScore != null && Number.isFinite(Number(st.fitScore)) ? Number(st.fitScore) : null,
+      status: st && st.status || 'sourced',
+      reason,
+      applyUrl: p && p.applyUrl || '',
+      descriptionStatus: p && p.descriptionStatus || '',
+    };
+  }
+
+  function incrementCount(obj, key) {
+    key = key || 'unknown';
+    obj[key] = (obj[key] || 0) + 1;
+  }
+
+  function planDropReason(id, p, st, opts, context) {
+    const threshold = opts.threshold != null ? opts.threshold : 70;
+    const maxAttempts = opts.maxAttempts != null ? opts.maxAttempts : 3;
+    const retryDeferred = opts.retryDeferred !== false;
+    const requireEvidence = opts.requireEvidence === true;
+    const maxGaps = opts.maxGaps != null ? Number(opts.maxGaps) : 2;
+    const maxBrowserAgeMs = opts.maxBrowserAgeMs != null ? Number(opts.maxBrowserAgeMs) : null;
+    const includeUnscored = opts.includeUnscored === true;
+    const now = opts.now != null ? Number(opts.now) : Date.now();
+    const atsAllow = opts.atsAllow && opts.atsAllow.length ? new Set(opts.atsAllow.map(x => String(x).toLowerCase())) : null;
+    if (maxBrowserAgeMs != null && /^(linkedin|indeed|glassdoor)$/i.test(String(p.sourcePlatform || p.ats || ''))) {
+      const seen = typeof p.discoveredAt === 'number' ? p.discoveredAt : Date.parse(p.discoveredAt || '');
+      if (!Number.isFinite(seen) || now - seen > maxBrowserAgeMs) return 'stale_browser_listing';
+    }
+    const fit = st.fitScore;
+    const hasFit = fit != null && Number.isFinite(Number(fit));
+    if (!hasFit && !includeUnscored) return 'unscored';
+    if (hasFit && Number(fit) < threshold) return 'below_threshold';
+    if (requireEvidence) {
+      if (!p.description || /^(missing|stale|needs_description)$/i.test(String(p.descriptionStatus || ''))) return 'missing_description_evidence';
+      if (Object.prototype.hasOwnProperty.call(opts, 'candidateFingerprint')
+          && (!opts.candidateFingerprint || st.candidateFingerprint !== opts.candidateFingerprint)) return 'candidate_fingerprint_mismatch';
+      const direct = Array.isArray(st.matchEvidence) ? st.matchEvidence.filter(Boolean) : [];
+      const gaps = Array.isArray(st.gaps) ? st.gaps.filter(Boolean) : [];
+      const conflicts = Array.isArray(st.conflicts) ? st.conflicts.filter(Boolean) : [];
+      if (direct.length < 3) return 'weak_match_evidence';
+      if (gaps.length > maxGaps) return 'too_many_match_gaps';
+      if (conflicts.length) return 'hard_match_conflict';
+      if (!['high', 'medium'].includes(String(st.confidence || '').toLowerCase())) return 'low_score_confidence';
+    }
+    const postingIds = new Set(recordIdentityIds({ ...p, id }));
+    for (const ref of (p.sourceRefs || [])) {
+      for (const refId of recordIdentityIds({ ...p, ...ref, id: ref && ref.id || '' })) postingIds.add(refId);
+    }
+    const postingUrls = [p.applyUrl, p.listingUrl, ...(p.sourceRefs || []).flatMap(r => r ? [r.applyUrl, r.listingUrl] : [])].map(applyUrlKey).filter(Boolean);
+    const identity = context.identity;
+    if (Array.from(postingIds).some(x => identity.ids.has(x)) || postingUrls.some(x => identity.urls.has(x)) || identity.roles.has(roleKey(p))) return 'already_applied';
+    const blockedIdentity = context.blockedIdentity;
+    if (Array.from(postingIds).some(x => blockedIdentity.ids.has(x)) || postingUrls.some(x => blockedIdentity.urls.has(x)) || blockedIdentity.roles.has(roleKey(p))) return 'prior_blocked_record';
+    let applyHost = '';
+    try { applyHost = new URL(String(p.applyUrl || '')).hostname.toLowerCase(); } catch (_) {}
+    if (applyHost && context.blockedHosts.has(applyHost)) return 'prior_blocked_host';
+    const status = st.status || 'sourced';
+    if (status === 'applied') return 'state_applied';
+    if (status === 'dead') return 'state_dead';
+    const deferred = status === 'needs_manual' || status === 'needs_login';
+    if (deferred && !retryDeferred) return 'deferred_retry_disabled';
+    if (deferred && (st.attempts || 0) >= maxAttempts) return 'deferred_max_attempts';
+    const scorePending = includeUnscored && status === 'score_pending';
+    if (!deferred && status !== 'sourced' && !scorePending) return 'ineligible_state';
+    if (!p.applyUrl) return 'missing_apply_url';
+    const strategy = detectAts(p.applyUrl) || p.detectedAts || p.ats || '';
+    const unsupportedReason = unsupportedAutonomousApplyReason(p.applyUrl, strategy);
+    if (unsupportedReason) return unsupportedReason;
+    let channel = p.channel || '';
+    if (!channel && (p.isEasyApply || (p.ats === 'linkedin' && p.sourcePlatform === 'linkedin'))) channel = p.isEasyApply ? 'linkedin_easy_apply' : '';
+    if (!channel && p.indeedApply) channel = 'indeed_apply';
+    if (!channel) channel = 'external';
+    const aggregatorOnly = /(^|\.)(linkedin|indeed|glassdoor)\.com$/i.test(applyHost);
+    if (channel === 'external' && aggregatorOnly && !p.detectedAts) return 'aggregator_without_apply_destination';
+    if (atsAllow && !atsAllow.has(String(strategy).toLowerCase())) return 'ats_not_allowed';
+    return 'eligible_not_selected';
+  }
+
+  function buildApplyPlan(corpus, opts = {}) {
+    const jobs = buildApplySet(corpus, opts);
+    const selectedIds = new Set(jobs.map(j => j.id));
+    const index = (corpus && corpus.index) || {};
+    const state = (corpus && corpus.state) || {};
+    const identity = appliedIdentity(opts.appliedRecords || [], opts.appliedRoleKeys instanceof Set
+      ? Array.from(opts.appliedRoleKeys) : (opts.appliedRoleKeys || []));
+    const blockedIdentity = appliedIdentity(opts.blockedRecords || []);
+    const blockedHosts = new Set((opts.blockedHosts || []).map(x => String(x || '').toLowerCase()).filter(Boolean));
+    const context = { identity, blockedIdentity, blockedHosts };
+    const dropLimit = opts.dropLimit != null ? Math.max(0, Number(opts.dropLimit) || 0) : 200;
+    const dropped = [], dropCounts = {};
+    for (const id of Object.keys(index)) {
+      if (selectedIds.has(id)) continue;
+      const p = index[id];
+      const st = state[id] || { status: 'sourced', fitScore: null, attempts: 0 };
+      const reason = planDropReason(id, p, st, opts, context);
+      incrementCount(dropCounts, reason);
+      if (dropped.length < dropLimit) dropped.push(compactPlanJob(id, p, st, reason));
+    }
+    return { jobs, total: Object.keys(index).length, droppedTotal: Object.keys(index).length - jobs.length,
+      dropCounts, dropped };
+  }
+
   // Build the ordered apply set from the corpus.
   //   corpus: { index:{id:posting}, state:{id:{fitScore,status,attempts}} }
   //   opts: { threshold=70, appliedRoleKeys=[], dailyCap=30, maxAttempts=3, retryDeferred=true }
@@ -105,6 +220,7 @@
     const requireEvidence = opts.requireEvidence === true;
     const maxGaps = opts.maxGaps != null ? Number(opts.maxGaps) : 2;
     const maxBrowserAgeMs = opts.maxBrowserAgeMs != null ? Number(opts.maxBrowserAgeMs) : null;
+    const includeUnscored = opts.includeUnscored === true;
     const now = opts.now != null ? Number(opts.now) : Date.now();
     // Optional allow-list of ATS strategies (e.g. no-account ATSes for a supervised trial). When set,
     // only jobs whose detected strategy is in the list are eligible — a hard guarantee the run can't
@@ -112,6 +228,8 @@
     const atsAllow = opts.atsAllow && opts.atsAllow.length ? new Set(opts.atsAllow.map(x => String(x).toLowerCase())) : null;
     const identity = appliedIdentity(opts.appliedRecords || [], opts.appliedRoleKeys instanceof Set
       ? Array.from(opts.appliedRoleKeys) : (opts.appliedRoleKeys || []));
+    const blockedIdentity = appliedIdentity(opts.blockedRecords || []);
+    const blockedHosts = new Set((opts.blockedHosts || []).map(x => String(x || '').toLowerCase()).filter(Boolean));
     const index = (corpus && corpus.index) || {};
     const state = (corpus && corpus.state) || {};
 
@@ -124,7 +242,9 @@
       }
       const st = state[id] || { status: 'sourced', fitScore: null, attempts: 0 };
       const fit = st.fitScore;
-      if (fit == null || Number(fit) < threshold) continue;         // below the match bar
+      const hasFit = fit != null && Number.isFinite(Number(fit));
+      if (!hasFit && !includeUnscored) continue;                    // not scored yet
+      if (hasFit && Number(fit) < threshold) continue;              // below the match bar
       if (requireEvidence) {
         if (!p.description || /^(missing|stale|needs_description)$/i.test(String(p.descriptionStatus || ''))) continue;
         if (Object.prototype.hasOwnProperty.call(opts, 'candidateFingerprint')
@@ -140,11 +260,16 @@
       }
       const postingUrls = [p.applyUrl, p.listingUrl, ...(p.sourceRefs || []).flatMap(r => r ? [r.applyUrl, r.listingUrl] : [])].map(applyUrlKey).filter(Boolean);
       if (Array.from(postingIds).some(x => identity.ids.has(x)) || postingUrls.some(x => identity.urls.has(x)) || identity.roles.has(roleKey(p))) continue;
+      if (Array.from(postingIds).some(x => blockedIdentity.ids.has(x)) || postingUrls.some(x => blockedIdentity.urls.has(x)) || blockedIdentity.roles.has(roleKey(p))) continue;
+      let applyHost = '';
+      try { applyHost = new URL(String(p.applyUrl || '')).hostname.toLowerCase(); } catch (_) {}
+      if (applyHost && blockedHosts.has(applyHost)) continue;
       const status = st.status || 'sourced';
       if (status === 'applied' || status === 'dead') continue;       // done / dead posting
       const deferred = status === 'needs_manual' || status === 'needs_login';
       if (deferred && (!retryDeferred || (st.attempts || 0) >= maxAttempts)) continue;
-      if (!deferred && status !== 'sourced') continue;               // in-flight/unknown → skip
+      const scorePending = includeUnscored && status === 'score_pending';
+      if (!deferred && status !== 'sourced' && !scorePending) continue; // in-flight/unknown → skip
       if (!p.applyUrl) continue;                                     // nothing to open
       const strategy = detectAts(p.applyUrl) || p.detectedAts || p.ats || '';
       const unsupportedReason = unsupportedAutonomousApplyReason(p.applyUrl, strategy);
@@ -155,12 +280,12 @@
       if (!channel) channel = 'external';
       // Browser listings whose external destination was not resolved are valid sourcing leads,
       // but they are not safe autonomous-apply targets yet.
-      const aggregatorOnly = /(^|\.)(linkedin|indeed|glassdoor)\.com$/i.test((() => { try { return new URL(p.applyUrl).hostname; } catch (_) { return ''; } })());
+      const aggregatorOnly = /(^|\.)(linkedin|indeed|glassdoor)\.com$/i.test(applyHost);
       if (channel === 'external' && aggregatorOnly && !p.detectedAts) continue;
       if (atsAllow && !atsAllow.has(String(strategy).toLowerCase())) continue; // outside the allow-list
       out.push({
         id, applyUrl: p.applyUrl, company: p.company, title: p.title, location: p.location,
-        ats: p.ats || '', fitScore: Number(fit), attempts: st.attempts || 0, strategy, channel,
+        ats: p.ats || '', fitScore: hasFit ? Number(fit) : null, attempts: st.attempts || 0, strategy, channel,
         sourcePlatform: p.sourcePlatform || '', sourceJobId: p.sourceJobId || '',
         discoveredAt: p.discoveredAt || '',
         jobId: p.sourceJobId || '', listingUrl: p.listingUrl || '',
@@ -277,7 +402,7 @@
     return counts;
   }
 
-  const API = { buildApplySet, resultToState, poolStatus, roleKey, applyUrlKey, stableRecordId,
+  const API = { buildApplySet, buildApplyPlan, resultToState, poolStatus, roleKey, applyUrlKey, stableRecordId,
     recordIdentityIds, appliedIdentity, greenhouseEmbedFallback, exceededBudget, queueJobKey,
     watchdogDecision, unsupportedAutonomousApplyReason };
   if (root) root.PJAApplySelect = API;

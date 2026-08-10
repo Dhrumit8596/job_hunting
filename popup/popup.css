@@ -93,6 +93,84 @@ body {
 }
 .btn-force-open:hover { background: #bae6fd; }
 
+/* One-click run */
+.one-click-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 14px;
+  background: #ecfdf5;
+  border-bottom: 1px solid #bbf7d0;
+  flex-shrink: 0;
+}
+.one-click-copy {
+  min-width: 0;
+}
+.one-click-title {
+  font-size: 12.5px;
+  font-weight: 700;
+  color: #065f46;
+}
+.one-click-subtitle {
+  font-size: 11.5px;
+  color: #047857;
+  margin-top: 1px;
+}
+.one-click-status {
+  font-size: 11px;
+  color: #047857;
+  margin-top: 3px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 340px;
+}
+.one-click-status.running { color: #854d0e; }
+.one-click-status.ok { color: #166534; }
+.one-click-status.error { color: #991b1b; }
+.one-click-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+}
+.btn-one-click-secondary {
+  background: #fff;
+  border: 1px solid #86efac;
+  color: #047857;
+  border-radius: 7px;
+  padding: 7px 9px;
+  font-size: 12px;
+  font-weight: 650;
+  cursor: pointer;
+  font-family: inherit;
+  white-space: nowrap;
+}
+.btn-one-click-secondary:hover { background: #dcfce7; }
+.btn-one-click-secondary:disabled {
+  opacity: .65;
+  cursor: wait;
+}
+.btn-one-click-apply {
+  background: #16a34a;
+  border: 1px solid #15803d;
+  color: #fff;
+  border-radius: 7px;
+  padding: 8px 12px;
+  font-size: 12.5px;
+  font-weight: 700;
+  cursor: pointer;
+  font-family: inherit;
+  white-space: nowrap;
+  box-shadow: 0 1px 2px rgba(22, 101, 52, .16);
+}
+.btn-one-click-apply:hover { background: #15803d; }
+.btn-one-click-apply:disabled {
+  opacity: .65;
+  cursor: wait;
+}
+
 /* Tab panels */
 .tab-panel {
   flex: 1;

@@ -252,6 +252,9 @@ function normalizeBrowserJob(raw, opts = {}) {
     isEasyApply: channel === 'linkedin_easy_apply',
     indeedApply: channel === 'indeed_apply',
     descriptionStatus: desc.descriptionStatus,
+    // Discovery and scoring are deliberately separate. A card-only capture is a useful lead,
+    // but it cannot enter evidence-backed ranking until a portal-specific hydrator obtains its JD.
+    pipelineStatus: /^(full|partial)$/i.test(desc.descriptionStatus) ? 'score_pending' : 'needs_hydration',
     query,
     discoveredAt,
     provenance: {

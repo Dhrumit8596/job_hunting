@@ -25,17 +25,22 @@ const P = {
 module.exports = (t) => {
   const externalSource = fs.readFileSync(path.resolve(__dirname, '../../content/external-apply.js'), 'utf8');
   const backgroundSource = fs.readFileSync(path.resolve(__dirname, '../../background.js'), 'utf8');
+  t.ok(externalSource.includes('const PJA_EXT_STOP_BEFORE_SUBMIT_DEFAULT = false'),
+    'external apply: live E2E submission is the default unless a run explicitly requests review mode');
   t.ok(externalSource.includes('google\\.com$/i.test(location.hostname)') &&
     externalSource.includes('Gmail is used by the verification helper'),
   'external apply: never runs on Google/Gmail tabs used by email verification');
   t.ok(externalSource.includes('[email-code] cdp submit after code timed out; using DOM click fallback') &&
-    externalSource.includes('[email-code] submit after code did not confirm'),
+    externalSource.includes('[email-code] submit after code did not confirm') &&
+    externalSource.includes('function findEmailCodeActionButton()') &&
+    externalSource.includes('/verify|confirm|continue|next|submit.*code|send code|complete verification|confirm email/i') &&
+    externalSource.includes('code verified; clicking final submit'),
   'external apply: post-email-code submit click is bounded and records non-confirmation');
   t.ok(externalSource.includes('capturePostClickDiagnostic') &&
     externalSource.includes('CAPTURE_APPLY_DIAGNOSTIC') &&
     externalSource.includes('pja_last_post_click_diagnostic_pending') &&
     externalSource.includes('email_code_submit_unconfirmed') &&
-    externalSource.includes("branch: 'post_submit_code_gate'") &&
+    externalSource.includes("waitForEmailCodeRecoveryOutcome(preSubmitUrl, 'post_submit_code_gate', clickedAfterCode)") &&
     externalSource.includes('if (result.diagnostic) skipped.diagnostic = result.diagnostic') &&
     externalSource.includes('diagnostic: collectPostClickPageSnapshot()'),
   'external apply: email-code submit failures persist post-click URL/DOM diagnostics before deferral');
@@ -65,6 +70,10 @@ module.exports = (t) => {
     externalSource.includes('post-prompt text refill done') &&
     externalSource.includes('Country/state prompt commits can trigger Workday to re-render and clear downstream address'),
   'external-apply: Workday re-fills text fields after country/state prompt commits');
+  t.ok(externalSource.includes('function phaseLog(m)') &&
+    externalSource.includes('function withTimeout(p, ms, label)') &&
+    externalSource.indexOf('function phaseLog(m)') < externalSource.indexOf('function withTimeout(p, ms, label)'),
+  'external-apply: recovery actions can call withTimeout without const temporal-dead-zone failures');
   t.ok(externalSource.includes('entry.stepSig !== stepSig') &&
     externalSource.includes('entry.loads = 0') &&
     externalSource.includes('current step \\d+ of \\d+\\s+[^\\n]+'),
@@ -92,6 +101,11 @@ module.exports = (t) => {
     externalSource.includes('trusted_enter_timeout') &&
     externalSource.includes('main_advance_timeout'),
   'external-apply: Workday trusted click/enter/main-world advance calls are bounded so CDP stalls do not trip the watchdog');
+  t.ok(externalSource.includes('const selectedReferralText = el => {') &&
+    externalSource.includes("container?.querySelectorAll('a, [data-automation-id=\"promptOption\"], [data-automation-id=\"selectedItem\"]')") &&
+    externalSource.includes("'LinkedIn Connection', 'Careers Website'") &&
+    externalSource.includes("find(txt => referralCommitted(txt))"),
+  'external-apply: Workday referral source treats selected anchor/chip text as committed');
   t.ok(externalSource.includes("const isPhoneById = /^(phone|phoneNumber)$/i") &&
     externalSource.includes("el.name || ''") &&
     externalSource.includes("(phone\\s*)?extension"),
@@ -235,7 +249,8 @@ module.exports = (t) => {
   'external-apply: SmartRecruiters step buttons use trusted clicks before synthetic fallback');
   t.ok(externalSource.includes('recoverEmailVerificationCode') &&
     externalSource.includes("type: 'OPEN_GMAIL_CODE_TAB'") &&
-    externalSource.includes('retrying submit after gmail code') &&
+    externalSource.includes('retrying verification/submit after gmail code') &&
+    externalSource.includes('findEmailCodeActionButton') &&
     externalSource.includes("recordResult:email_verification_required:"),
   'external-apply: Greenhouse/Ashby email security-code gates attempt Gmail recovery before deferral');
   t.ok(externalSource.includes('const visibleValidationErrors = () =>') &&
@@ -431,6 +446,7 @@ module.exports = (t) => {
   t.eq(a('How did you hear about us?'), 'LinkedIn', 'Workday source question -> referral source');
   t.eq(a('State and federal law require Abbott to track and report certain payments and transfers of value provided to certain health care professionals (HCPs). Are you: (A) A physician - MD, DO, Dentist, DDS, Podiatrist, Optometrist or Chiropractor - with an active license to practice in the US; (B) a Massachusetts-licensed prescriber; or (C) None of the above?'), 'C', 'Workday HCP disclosure -> C / none of the above');
   t.eq(w.pjaPickAnswerOption('C', ['Select One', 'A', 'B', 'C'], P), 'C', 'Workday HCP disclosure option C selected exactly');
+  t.eq(a('Yes, I have read and consent to the terms and conditions'), 'Yes', 'Workday terms acknowledgement -> Yes even when rendered as a questionnaire button');
   t.eq(a('Are you aware of any ongoing negotiations, RFPs, or other procurements involving Bloom Energy and your current employer?'), 'No', 'Workday current-employer procurement conflict -> No');
   t.eq(w.pjaWorkdayAnswerForLabel('Are you Hispanic or Latino?', { hispanicOrLatino: 'no' }), 'No', 'Workday Hispanic/Latino explicit answer -> No');
   t.eq(w.pjaWorkdayAnswerForLabel('Are you Hispanic or Latino?', { hispanicOrLatino: 'Decline to answer' }), '__DECLINE__', 'Workday Hispanic/Latino explicit decline -> decline sentinel');
@@ -520,6 +536,8 @@ module.exports = (t) => {
   t.eq(w.pjaDeterministicAnswer('Does the deemed export rule affect your employment by Everpure?'), 'No', 'det: Canadian applicant unaffected by sanctioned-nation rule');
   t.eq(w.pjaDeterministicAnswer('Are you available to work at one of our office locations five days per week?'), 'Yes', 'det: office availability -> Yes');
   t.eq(w.pjaDeterministicAnswer('What are your desired base salary expectations?'), '$80,000 - $95,000 depending on role and responsibilities', 'det: salary custom question uses standard range');
+  t.eq(w.pjaDeterministicAnswer('Please indicate your salary expectations and any benefits you would like matched'), '$80,000 - $95,000 depending on role and responsibilities; standard health, dental, vision, retirement, and PTO benefits.', 'det: salary plus benefits prompt uses standard range');
+  t.eq(w.pjaDeterministicAnswer('Briefly explain how many years of hands-on experience you have with deposition equipment'), '0 years of direct hands-on deposition equipment experience; 6 years of inspection, metrology, and manufacturing quality experience.', 'det: deposition equipment years answered honestly');
   t.eq(w.pjaDeterministicAnswer('Have you ever been employed by the U.S. federal government or a contractor that performed work for the federal government?'), 'No', 'det: no federal employment');
   t.eq(w.pjaDeterministicAnswer('Do you have any relatives currently employed by the federal government or Department of Defense?'), 'No', 'det: no federal-government relatives');
   t.eq(w.pjaCoerceToOption('Yes', ['Acknowledge/Confirm']), 'Acknowledge/Confirm', 'single acknowledgment checkbox: Yes -> sole option');

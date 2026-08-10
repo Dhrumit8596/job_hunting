@@ -5,9 +5,9 @@
 // (whichever content script's host-guard fires handles the page); this makes the decision explicit,
 // logged, and unit-testable. detectAts(url) + a DOM sniff → one strategy from the registry.
 //
-// Phase A is SELECTION ONLY (no behavior change): it does not yet drive the apply — external-apply.js
-// still runs as before. Later phases route through registry[strategy].engine. UMD so it is testable
-// in Node and available in content scripts as window.pjaIdentifyPortal / window.pjaPickApplyStrategy.
+// The registry is the shared routing contract for both the ranked service-worker dispatcher and
+// external content scripts. Handlers may be registered by the owning engine; this file never
+// imports browser-specific code, which keeps route selection unit-testable.
 (function (root) {
   // Resolve detectAts from the global (content script; detect-ats.js loads first) or require (Node).
   let PJADetectAts = (root && root.PJADetectAts) || null;
@@ -38,6 +38,7 @@
     generic:        { ats: '',               engine: 'generic',   tier: 'unknown',     needsAccount: false, multiStep: false, iframe: false },
     unsupported:    { ats: '',               engine: 'unsupported', tier: 'none',      needsAccount: false, multiStep: false, iframe: false },
   };
+  const handlers = Object.create(null);
 
   // Read DOM signals used when the host isn't a recognized ATS (company careers page that embeds or
   // redirects into an ATS). Pure w.r.t. the passed document; safe to stub in tests.
@@ -90,12 +91,44 @@
     return strat;
   }
 
-  const API = { STRATEGIES, readSignals, pickStrategy, identifyPortal };
+  // A queue record can carry a channel discovered before the final ATS URL is resolved. Channel
+  // wins for native LinkedIn/Indeed flows; all other records are classified from the final URL.
+  function resolveStrategy(job, url, signals) {
+    const channel = String(job && job.channel || '').toLowerCase();
+    if (channel === 'linkedin_easy_apply') return Object.assign({ name: 'linkedin_ea', source: 'channel' }, STRATEGIES.linkedin_ea);
+    if (channel === 'indeed_apply') return Object.assign({ name: 'indeed', source: 'channel' }, STRATEGIES.indeed);
+    const route = pickStrategy(url || job && job.applyUrl || '', signals);
+    return route;
+  }
+
+  function registerHandler(name, handler) {
+    if (!STRATEGIES[name]) throw new Error('Unknown apply strategy: ' + name);
+    if (typeof handler !== 'function') throw new Error('Apply handler must be a function: ' + name);
+    handlers[name] = handler;
+  }
+
+  // Execution is deliberately small: selection remains deterministic and the selected handler
+  // owns browser behavior. A missing/unsupported handler is a normalized manual outcome rather
+  // than a silent fall-through into an unrelated form filler.
+  async function executeStrategy(job, context) {
+    const route = resolveStrategy(job || {}, context && context.url, context && context.signals);
+    const handler = handlers[route.name] || handlers[route.engine] || handlers.generic;
+    if (!handler || route.name === 'unsupported') {
+      return { handled: false, route, reason: route.name === 'unsupported' ? 'unsupported_apply_strategy' : 'missing_apply_handler' };
+    }
+    const result = await handler(Object.assign({}, context || {}, { job: job || {}, route }));
+    return Object.assign({ handled: true, route }, result || {});
+  }
+
+  const API = { STRATEGIES, readSignals, pickStrategy, identifyPortal, resolveStrategy, registerHandler, executeStrategy };
   if (root) {
     root.PJA_APPLY_STRATEGIES = STRATEGIES;
     root.pjaPickApplyStrategy = pickStrategy;
     root.pjaReadApplySignals = readSignals;
     root.pjaIdentifyPortal = identifyPortal;
+    root.pjaResolveApplyStrategy = resolveStrategy;
+    root.pjaRegisterApplyHandler = registerHandler;
+    root.pjaExecuteApplyStrategy = executeStrategy;
   }
   if (typeof module !== 'undefined' && module.exports) module.exports = API;
 })(typeof self !== 'undefined' ? self : (typeof globalThis !== 'undefined' ? globalThis : this));

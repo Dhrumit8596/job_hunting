@@ -163,6 +163,11 @@ module.exports = async (t) => {
     autofillSource.includes('filter(root => wanted.test') &&
     autofillSource.includes('const wdSelectedChipText = pjaWorkdaySelectedChipText(el)'),
   'combobox: Workday selected-chip lookup can find chips outside the local input wrapper');
+  t.ok(autofillSource.includes("const readCommittedAnchor = root => Array.from(root?.querySelectorAll?.('a, [data-automation-id=\"selectedItem\"], [data-automation-id=\"promptOption\"]')") &&
+    autofillSource.includes('pjaWorkdayReferralCommittedText(txt)') &&
+    autofillSource.includes('const anchorText = readCommittedAnchor(root)') &&
+    autofillSource.includes('if (anchorText) return anchorText'),
+  'combobox: Workday selected-chip lookup treats selected anchor text as committed');
   t.ok(autofillSource.includes('Type to Add Skills') &&
     autofillSource.includes('Leave skills untouched unless a future dedicated skills filler is added') &&
     autofillSource.includes('return;'),

@@ -21,6 +21,17 @@ const CONTACT_STATUS_COLORS = {
 const JOB_STATUSES     = ['Needs Info','Bookmarked','Shortlisted','Applied','Outreach Sent','Interview','Offer','Rejected'];
 const CONTACT_STATUSES = ['To Contact','Contacted','Responded','In Progress','Closed'];
 const SEVEN_DAYS = 7 * 24 * 60 * 60 * 1000;
+const PJA_DEV_SERVER = 'http://localhost:6174';
+const ONE_CLICK_DEFAULTS = {
+  targetConfirmed: 20,
+  threshold: 70,
+  maxGaps: 20,
+  perCompanyCap: 2,
+  includeAssisted: true,
+  e2eSafe: true,
+  rescore: true,
+  requireEvidence: true,
+};
 
 // ── State ─────────────────────────────────────────────────────────────────────
 let allJobs = [];
@@ -86,6 +97,9 @@ document.getElementById('btn-acf-save').addEventListener('click', saveNewContact
 
 // Manual force-open
 document.getElementById('btn-force-open').addEventListener('click', forceOpenSidebar);
+document.getElementById('btn-one-click-apply')?.addEventListener('click', startOneClickApply);
+document.getElementById('btn-one-click-refresh')?.addEventListener('click', refreshOneClickStatus);
+document.getElementById('btn-one-click-report')?.addEventListener('click', exportOneClickReport);
 
 function forceOpenSidebar() {
   chrome.tabs.query({ active: true, currentWindow: true }, tabs => {
@@ -120,8 +134,110 @@ function forceOpenSidebar() {
   });
 }
 
+async function startOneClickApply() {
+  const btn = document.getElementById('btn-one-click-apply');
+  const status = document.getElementById('one-click-status');
+  if (!btn || !status) return;
+  btn.disabled = true;
+  status.textContent = 'Checking extension/profile readiness…';
+  status.className = 'one-click-status running';
+  try {
+    const preflightResp = await fetch(`${PJA_DEV_SERVER}/one-click-preflight`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(ONE_CLICK_DEFAULTS),
+    });
+    const preflight = await preflightResp.json().catch(() => ({}));
+    if (!preflightResp.ok || preflight.ok === false) {
+      throw new Error((preflight.problems || ['preflight_failed']).join(', '));
+    }
+    status.textContent = 'Starting source → score → route → apply…';
+    const resp = await fetch(`${PJA_DEV_SERVER}/apply-all`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(ONE_CLICK_DEFAULTS),
+    });
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok || data.success === false) {
+      const stage = data.stage ? `${data.stage}: ` : '';
+      throw new Error(stage + (data.error || data.apply?.error || data.source?.error || `HTTP ${resp.status}`));
+    }
+    const apply = data.apply || {};
+    const planned = apply.planned != null ? apply.planned : 'ranked';
+    const runId = apply.runId ? ` · ${apply.runId}` : '';
+    status.textContent = `Started ${planned} job run${runId}.`;
+    status.className = 'one-click-status ok';
+    setTimeout(refreshOneClickStatus, 1200);
+  } catch (e) {
+    status.textContent = `Could not start: ${e.message || e}`;
+    status.className = 'one-click-status error';
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+function formatRunStatus(data) {
+  if (!data || data.ok === false) return 'Status unavailable.';
+  if (!data.run) {
+    return data.clients ? 'No active ranked run. Ready to source fresh jobs.' : 'Extension disconnected. Reload it from chrome://extensions.';
+  }
+  const r = data.run;
+  const total = r.total || 0;
+  const idx = r.currentIndex != null ? Math.min(r.currentIndex + 1, total || r.currentIndex + 1) : '?';
+  const job = r.currentJob ? ` · ${r.currentJob.company} — ${r.currentJob.title}` : '';
+  const blocked = data.blocked && data.blocked.records ? ` · blocked ${data.blocked.records}` : '';
+  return `${r.status}: ${idx}/${total} · confirmed ${r.confirmed}, failed ${r.failed}, skipped ${r.skipped}${blocked}${job}`;
+}
+
+async function refreshOneClickStatus() {
+  const status = document.getElementById('one-click-status');
+  if (!status) return;
+  try {
+    const resp = await fetch(`${PJA_DEV_SERVER}/apply-status`);
+    const data = await resp.json().catch(() => ({}));
+    status.textContent = formatRunStatus(data);
+    status.className = data && data.run && data.run.status === 'exhausted'
+      ? 'one-click-status ok'
+      : data && data.ok !== false ? 'one-click-status' : 'one-click-status error';
+  } catch (e) {
+    status.textContent = `Status unavailable: ${e.message || e}`;
+    status.className = 'one-click-status error';
+  }
+}
+
+async function exportOneClickReport() {
+  const btn = document.getElementById('btn-one-click-report');
+  const status = document.getElementById('one-click-status');
+  if (btn) btn.disabled = true;
+  if (status) {
+    status.textContent = 'Exporting sanitized apply report…';
+    status.className = 'one-click-status running';
+  }
+  try {
+    const resp = await fetch(`${PJA_DEV_SERVER}/export-apply-report`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({}),
+    });
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok || data.success === false) throw new Error(data.error || `HTTP ${resp.status}`);
+    if (status) {
+      status.textContent = `Report exported: ${data.file}`;
+      status.className = 'one-click-status ok';
+    }
+  } catch (e) {
+    if (status) {
+      status.textContent = `Report export failed: ${e.message || e}`;
+      status.className = 'one-click-status error';
+    }
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+
 loadJobs();
 loadContacts();
+refreshOneClickStatus();
 chrome.runtime.sendMessage({ type: 'REFRESH_BADGE' });
 
 // ── Pipeline ──────────────────────────────────────────────────────────────────

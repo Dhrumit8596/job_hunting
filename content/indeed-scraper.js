@@ -25,15 +25,16 @@
   // NOT flag on the mere presence of "recaptcha"/captcha iframes. A real challenge either shows
   // explicit challenge TEXT, or replaces the results entirely (no job cards) with a CF challenge /
   // visible captcha.
-  function indeedChallenged() {
+  function indeedChallenged(cardCount) {
     const body = document.body;
-    const txt = body ? (body.innerText || body.textContent || '') : '';
+    const txt = body ? String(body.innerText || body.textContent || '').slice(0, 60000) : '';
     if (/verify you are human|additional verification required|are you a robot|unusual traffic from your|please verify you'?re a human|complete the security check|let's confirm you are human/i.test(txt)) return true;
     // A real challenge replaces the results: NO job cards present. (Normal pages always have cards
     // AND an invisible bg reCAPTCHA — the no-cards guard avoids that false positive.)
-    const hasCards = document.querySelectorAll('[data-jk]').length > 0;
+    const hasCards = Number.isFinite(cardCount) ? cardCount > 0 : document.querySelectorAll('[data-jk]').length > 0;
     if (!hasCards) {
-      if (/cf-challenge|challenge-platform/i.test(document.documentElement.innerHTML)) return true;
+      const html = String(document.documentElement && document.documentElement.innerHTML || '').slice(0, 200000);
+      if (/cf-challenge|challenge-platform/i.test(html)) return true;
       if (document.querySelector('#challenge-form, iframe[src*="hcaptcha"], iframe[src*="recaptcha"], iframe[src*="captcha"]')) return true;
     }
     return false;
@@ -120,6 +121,29 @@
     });
   }
 
+  async function fetchIndeedDescription(meta, timeoutMs = 6000) {
+    let done = false;
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => { try { ctrl.abort(); } catch (_) {} }, Math.max(500, timeoutMs - 250));
+    const work = (async () => {
+      const res = await fetch(meta.listingUrl || ('https://www.indeed.com/viewjob?jk=' + meta.jobId), {
+        credentials: 'include',
+        signal: ctrl.signal
+      });
+      if (!res.ok) return '';
+      const html = await res.text();
+      const doc = new DOMParser().parseFromString(html, 'text/html');
+      for (const sel of DESC_SELECTORS) {
+        const el = doc.querySelector(sel);
+        if ((el?.textContent || '').trim().length > 100) return el.textContent.trim();
+      }
+      return '';
+    })().catch(() => '');
+    const timeout = new Promise(resolve => setTimeout(() => { if (!done) resolve(''); }, timeoutMs));
+    try { return await Promise.race([work, timeout]); }
+    finally { done = true; clearTimeout(timer); try { ctrl.abort(); } catch (_) {} }
+  }
+
   function nextPageEl() {
     return document.querySelector('a[data-testid="pagination-page-next"], a[aria-label="Next Page"], a[aria-label="Next"]');
   }
@@ -136,6 +160,29 @@
   const SCAN_KEY = 'pja_indeed_scan';
   const getScan = () => new Promise(r => chrome.storage.local.get(SCAN_KEY, d => r(d[SCAN_KEY] || null)));
   const setScan = s => new Promise(r => chrome.storage.local.set({ [SCAN_KEY]: s }, r));
+  const sendCollectOnly = jobs => new Promise(resolve => {
+    let done = false;
+    const finish = () => { if (!done) { done = true; resolve(); } };
+    const timer = setTimeout(finish, 8000);
+    try {
+      chrome.runtime.sendMessage({ type: 'BATCH_SCORE_JOBS', jobs, collectOnly: true }, () => {
+        clearTimeout(timer);
+        finish();
+      });
+    } catch (_) {
+      clearTimeout(timer);
+      finish();
+    }
+  });
+  const patchScan = async (scan, patch) => {
+    const next = Object.assign({}, scan || {}, patch || {}, { ts: Date.now() });
+    await setScan(next);
+    return next;
+  };
+  const failScan = async (scan, reason, extra) => {
+    const failed = Object.assign({}, scan || {}, { status: 'failed', reason, url: location.href, ts: Date.now() }, extra || {});
+    await setScan(failed); return failed;
+  };
   const isSearchPage = () => /\/jobs(\/|$|\?)/.test(location.pathname + location.search) || location.pathname === '/jobs';
 
   async function startIndeedScan(opts) {
@@ -144,49 +191,72 @@
       maxPages: (opts && opts.maxPages) || 15, ids: [], total: 0, indeedApply: 0,
       hydrateDescriptions: !opts || opts.hydrateDescriptions !== false,
       status: 'running', ts: Date.now() };
+    await new Promise(r => chrome.storage.local.set({ pja_indeed_paused: null }, r)); // never inherit a stale challenge
     await setScan(scan);
-    return resumeIndeedScanOnLoad();
+    try { return await resumeIndeedScanOnLoad(); }
+    catch (e) { return failScan(scan, 'start_error', { error: String(e && e.message || e) }); }
   }
 
   async function resumeIndeedScanOnLoad() {
-    if (!isSearchPage()) return;
-    const scan = await getScan();
+    if (!isSearchPage()) return failScan(await getScan(), 'not_search_page');
+    let scan = await getScan();
     if (!scan || scan.status !== 'running') return;
+    scan = await patchScan(scan, { phase: 'resume_enter', url: location.href });
     const params = new URLSearchParams(location.search);
-    if ((params.get('q') || '') !== scan.q) return; // a different search; not our scan
+    if ((params.get('q') || '') !== scan.q) return failScan(scan, 'query_mismatch');
     await sleep(1500); // let cards render
 
-    if (indeedChallenged()) {
+    let cards = getCardEls();
+    scan = await patchScan(scan, { phase: 'challenge_check', initialCardCount: cards.length });
+    if (indeedChallenged(cards.length)) {
       try { chrome.storage.local.set({ pja_indeed_paused: { reason: 'challenge', url: location.href, ts: Date.now() } }); } catch (_) {}
-      scan.status = 'paused'; await setScan(scan); return;
+      scan.status = 'paused'; scan.reason = 'challenge'; scan.url = location.href; scan.ts = Date.now(); await setScan(scan); return scan;
     }
+
+    // Results sometimes hydrate after the load event. Wait briefly for cards; an empty normal
+    // page is a diagnosable selector/render failure, never an indefinitely-running scan.
+    for (let i = 0; !cards.length && i < 10; i++) {
+      await sleep(500);
+      cards = getCardEls();
+      scan = await patchScan(scan, { phase: 'waiting_for_cards', waitIterations: i + 1, cardCount: cards.length });
+    }
+    if (!cards.length) return failScan(scan, 'no_job_cards_after_ready_wait');
+    scan = await patchScan(scan, { phase: 'collecting_cards', cardCount: cards.length });
 
     // Collect this page's new cards.
     const seen = new Set(scan.ids);
     const pending = [];
+    const flushPending = async () => {
+      while (pending.length) {
+        const b = pending.splice(0, 10);
+        await sendCollectOnly(b);
+        scan = await patchScan(scan, { phase: 'flushed_jobs', flushedAtTotal: scan.total });
+      }
+    };
     let newCount = 0;
-    for (const card of getCardEls()) {
+    for (const card of cards) {
       const meta = extractIndeedCardMeta(card);
       if (!meta || !meta.jobId || seen.has(meta.jobId)) continue;
       seen.add(meta.jobId); scan.ids.push(meta.jobId); scan.total++; newCount++;
       if (meta.indeedApply) scan.indeedApply++;
+      if (newCount === 1 || newCount % 5 === 0) {
+        scan = await patchScan(scan, { phase: 'collecting_cards', total: scan.total, indeedApply: scan.indeedApply, lastJobId: meta.jobId });
+      }
       if (kwHit(meta.title + ' ' + meta.company)) {
         let description = '';
         if (scan.hydrateDescriptions !== false) {
-          meta.previousUrl = location.href;
-          meta.previousDescription = getIndeedDetailDescription();
-          const link = card.querySelector('a[data-jk], a.jcs-JobTitle, h2.jobTitle a');
-          if (link) { link.click(); description = await waitForIndeedDescription(meta); }
+          scan = await patchScan(scan, { phase: 'hydrating_description', total: scan.total, lastJobId: meta.jobId, lastTitle: meta.title || '' });
+          description = await fetchIndeedDescription(meta, 4000);
         }
         pending.push({ id: meta.jobId, ...meta, description: description.slice(0, 20000),
           descriptionStatus: description ? (description.length > 20000 ? 'partial' : 'full') : 'missing',
-          query: scan.q, discoveredAt: Date.now(), scrapedAt: Date.now(), status: 'scoring' });
+          query: scan.q, discoveredAt: Date.now(), scrapedAt: Date.now(),
+          pipelineStatus: description ? 'score_pending' : 'needs_hydration',
+          status: description ? 'score_pending' : 'needs_hydration' });
+        if (pending.length >= 3) await flushPending();
       }
     }
-    while (pending.length) {
-      const b = pending.splice(0, 10);
-      await new Promise(res => { try { chrome.runtime.sendMessage({ type: 'BATCH_SCORE_JOBS', jobs: b, collectOnly: true }, () => res()); } catch (_) { res(); } });
-    }
+    await flushPending();
 
     const next = nextPageEl();
     if (next && newCount > 0 && scan.page + 1 < scan.maxPages) {
@@ -196,7 +266,7 @@
       return;
     }
     // Finished — write coverage + mark done.
-    scan.status = 'done'; await setScan(scan);
+    scan.status = 'done'; scan.reason = ''; scan.ts = Date.now(); await setScan(scan);
     const cov = { source: 'indeed', query: scan.q, location: scan.l, collected: scan.total,
       reported: reportedCount(), indeedApply: scan.indeedApply, external: scan.total - scan.indeedApply, ts: Date.now() };
     chrome.storage.local.get('pja_scan_coverage', r => {
@@ -215,5 +285,5 @@
   window.__pjaStartIndeedScan = startIndeedScan;
 
   // Auto-resume across Indeed pagination navigations.
-  if (isSearchPage()) { setTimeout(() => { resumeIndeedScanOnLoad().catch(() => {}); }, 1200); }
+  if (isSearchPage()) { setTimeout(() => { resumeIndeedScanOnLoad().catch(async e => { await failScan(await getScan(), 'resume_error', { error: String(e && e.message || e) }); }); }, 1200); }
 })();

@@ -3,7 +3,7 @@
 // Load the IndexedDB corpus + apply-selection modules into the SW global scope. Wrapped so a load
 // failure can never brick the whole service worker. Order matters: apply-select needs detect-ats.
 try {
-  importScripts('idb-store.js', 'sourcing/detect-ats.js', 'sourcing/apply-select.js', 'application-ledger.js');
+  importScripts('idb-store.js', 'sourcing/detect-ats.js', 'sourcing/apply-select.js', 'content/apply-router.js', 'application-ledger.js');
 } catch (e) { console.error('PJA: module load failed', e); }
 
 // ── Dev mode ──────────────────────────────────────────────────────────────────
@@ -49,10 +49,28 @@ async function pjaIngestCorpus(index, state, opts = {}) {
 // getApplySet command the dev-server /apply-run driver calls).
 async function pjaBuildApplySet(opts) {
   if (!self.PJAIdb || !self.PJAApplySelect) return { jobs: [], error: 'modules not loaded' };
-  const corpus = await self.PJAIdb.getAll();
-  const st = await new Promise(r => chrome.storage.local.get(['pja_applied_log', 'pja_jobs'], d => r(d)));
+  const bounded = (p, ms, label) => Promise.race([
+    p,
+    new Promise((_, reject) => setTimeout(() => reject(new Error(label + ' timed out')), ms))
+  ]);
+  const corpus = await bounded(self.PJAIdb.getAll(), 15000, 'PJAIdb.getAll');
+  const st = await bounded(new Promise(r => chrome.storage.local.get(['pja_applied_log', 'pja_jobs', 'pja_application_ledger'], d => r(d))), 5000, 'chrome.storage applied records');
   const recs = [...(st.pja_applied_log || []).filter(x => !x || !x.status || /^(applied|submitted|submitting|success|confirmed)$/i.test(String(x.status))),
     ...(st.pja_jobs || []).filter(x => x && /^(applied|submitted|success|confirmed)$/i.test(String(x.status || x.result || '')))];
+  const manualBlockerRe = /captcha|daily_limit|checkpoint|email_verification_required|workday_duplicate_record|workday_account_locked|workday_account_exists_wrong_password|workday_captcha|google_sso_only|ready_to_submit_review|chatbot_apply_manual|unsupported_|no_apply_path/i;
+  const ledgerEvents = st.pja_application_ledger && st.pja_application_ledger.events
+    ? Object.values(st.pja_application_ledger.events) : [];
+  const hostOf = url => { try { return new URL(String(url || '')).hostname.toLowerCase(); } catch (_) { return ''; } };
+  const retryBlockedHosts = new Set((opts && Array.isArray(opts.retryBlockedHosts) ? opts.retryBlockedHosts : [])
+    .map(h => String(h || '').trim().toLowerCase()).filter(Boolean));
+  const blockedRecords = opts && opts.retryBlocked === true ? [] : ledgerEvents
+    .filter(e => e && /^(failed|skipped|needs_manual|blocked)$/i.test(String(e.status || '')) &&
+      manualBlockerRe.test(String(e.reason || e.status || '')) &&
+      !retryBlockedHosts.has(hostOf(e.applyUrl || e.url)));
+  const blockedHosts = opts && opts.retryBlocked === true ? [] : Array.from(new Set(ledgerEvents
+    .filter(e => e && /workday_duplicate_record|workday_captcha|workday_account_locked/i.test(String(e.reason || e.status || '')))
+    .map(e => hostOf(e.applyUrl || e.url)).filter(Boolean)))
+    .filter(host => !retryBlockedHosts.has(host));
   const selectOpts = {
     threshold: opts && opts.threshold != null ? opts.threshold : 70,
     dailyCap: opts && opts.dailyCap != null ? opts.dailyCap : 30,
@@ -63,18 +81,26 @@ async function pjaBuildApplySet(opts) {
     maxGaps: opts && opts.maxGaps != null ? opts.maxGaps : 2,
     perCompanyCap: opts && opts.perCompanyCap != null ? opts.perCompanyCap : 2,
     maxBrowserAgeMs: opts && opts.maxBrowserAgeMs != null ? opts.maxBrowserAgeMs : 48 * 60 * 60 * 1000,
+    includeUnscored: opts && opts.includeUnscored === true,
     appliedRecords: recs,
+    blockedRecords,
+    blockedHosts,
   };
   if (opts && Object.prototype.hasOwnProperty.call(opts, 'candidateFingerprint')) {
     selectOpts.candidateFingerprint = opts.candidateFingerprint;
   }
-  const set = self.PJAApplySelect.buildApplySet(corpus, selectOpts);
-  return { jobs: set, total: Object.keys(corpus.index).length };
+  const plan = opts && opts.explainDrops === true && typeof self.PJAApplySelect.buildApplyPlan === 'function'
+    ? self.PJAApplySelect.buildApplyPlan(corpus, { ...selectOpts, dropLimit: opts.dropLimit != null ? opts.dropLimit : 200 })
+    : null;
+  const set = plan ? plan.jobs : self.PJAApplySelect.buildApplySet(corpus, selectOpts);
+  return { jobs: set, total: Object.keys(corpus.index).length,
+    planningDrops: plan ? { total: plan.droppedTotal, counts: plan.dropCounts, examples: plan.dropped } : undefined };
 }
 
 // The service worker is the sole writer for the append-only confirmation ledger. Chaining writes
 // prevents three apply channels finishing together from overwriting one another's read-modify-write.
 const PJA_APPLICATION_LEDGER_KEY = 'pja_application_ledger';
+const PJA_LAST_COMPLETED_APPLY_RUN_KEY = 'pja_last_completed_apply_run';
 let pjaLedgerWriteChain = Promise.resolve();
 function pjaAppendApplicationEvent(event) {
   const operation = pjaLedgerWriteChain.catch(() => {}).then(async () => {
@@ -175,6 +201,43 @@ async function pjaLaunchExternalSingle(job, master) {
       ? reject(new Error(chrome.runtime.lastError?.message || 'external tab create failed')) : resolve(tab.id)));
 }
 
+// The ranked run has one dispatch point. Native channels use their dedicated engines; every ATS
+// strategy uses the external launcher and is then executed by the same apply-router contract in
+// the content script. Keeping this map explicit prevents a new strategy from silently landing in
+// an unrelated channel.
+const PJA_RANKED_LAUNCHERS = {
+  linkedin_ea: pjaLaunchEasyApplySingle,
+  indeed: pjaLaunchIndeedSingle,
+  workday: pjaLaunchExternalSingle,
+  greenhouse: pjaLaunchExternalSingle,
+  lever: pjaLaunchExternalSingle,
+  ashby: pjaLaunchExternalSingle,
+  smartrecruiters: pjaLaunchExternalSingle,
+  eightfold: pjaLaunchExternalSingle,
+  icims: pjaLaunchExternalSingle,
+  taleo: pjaLaunchExternalSingle,
+  successfactors: pjaLaunchExternalSingle,
+  jobvite: pjaLaunchExternalSingle,
+  workable: pjaLaunchExternalSingle,
+  breezy: pjaLaunchExternalSingle,
+  bamboohr: pjaLaunchExternalSingle,
+  paylocity: pjaLaunchExternalSingle,
+  rippling: pjaLaunchExternalSingle,
+  generic: pjaLaunchExternalSingle,
+};
+
+async function pjaDispatchRankedJob(job, master) {
+  const route = self.PJAApplyRouter && typeof self.PJAApplyRouter.resolveStrategy === 'function'
+    ? self.PJAApplyRouter.resolveStrategy(job, job.applyUrl)
+    : { name: job.channel === 'linkedin_easy_apply' ? 'linkedin_ea' : job.channel === 'indeed_apply' ? 'indeed' : 'generic' };
+  const launch = PJA_RANKED_LAUNCHERS[route.name];
+  if (!launch) throw new Error('unsupported_apply_strategy:' + route.name);
+  job.strategy = route.name;
+  job.handler = route.engine;
+  console.log('PJA ranked apply: dispatch', route.name, 'engine=' + route.engine, job.company, job.title);
+  return launch(job, master);
+}
+
 function pjaSameRankedJob(job, event) {
   const jobUrl = self.PJAApplySelect?.applyUrlKey(job && job.applyUrl) || '';
   const eventUrl = self.PJAApplySelect?.applyUrlKey(event && event.applyUrl) || '';
@@ -188,9 +251,109 @@ function pjaSameRankedJob(job, event) {
     && norm(job && job.title) === norm(event && event.title);
 }
 
+function pjaRankedStopsOnTarget(master) {
+  return !(master && (master.applyAllAboveScore === true || master.runMode === 'all_above_score'));
+}
+
+function pjaCompactRankedJob(job) {
+  if (!job) return null;
+  return {
+    id: job.id || '',
+    jobId: job.jobId || job.sourceJobId || '',
+    title: job.title || '',
+    company: job.company || '',
+    channel: job.channel || 'external',
+    ats: job.ats || job.strategy || '',
+    strategy: job.strategy || '',
+    applyUrl: job.applyUrl || '',
+    listingUrl: job.listingUrl || '',
+    location: job.location || '',
+    fitScore: job.fitScore != null ? job.fitScore : null,
+    confidence: job.confidence || '',
+    reason: job.reason || job.skipReason || '',
+    status: job.status || '',
+  };
+}
+
+function pjaCompactRankedResults(results) {
+  const src = results && typeof results === 'object' ? results : {};
+  return {
+    confirmed: (Array.isArray(src.confirmed) ? src.confirmed : []).map(pjaCompactRankedJob).filter(Boolean),
+    failed: (Array.isArray(src.failed) ? src.failed : []).map(pjaCompactRankedJob).filter(Boolean),
+    skipped: (Array.isArray(src.skipped) ? src.skipped : []).map(pjaCompactRankedJob).filter(Boolean),
+    unverified: (Array.isArray(src.unverified) ? src.unverified : []).map(pjaCompactRankedJob).filter(Boolean),
+  };
+}
+
+function pjaRankedBucketCounts(results) {
+  const r = pjaCompactRankedResults(results);
+  return {
+    confirmed: r.confirmed.length,
+    failed: r.failed.length,
+    skipped: r.skipped.length,
+    unverified: r.unverified.length,
+  };
+}
+
+function pjaCompactCompletedRankedRun(master, extra = {}) {
+  const results = pjaCompactRankedResults(master && master.results);
+  const counts = pjaRankedBucketCounts(results);
+  const jobs = Array.isArray(master && master.jobs) ? master.jobs.map(pjaCompactRankedJob).filter(Boolean) : [];
+  const byChannel = {};
+  const byStrategy = {};
+  for (const job of jobs) {
+    const channel = job.channel || 'external';
+    const strategy = job.strategy || job.ats || 'generic';
+    byChannel[channel] = (byChannel[channel] || 0) + 1;
+    byStrategy[strategy] = (byStrategy[strategy] || 0) + 1;
+  }
+  return {
+    schemaVersion: 1,
+    runId: master && master.runId || '',
+    status: master && master.status || 'unknown',
+    runMode: master && (master.runMode || (master.applyAllAboveScore ? 'all_above_score' : 'target_confirmed')) || 'target_confirmed',
+    applyAllAboveScore: !!(master && master.applyAllAboveScore),
+    targetConfirmed: master && master.targetConfirmed != null ? master.targetConfirmed : null,
+    dailyTarget: master && master.dailyTarget != null ? master.dailyTarget : null,
+    attemptCap: master && master.attemptCap != null ? master.attemptCap : null,
+    threshold: master && master.threshold != null ? master.threshold : null,
+    day: master && master.day || '',
+    timeZone: master && master.timeZone || 'America/Los_Angeles',
+    currentIndex: master && master.currentIndex != null ? master.currentIndex : 0,
+    total: jobs.length,
+    confirmedCount: master && master.confirmedCount != null ? master.confirmedCount : counts.confirmed,
+    remaining: master && master.remaining != null ? master.remaining : null,
+    counts,
+    byChannel,
+    byStrategy,
+    jobs,
+    results,
+    blockedChannels: Array.isArray(master && master.blockedChannels) ? master.blockedChannels.slice(0, 20) : [],
+    planningDrops: master && master.planningDrops || null,
+    startedAt: master && master.startedAt || null,
+    finishedAt: master && master.finishedAt || Date.now(),
+    updatedAt: Date.now(),
+    tabCleanup: extra.tabCleanup || master && (master.tabCleanup || master.lastTabCleanup) || null,
+  };
+}
+
+async function pjaPersistCompletedRankedRun(master, extra = {}) {
+  if (!master || !master.runId) return null;
+  const snapshot = pjaCompactCompletedRankedRun(master, extra);
+  await pjaSetLocal({ [PJA_LAST_COMPLETED_APPLY_RUN_KEY]: snapshot });
+  return snapshot;
+}
+
 async function pjaCloseRankedTab(tabId) {
-  if (tabId == null) return;
-  try { await chrome.tabs.remove(tabId); } catch (_) {}
+  const result = { tabId: tabId == null ? null : tabId, closed: false };
+  if (tabId == null) return result;
+  try {
+    await chrome.tabs.remove(tabId);
+    result.closed = true;
+  } catch (e) {
+    result.error = e && e.message || String(e || 'close_failed');
+  }
+  return result;
 }
 
 async function pjaCloseDuplicateRankedTabs(job, keepTabId) {
@@ -380,6 +543,20 @@ function pjaRankedApplyTerminal(master, job, event) {
   } else master.results.unverified.push({ ...job, reason: event.reason || 'unverified' });
 }
 
+function pjaRankedApplyHostname(url) {
+  try { return new URL(url || '').hostname.toLowerCase(); }
+  catch (_) { return ''; }
+}
+
+function pjaRankedTenantBlockedHosts(master) {
+  const failed = master && master.results && Array.isArray(master.results.failed) ? master.results.failed : [];
+  const skipped = master && master.results && Array.isArray(master.results.skipped) ? master.results.skipped : [];
+  return new Set(failed.concat(skipped)
+    .filter(j => /workday_duplicate_record|workday_captcha/i.test(String(j.reason || '')))
+    .map(j => pjaRankedApplyHostname(j.applyUrl))
+    .filter(Boolean));
+}
+
 async function pjaReconcileRankedLedger(master, ledger) {
   if (!master || master.status !== 'applying' || !master.runId || !ledger || !self.PJAApplicationLedger) return master;
   if (!master.results) master.results = { confirmed: [], failed: [], unverified: [], skipped: [] };
@@ -425,9 +602,10 @@ async function pjaReconcileRankedLedger(master, ledger) {
     master.inFlightIndex = null;
     master.inFlightTabId = null;
     master.updatedAt = Date.now();
-    if (audit.counts.confirmed >= dailyTarget) {
+    if (pjaRankedStopsOnTarget(master) && audit.counts.confirmed >= dailyTarget) {
       master.status = 'done';
       master.finishedAt = Date.now();
+      await pjaPersistCompletedRankedRun(master);
     }
     await pjaSetLocal({ pja_ranked_apply: master });
   }
@@ -521,15 +699,21 @@ async function pjaDispatchRankedCurrent(master) {
   master = await pjaRecoverRankedLastFailure(master);
   master = await pjaReconcileRankedExtCurrent(master);
   if (master.day && self.PJAApplicationLedger?.dayKey(Date.now(), master.timeZone || 'America/Los_Angeles') !== master.day) {
+    const tabToClose = master.inFlightTabId;
     master.status = 'day_changed'; master.finishedAt = Date.now(); master.inFlightIndex = null;
     master.inFlightTabId = null;
+    master.tabCleanup = await pjaCloseRankedTab(tabToClose);
+    await pjaPersistCompletedRankedRun(master, { tabCleanup: master.tabCleanup });
     await pjaSetLocal({ pja_ranked_apply: master });
     await pjaClearRankedExtQueue(master);
     return master;
   }
-  if (master.remaining != null && master.remaining <= 0) {
+  if (pjaRankedStopsOnTarget(master) && master.remaining != null && master.remaining <= 0) {
+    const tabToClose = master.inFlightTabId;
     master.status = 'done'; master.finishedAt = Date.now(); master.inFlightIndex = null;
     master.inFlightTabId = null;
+    master.tabCleanup = await pjaCloseRankedTab(tabToClose);
+    await pjaPersistCompletedRankedRun(master, { tabCleanup: master.tabCleanup });
     await pjaSetLocal({ pja_ranked_apply: master });
     await pjaClearRankedExtQueue(master);
     return master;
@@ -539,8 +723,22 @@ async function pjaDispatchRankedCurrent(master) {
     master.results.skipped.push({ ...master.jobs[master.currentIndex], reason: 'channel_paused_for_run' });
     master.currentIndex++;
   }
+  const duplicateBlockedHosts = pjaRankedTenantBlockedHosts(master);
+  while (master.currentIndex < master.jobs.length &&
+      duplicateBlockedHosts.has(pjaRankedApplyHostname(master.jobs[master.currentIndex].applyUrl))) {
+    const host = pjaRankedApplyHostname(master.jobs[master.currentIndex].applyUrl);
+    const prior = master.results.failed.concat(master.results.skipped)
+      .find(j => pjaRankedApplyHostname(j.applyUrl) === host && /workday_captcha/i.test(String(j.reason || '')));
+    master.results.skipped.push({ ...master.jobs[master.currentIndex],
+      reason: prior ? 'workday_captcha_same_tenant' : 'workday_duplicate_record_same_tenant' });
+    master.currentIndex++;
+  }
   if (master.currentIndex >= master.jobs.length) {
+    const tabToClose = master.inFlightTabId;
     master.status = 'exhausted'; master.finishedAt = Date.now(); master.inFlightIndex = null;
+    master.inFlightTabId = null;
+    master.tabCleanup = await pjaCloseRankedTab(tabToClose);
+    await pjaPersistCompletedRankedRun(master, { tabCleanup: master.tabCleanup });
     await pjaSetLocal({ pja_ranked_apply: master });
     await pjaClearRankedExtQueue(master);
     return master;
@@ -570,10 +768,7 @@ async function pjaDispatchRankedCurrent(master) {
     }
     if (self.PJAIdb && job.id) await self.PJAIdb.updateState(job.id,
       { status: 'queued', reason: 'ranked_run', runId: master.runId, lastAttemptAt: Date.now() });
-    let tabId;
-    if (job.channel === 'linkedin_easy_apply') tabId = await pjaLaunchEasyApplySingle(job, master);
-    else if (job.channel === 'indeed_apply') tabId = await pjaLaunchIndeedSingle(job, master);
-    else tabId = await pjaLaunchExternalSingle(job, master);
+    const tabId = await pjaDispatchRankedJob(job, master);
     await pjaCloseDuplicateRankedTabs(job, tabId);
     // Capture the exact tab after launch so timeout/channel-pause handling can close redirected
     // pages before the next reserve starts. Re-read ownership to avoid overwriting a very fast result.
@@ -639,15 +834,16 @@ async function pjaAdvanceRankedRun(rawEvent, ledger) {
   master.inFlightIndex = null;
   master.inFlightTabId = null;
   master.updatedAt = Date.now();
-  if (audit.counts.confirmed >= dailyTarget) {
+  if (pjaRankedStopsOnTarget(master) && audit.counts.confirmed >= dailyTarget) {
     master.status = 'done'; master.finishedAt = Date.now();
+    master.tabCleanup = await pjaCloseRankedTab(tabToClose);
+    await pjaPersistCompletedRankedRun(master, { tabCleanup: master.tabCleanup });
     await pjaSetLocal({ pja_ranked_apply: master });
     await pjaClearRankedExtQueue(master);
-    await pjaCloseRankedTab(tabToClose);
     return;
   }
+  master.lastTabCleanup = await pjaCloseRankedTab(tabToClose);
   await pjaSetLocal({ pja_ranked_apply: master });
-  await pjaCloseRankedTab(tabToClose);
   await pjaDispatchRankedCurrent(master);
 }
 
@@ -829,6 +1025,24 @@ if (DEV_MODE) {
               chrome.storage.local.get(msg.keys, data => {
                 _wsReloadSocket.send(JSON.stringify({ cmd: 'storageReply', reqId: msg.reqId, data }));
               });
+            } else if (msg.cmd === 'getBrowserShortlist') {
+              chrome.storage.local.get('pja_shortlist', data => {
+                const raw = Array.isArray(data.pja_shortlist) ? data.pja_shortlist : [];
+                const jobs = raw.filter(j => j && /^(linkedin|indeed|glassdoor)$/i.test(String(j.platform || j.sourcePlatform || '')))
+                  .map(j => ({
+                    id: j.id, jobId: j.jobId, sourceJobId: j.sourceJobId,
+                    title: j.title, company: j.company || j.companyName || '', location: j.location || '',
+                    platform: j.platform, sourcePlatform: j.sourcePlatform, source: j.source,
+                    channel: j.channel, isEasyApply: !!j.isEasyApply, indeedApply: !!j.indeedApply,
+                    listingUrl: j.listingUrl || j.url || '', applyUrl: j.applyUrl || '',
+                    externalApplyUrl: j.externalApplyUrl || '', detectedAts: j.detectedAts || '',
+                    description: String(j.description || '').slice(0, 20000),
+                    descriptionStatus: j.descriptionStatus || '', pipelineStatus: j.pipelineStatus || '',
+                    status: j.status || '', query: j.query || '', scrapedAt: j.scrapedAt || '',
+                    discoveredAt: j.discoveredAt || '', postedAt: j.postedAt || ''
+                  }));
+                _wsReloadSocket.send(JSON.stringify({ cmd: 'browserShortlistReply', reqId: msg.reqId, data: { jobs, total: raw.length } }));
+              });
             } else if (msg.cmd === 'getCorpus') {
               // Read the IndexedDB corpus gate report back to the dev-server (/corpus-status).
               (async () => {
@@ -925,9 +1139,15 @@ if (DEV_MODE) {
                 try {
                   const current = await new Promise(r => chrome.storage.local.get('pja_ranked_apply', r));
                   let master = current.pja_ranked_apply || null;
-                  if (!master || master.status !== 'applying') {
+                  if (!master || !/^(applying|paused_for_patch|paused_for_fix)$/i.test(String(master.status || ''))) {
                     data = { ok: false, error: 'no active ranked apply run' };
                   } else {
+                    if (/^paused_/i.test(String(master.status || ''))) master.status = 'applying';
+                    master.inFlightIndex = null;
+                    master.inFlightTabId = null;
+                    master.inFlightAt = null;
+                    master.updatedAt = Date.now();
+                    await pjaSetLocal({ pja_ranked_apply: master });
                     master = await pjaDispatchRankedCurrent(master);
                     data = { ok: true, runId: master.runId, status: master.status,
                       currentIndex: master.currentIndex, inFlightIndex: master.inFlightIndex,
@@ -959,13 +1179,36 @@ if (DEV_MODE) {
             } else if (msg.cmd === 'inspectActiveApply') {
               const reply = data => { try { _wsReloadSocket.send(JSON.stringify({ cmd: 'inspectActiveApplyReply', reqId: msg.reqId, data })); } catch (_) {} };
               chrome.tabs.query({}, async tabs => {
-                const st = await new Promise(r => chrome.storage.local.get(['pja_ranked_apply', 'pja_last_apply_failure'], r));
+                const st = await new Promise(r => chrome.storage.local.get(['pja_ranked_apply', 'pja_ext_current', 'pja_last_apply_failure', 'pja_dbg'], r));
                 const ranked = st.pja_ranked_apply || null;
-                const ats = tabs.filter(t => /greenhouse\.io|lever\.co|ashbyhq\.com|myworkdayjobs|workday\.com|icims\.com|jobvite\.com|smartrecruiters\.com|indeed\.com/i.test(t.url || ''));
+                const currentJob = ranked && ranked.jobs && ranked.jobs[ranked.inFlightIndex ?? ranked.currentIndex] || st.pja_ext_current || null;
+                const atsRe = /greenhouse\.io|lever\.co|ashbyhq\.com|myworkdayjobs|workday\.com|icims\.com|jobvite\.com|smartrecruiters\.com|indeed\.com/i;
+                const hostOf = url => { try { return new URL(url || '').hostname; } catch (_) { return ''; } };
+                const currentHost = hostOf(currentJob && currentJob.applyUrl);
+                const urlKey = url => {
+                  try { return (self.PJAApplySelect && self.PJAApplySelect.applyUrlKey(url)) || String(url || ''); }
+                  catch (_) { return String(url || ''); }
+                };
+                const currentKey = urlKey(currentJob && currentJob.applyUrl);
+                const scoreTab = t => {
+                  const url = t.url || '';
+                  let score = 0;
+                  if (ranked && ranked.inFlightTabId != null && t.id === ranked.inFlightTabId) score += 1000;
+                  if (currentJob && currentHost && hostOf(url) === currentHost) score += 400;
+                  if (currentJob && currentKey && urlKey(url) === currentKey) score += 350;
+                  if (atsRe.test(url)) score += 100;
+                  if (t.active) score += 20;
+                  score += Math.min(10, Math.floor((t.id || 0) / 100000000));
+                  return score;
+                };
+                const ats = tabs.filter(t => atsRe.test(t.url || '') || (currentHost && hostOf(t.url) === currentHost));
                 const inFlightTab = ranked?.inFlightTabId != null ? tabs.find(t => t.id === ranked.inFlightTabId) : null;
-                const inspectTabs = ats.slice(-3);
-                if (inFlightTab && !inspectTabs.some(t => t.id === inFlightTab.id)) inspectTabs.push(inFlightTab);
+                const inspectTabs = ats
+                  .sort((a, b) => scoreTab(b) - scoreTab(a))
+                  .slice(0, 4);
+                if (inFlightTab && !inspectTabs.some(t => t.id === inFlightTab.id)) inspectTabs.unshift(inFlightTab);
                 const out = [];
+                let screenshot = null;
                 for (const tab of inspectTabs) {
                   try {
                     const frames = await chrome.scripting.executeScript({ target: { tabId: tab.id, allFrames: true }, func: () => {
@@ -987,7 +1230,17 @@ if (DEV_MODE) {
                       const errors = [...document.querySelectorAll('[role=alert],[aria-invalid=true],[class*=error],[class*=invalid]')].filter(visible).map(label).filter(Boolean).slice(0, 30);
                       return { url: location.href, title: document.title, controls, required, dateParts, radios, errors, textTail: (document.body?.innerText || '').trim().replace(/\s+/g, ' ').slice(-1200) };
                     }});
-                    out.push({ tabId: tab.id, url: tab.url, frames: frames.map(x => x.result).filter(Boolean) });
+                    out.push({ tabId: tab.id, active: !!tab.active, selectedScore: scoreTab(tab), url: tab.url, frames: frames.map(x => x.result).filter(Boolean) });
+                    if (!screenshot && tab.windowId != null && (tab.active || tab.id === ranked?.inFlightTabId || tab.id === inspectTabs[0]?.id)) {
+                      screenshot = await new Promise(resolve => {
+                        try {
+                          chrome.tabs.captureVisibleTab(tab.windowId, { format: 'jpeg', quality: 45 }, url => {
+                            if (chrome.runtime.lastError || !url) resolve(null);
+                            else resolve({ mime: 'image/jpeg', chars: String(url).length, dataUrl: String(url).slice(0, 600000), truncated: String(url).length > 600000 });
+                          });
+                        } catch (_) { resolve(null); }
+                      });
+                    }
                   } catch (e) { out.push({ tabId: tab.id, url: tab.url, error: e.message }); }
                 }
                 const slimResults = rows => (rows || []).map(row => ({
@@ -997,6 +1250,9 @@ if (DEV_MODE) {
                 reply({ tabs: out, ranked: ranked ? {
                   runId: ranked.runId, status: ranked.status, currentIndex: ranked.currentIndex,
                   inFlightIndex: ranked.inFlightIndex, inFlightTabId: ranked.inFlightTabId,
+                  currentJob: currentJob ? { company: currentJob.company || '', title: currentJob.title || '',
+                    ats: currentJob.ats || currentJob.strategy || '', channel: currentJob.channel || '',
+                    applyUrl: currentJob.applyUrl || '' } : null,
                   totalJobs: ranked.jobs && ranked.jobs.length,
                   confirmed: ranked.results && ranked.results.confirmed && ranked.results.confirmed.length || 0,
                   failed: ranked.results && ranked.results.failed && ranked.results.failed.length || 0,
@@ -1011,7 +1267,7 @@ if (DEV_MODE) {
                 } : null, lastFailure: st.pja_last_apply_failure ? {
                   reason: st.pja_last_apply_failure.reason || '', company: st.pja_last_apply_failure.company || '',
                   title: st.pja_last_apply_failure.title || '', ats: st.pja_last_apply_failure.ats || '',
-                } : null });
+                } : null, screenshot, recentDebug: (st.pja_dbg || []).slice(-30) });
               });
             } else if (msg.cmd === 'injectResume') {
               // Dev-server-triggered résumé upload: reads pja_resume_b64 (a data URL) and injects
@@ -1206,23 +1462,59 @@ if (DEV_MODE) {
                   ? 'https://www.glassdoor.com/Jobs/process-engineer-jobs-SRCH_KO0,16.htm?location=California'
                   : 'https://www.linkedin.com/jobs/search/?f_AL=true&keywords=quality%20engineer&location=California');
               chrome.tabs.create({ url: scanUrl, active: true }, tab => {
+                if (isIndeed) chrome.storage.local.set({ pja_indeed_scan: {
+                  status: 'launcher_opened', reason: '', url: scanUrl, tabId: tab && tab.id, ts: Date.now()
+                } });
+                let launched = false;
+                const launchScanner = () => {
+                  if (launched || !tab || tab.id == null) return;
+                  launched = true;
+                  chrome.tabs.onUpdated.removeListener(onUpd);
+                  setTimeout(() => {
+                    chrome.scripting.executeScript({
+                      target: { tabId: tab.id },
+                      func: (fast, source) => {
+                        if (source === 'indeed') {
+                          if (typeof window.__pjaStartIndeedScan !== 'function') return { ok: false, error: 'indeed_scanner_not_loaded' };
+                          try {
+                            Promise.resolve(window.__pjaStartIndeedScan({})).catch(e => {
+                              try { chrome.storage.local.set({ pja_indeed_scan: {
+                                status: 'failed', reason: 'start_error',
+                                error: String(e && e.message || e), url: location.href, ts: Date.now()
+                              } }); } catch (_) {}
+                            });
+                            return { ok: true, started: true };
+                          } catch (e) { return { ok: false, error: String(e && e.message || e) }; }
+                        }
+                        else if (source === 'glassdoor') { if (typeof window.__pjaStartGlassdoorScan === 'function') window.__pjaStartGlassdoorScan({}); return { ok: true, started: true }; }
+                        else { if (typeof window.__pjaStartScan === 'function') { window.__pjaStartScan({ fast }); return { ok: true, started: true }; } return { ok: false, error: 'scanner_not_loaded' }; }
+                      },
+                      args: [!!msg.fast, msg.source || ''],
+                    }).then(result => {
+                      const state = result && result[0] && result[0].result;
+                      if (isIndeed && state && state.ok === false) chrome.storage.local.set({ pja_indeed_scan: {
+                        status: 'failed', reason: 'launcher_error', error: state.error || 'unknown', url: scanUrl, tabId: tab.id, ts: Date.now() } });
+                    }).catch(e => { if (isIndeed) chrome.storage.local.set({ pja_indeed_scan: {
+                      status: 'failed', reason: 'launcher_execute_error', error: String(e && e.message || e), url: scanUrl, tabId: tab.id, ts: Date.now() } }); });
+                  }, 4500);
+                };
                 const onUpd = (tid, info) => {
                   if (tid === tab.id && info.status === 'complete') {
-                    chrome.tabs.onUpdated.removeListener(onUpd);
-                    setTimeout(() => {
-                      chrome.scripting.executeScript({
-                        target: { tabId: tab.id },
-                        func: (fast, source) => {
-                          if (source === 'indeed') { if (typeof window.__pjaStartIndeedScan === 'function') window.__pjaStartIndeedScan({}); }
-                          else if (source === 'glassdoor') { if (typeof window.__pjaStartGlassdoorScan === 'function') window.__pjaStartGlassdoorScan({}); }
-                          else { if (typeof window.__pjaStartScan === 'function') window.__pjaStartScan({ fast }); }
-                        },
-                        args: [!!msg.fast, msg.source || ''],
-                      }).catch(() => {});
-                    }, 4500);
+                    launchScanner();
                   }
                 };
                 chrome.tabs.onUpdated.addListener(onUpd);
+                setTimeout(launchScanner, 10000);
+                if (isIndeed) setTimeout(() => {
+                  chrome.storage.local.get('pja_indeed_scan', d => {
+                    const scan = d.pja_indeed_scan;
+                    if (scan && scan.status === 'launcher_opened' && scan.tabId === tab.id) {
+                      chrome.storage.local.set({ pja_indeed_scan: {
+                        ...scan, status: 'failed', reason: 'launcher_no_start', ts: Date.now()
+                      } });
+                    }
+                  });
+                }, 20000);
               });
             } else if (msg.cmd === 'closeJobTabs') {
               // Close stray LinkedIn/ATS tabs left by prior runs so a fresh EA tab has the tab's
@@ -3293,7 +3585,11 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
         'process integration','cmp','lithography','test engineer','quality','process'];
 
       const candidates = jobs.filter(j => {
-        if (shortlist.some(s => s.id === j.id)) return false; // already scored
+        const prior = shortlist.find(s => s.id === j.id);
+        // Let a detail-rich repeat replace an earlier card-only placeholder, but never rescore
+        // an already hydrated record merely because a scan saw it again.
+        if (prior && prior.pipelineStatus !== 'needs_hydration' &&
+            !/^(missing|stale|needs_description)$/i.test(String(prior.descriptionStatus || ''))) return false;
         const txt = (j.title + ' ' + j.company + ' ' + j.description).toLowerCase();
         return SKILL_KW.some(k => txt.includes(k));
       });
@@ -3306,9 +3602,17 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
       await new Promise(res => {
         chrome.storage.local.get('pja_shortlist', latest => {
           const existing = latest.pja_shortlist || [];
-          const existingIds = new Set(existing.map(j => j.id));
-          const fresh = candidates.filter(j => !existingIds.has(j.id))
-            .map(j => ({ ...j, status: 'scoring', fitScore: null }));
+          const existingById = new Map(existing.map(j => [j.id, j]));
+          const fresh = candidates.filter(j => {
+            const prior = existingById.get(j.id);
+            return !prior || prior.pipelineStatus === 'needs_hydration' ||
+              /^(missing|stale|needs_description)$/i.test(String(prior.descriptionStatus || ''));
+          })
+            .map(j => {
+              const hydrated = !!String(j.description || '').trim() && !/^(missing|stale|needs_description)$/i.test(String(j.descriptionStatus || ''));
+              return { ...j, status: hydrated ? 'score_pending' : 'needs_hydration',
+                pipelineStatus: hydrated ? 'score_pending' : 'needs_hydration', fitScore: null };
+            });
           toScore = fresh; // expose to outer scope
           if (fresh.length === 0) { res(); return; }
           // Deduplicate the full list by id (last write wins) before saving
@@ -3323,7 +3627,8 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
       // COLLECT-ONLY (FAST coverage scan): placeholders are written above; skip the slow per-batch
       // scoring here. The unscored entries (fitScore:null) are scored later in one concurrent pass
       // via dev-server /score-shortlist. Returns immediately so the scan can keep paginating.
-      if (msg.collectOnly) { sendResponse({ success: true, added: toScore.length, collected: true }); return; }
+      if (msg.collectOnly) { sendResponse({ success: true, added: toScore.length, collected: true,
+        needsHydration: toScore.filter(j => j.pipelineStatus === 'needs_hydration').length }); return; }
 
       // BUG5 fix: DEV_MODE guard — non-dev path uses analyzeJob (Nano/Claude/template).
       if (!DEV_MODE) {

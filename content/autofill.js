@@ -157,6 +157,9 @@ function pjaWorkdaySelectedChipText(el) {
     const chipSelector = '[data-automation-id="selectedItemList"], [data-automation-id="selectedItem"], [data-automation-id="promptOption"]';
     const clean = text => String(text || '').replace(/\s+/g, ' ').trim();
     const readChip = root => clean(root?.querySelector?.(chipSelector)?.textContent || '');
+    const readCommittedAnchor = root => Array.from(root?.querySelectorAll?.('a, [data-automation-id="selectedItem"], [data-automation-id="promptOption"]') || [])
+      .map(a => clean(a.textContent || ''))
+      .find(txt => typeof pjaWorkdayReferralCommittedText === 'function' && pjaWorkdayReferralCommittedText(txt)) || '';
     const roots = [];
     const pushRoot = root => { if (root && !roots.includes(root)) roots.push(root); };
     pushRoot(el?.closest?.('[data-uxi-widget-type="multiselect"], [data-automation-id^="formField"], [data-automation-id^="question"]'));
@@ -179,6 +182,10 @@ function pjaWorkdaySelectedChipText(el) {
       for (const root of pageRoots) {
         const text = readChip(root);
         if (text) return text;
+        if (isReferral) {
+          const anchorText = readCommittedAnchor(root);
+          if (anchorText) return anchorText;
+        }
       }
     }
   } catch (_) {

@@ -32,6 +32,7 @@ module.exports = (t) => {
   t.eq(li.listingUrl, li.applyUrl, 'browser-import: LinkedIn listing URL canonical');
   t.eq(li.description, 'Wafer inspection, defect detection, and SPC.', 'browser-import: HTML description cleaned');
   t.eq(li.descriptionStatus, 'full', 'browser-import: populated description marked full');
+  t.eq(li.pipelineStatus, 'score_pending', 'browser-import: hydrated browser job enters score_pending');
   t.eq(li.query, 'wafer inspection engineer', 'browser-import: query retained');
   t.eq(li.discoveredAt, 12345, 'browser-import: scrape time becomes discoveredAt');
   t.eq(li.sourceRefs.length, 1, 'browser-import: one provenance source ref');
@@ -64,6 +65,7 @@ module.exports = (t) => {
   t.eq(indeed.listingUrl, 'https://www.indeed.com/viewjob?jk=abc-123', 'browser-import: Indeed canonical listing URL');
   t.eq(indeed.applyUrl, indeed.listingUrl, 'browser-import: Indeed Apply opens listing');
   t.eq(indeed.descriptionStatus, 'missing', 'browser-import: empty Indeed description marked missing');
+  t.eq(indeed.pipelineStatus, 'needs_hydration', 'browser-import: card-only browser lead must hydrate before scoring');
   t.eq(indeed.indeedApply, true, 'browser-import: compatibility Indeed flag retained');
 
   const indeedExternal = normalizeBrowserJob({

@@ -6,6 +6,22 @@ const ROOT = path.resolve(__dirname, '../..');
 
 module.exports = async (t) => {
   const source = fs.readFileSync(path.join(ROOT, 'background.js'), 'utf8');
+  t.ok(source.includes("'content/apply-router.js'") &&
+    source.includes('const PJA_RANKED_LAUNCHERS = {') &&
+    source.includes('async function pjaDispatchRankedJob(job, master)') &&
+    source.includes('self.PJAApplyRouter.resolveStrategy(job, job.applyUrl)') &&
+    source.includes('const tabId = await pjaDispatchRankedJob(job, master);'),
+  'ranked dispatch: one executable router selects and launches every channel/ATS strategy');
+  t.ok(source.includes('pja_application_ledger') &&
+    source.includes('blockedRecords') &&
+    source.includes('blockedHosts') &&
+    source.includes('retryBlocked === true') &&
+    source.includes('retryBlockedHosts') &&
+    source.includes('!retryBlockedHosts.has') &&
+    source.includes('buildApplyPlan') &&
+    source.includes('planningDrops') &&
+    source.includes('workday_duplicate_record'),
+  'ranked dispatch: known manual blockers and Workday blocked tenants from the ledger are suppressed from future one-click apply sets by default');
   t.ok(source.includes('function pjaRankedTabMatchesJob(tab, job)') &&
     source.includes('tabUrl.hostname !== applyUrl.hostname') &&
     source.includes('Same-host Workday tabs are valid') &&
@@ -41,17 +57,46 @@ module.exports = async (t) => {
     source.includes('ranked = await pjaReconcileRankedLedger(ranked'),
   'ranked dispatch: terminal ledger events are replayed into pja_ranked_apply if master advance was missed');
 
+  t.ok(source.includes('PJA_LAST_COMPLETED_APPLY_RUN_KEY') &&
+    source.includes('pja_last_completed_apply_run') &&
+    source.includes('async function pjaPersistCompletedRankedRun(master') &&
+    source.includes('pjaCompactCompletedRankedRun(master') &&
+    source.includes('await pjaPersistCompletedRankedRun(master'),
+  'ranked dispatch: terminal runs persist a compact completed-run snapshot for status/report export after queue cleanup');
+
+  t.ok(source.includes('function pjaRankedStopsOnTarget(master)') &&
+    source.includes("master.runMode === 'all_above_score'") &&
+    source.includes('pjaRankedStopsOnTarget(master) && master.remaining != null') &&
+    source.includes('pjaRankedStopsOnTarget(master) && audit.counts.confirmed >= dailyTarget'),
+  'ranked dispatch: all-above-score runs do not stop on the target-confirmed counter');
+
+  t.ok(source.includes('async function pjaCloseRankedTab(tabId)') &&
+    source.includes('const result = { tabId: tabId == null ? null : tabId, closed: false }') &&
+    source.includes('master.tabCleanup = await pjaCloseRankedTab(tabToClose)') &&
+    source.includes('master.lastTabCleanup = await pjaCloseRankedTab(tabToClose)'),
+  'ranked dispatch: tab closure returns cleanup diagnostics and is recorded on ranked runs');
+
   t.ok(source.includes("event.reason || 'ready_to_submit_review'") &&
     source.includes("!/^(submitting|pending|queued|started|in_progress)$/.test(e.status)") &&
     source.includes("/^(submitting|pending|queued|started|in_progress)$/.test(event.status) && !/ready_to_submit/i.test(event.reason || '')") &&
     source.includes("ready_to_submit/i.test(event.reason || '')"),
   'ranked dispatch: stop-before-submit ready_to_submit_review is terminal, not an ignored pending event');
 
+  t.ok(source.includes('function pjaRankedTenantBlockedHosts(master)') &&
+    source.includes("workday_duplicate_record_same_tenant") &&
+    source.includes("workday_captcha_same_tenant") &&
+    source.includes("duplicateBlockedHosts.has(pjaRankedApplyHostname(master.jobs[master.currentIndex].applyUrl))"),
+  'ranked dispatch: Workday tenant-level duplicate/captcha blockers skip remaining jobs on the same tenant');
+
   t.ok(source.includes('async function pjaRecoverRankedLastFailure(master)') &&
     source.includes("recoveredReason = isSuccessFactors && reason === 'no_submit_btn' ? 'no_apply_path' : reason") &&
     source.includes('await pjaAppendApplicationEvent(event)') &&
     source.includes('master = await pjaRecoverRankedLastFailure(master)'),
   'ranked dispatch: resume recovers SuccessFactors landing-page no-submit failures as terminal no_apply_path events');
+
+  t.ok(source.includes("PJAIdb.getAll(), 15000, 'PJAIdb.getAll'") &&
+    source.includes("chrome.storage applied records"),
+  'ranked dispatch: apply-set corpus read is bounded so IDB stalls do not wedge /apply-run');
 
   t.ok(source.includes("msg.type === 'REQUEST_APPLY_HELP'") &&
     source.includes('chrome.tabs.captureVisibleTab') &&
@@ -212,20 +257,29 @@ module.exports = async (t) => {
     source.includes('if (rankedOwnsQueueJob)'),
   'apply watchdog: runId alone does not make a manual external queue ranked-owned');
 
-  t.ok(source.includes("chrome.storage.local.get(['pja_ranked_apply', 'pja_last_apply_failure']") &&
+  t.ok(source.includes("chrome.storage.local.get(['pja_ranked_apply', 'pja_ext_current', 'pja_last_apply_failure', 'pja_dbg']") &&
     source.includes('const inFlightTab = ranked?.inFlightTabId') &&
-    source.includes('inspectTabs.push(inFlightTab)') &&
+    source.includes('currentJob: currentJob ?') &&
+    source.includes('selectedScore: scoreTab(tab)') &&
+    source.includes('recentDebug: (st.pja_dbg || []).slice(-30)') &&
     source.includes('totalJobs: ranked.jobs && ranked.jobs.length') &&
     source.includes('lastFailure: st.pja_last_apply_failure') &&
     source.includes('const slimResults = rows =>') &&
     source.includes('confirmed: slimResults(ranked.results.confirmed)'),
-  'ranked dispatch: inspectActiveApply returns sanitized ranked-run counts, result buckets, and last failure');
+  'ranked dispatch: inspectActiveApply targets the ranked active tab and returns sanitized run diagnostics');
 
   const devSource = fs.readFileSync(path.join(ROOT, 'dev-server.js'), 'utf8');
   t.ok(devSource.includes("req.url === '/resume-apply'") &&
+    devSource.includes("req.url === '/resume-apply-run'") &&
     devSource.includes("wsAsk('resumeRankedApply'") &&
     devSource.includes('resumeRankedApplyReply'),
   'dev server: /resume-apply endpoint triggers ranked apply resume command');
+
+  t.ok(devSource.includes("req.url === '/recover-active-apply'") &&
+    devSource.includes("wsAsk('inspectActiveApply'") &&
+    devSource.includes("postLocalJson('/apply-help'") &&
+    devSource.includes('structured recovery plan'),
+  'dev server: /recover-active-apply inspects active apply tab and asks AI for structured recovery');
 
   t.ok(devSource.includes("req.url === '/close-duplicate-apply-tabs'") &&
     devSource.includes("wsAsk('closeDuplicateActiveApplyTabs'") &&

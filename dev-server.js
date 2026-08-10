@@ -104,7 +104,7 @@ function runClaude(userPrompt) {
 
 const CORS = {
   'Access-Control-Allow-Origin':  '*',
-  'Access-Control-Allow-Methods': 'POST, OPTIONS',
+  'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
   'Access-Control-Allow-Headers': 'Content-Type',
   'Content-Type': 'application/json'
 };
@@ -182,6 +182,13 @@ function getStorageFromExtension(keys, timeoutMs = 4000) {
   });
 }
 
+async function getBrowserShortlistFromExtension(timeoutMs = 20000) {
+  const data = await wsAsk('getBrowserShortlist', {}, 'browserShortlistReply', timeoutMs);
+  if (data && Array.isArray(data.jobs)) return data.jobs;
+  const fallback = await getStorageFromExtension(['pja_shortlist'], timeoutMs);
+  return Array.isArray(fallback.pja_shortlist) ? fallback.pja_shortlist : [];
+}
+
 // Push storage to the extension (returns count of clients written).
 function setStorageToExtension(obj) {
   let pushed = 0;
@@ -227,6 +234,433 @@ function applicationAuditFromStorage(storage, options = {}) {
     occurredAt: row.updatedAt || row.confirmedAt || row.appliedAt || row.ts,
   })));
   return { ledger, audit: Ledger.auditLedger(ledger, options) };
+}
+
+function safeReportText(value) {
+  return String(value == null ? '' : value)
+    .replace(/\r?\n+/g, ' ')
+    .replace(/[|`]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 500);
+}
+
+function safeReportId(value) {
+  return String(value || '')
+    .replace(/[^a-zA-Z0-9_.-]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 80) || `run-${Date.now()}`;
+}
+
+function compactReportJob(job, fallbackStatus) {
+  const row = job && typeof job === 'object' ? job : {};
+  return {
+    status: safeReportText(row.status || fallbackStatus || ''),
+    company: safeReportText(row.company || ''),
+    title: safeReportText(row.title || ''),
+    channel: safeReportText(row.channel || 'external'),
+    ats: safeReportText(row.ats || row.strategy || row.handler || ''),
+    reason: safeReportText(row.reason || row.skipReason || row.error || ''),
+    fitScore: row.fitScore == null || row.fitScore === '' ? '' : safeReportText(row.fitScore),
+    url: safeReportText(row.applyUrl || row.url || row.listingUrl || ''),
+  };
+}
+
+function groupedReportRows(rows, keyFn) {
+  const groups = new Map();
+  for (const row of rows || []) {
+    const key = safeReportText(keyFn(row) || 'unknown') || 'unknown';
+    const g = groups.get(key) || { key, count: 0, example: row };
+    g.count++;
+    if (!g.example || !g.example.company && row.company) g.example = row;
+    groups.set(key, g);
+  }
+  return Array.from(groups.values()).sort((a, b) => b.count - a.count || a.key.localeCompare(b.key));
+}
+
+function developerRecommendation(row = {}) {
+  const reason = String(row.reason || row.status || '').toLowerCase();
+  const ats = String(row.ats || '').toLowerCase();
+  const channel = String(row.channel || '').toLowerCase();
+  if (/workday_duplicate_record/.test(reason)) {
+    return 'Manual/profile-state blocker: inspect Workday existing-draft subrecords; suppress same tenant until duplicate-record recovery is implemented.';
+  }
+  if (/workday_captcha|captcha/.test(reason) && ats === 'workday') {
+    return 'External auth/anti-bot blocker: keep tenant suppressed; retry only after manual captcha/account reset.';
+  }
+  if (/captcha/.test(reason) && (channel === 'indeed_apply' || ats === 'indeed')) {
+    return 'External anti-bot blocker: pause Indeed apply path; do not blind retry without human/browser-state reset.';
+  }
+  if (/captcha|checkpoint|daily_limit/.test(reason)) {
+    return 'External anti-bot/account-limit blocker: record and pause that channel; retry only after account state clears.';
+  }
+  if (/ranked_watchdog_timeout|stuck_watchdog|watchdog_timeout|submit_unclear|submit_unconfirmed/.test(reason)) {
+    return 'Automation/confirmation gap: inspect page/debug tail; improve submit success detection or form-specific recovery.';
+  }
+  if (/missing_required|wd_selectinput_blocked|no_submit_after_spa/.test(reason)) {
+    return 'Form-fill gap: inspect missing fields/options; add answer-bank mapping or ATS-specific control handling.';
+  }
+  if (/email_verification_required/.test(reason)) {
+    return 'Verification flow gap: inspect email-code recovery and post-code submit/confirmation handling.';
+  }
+  if (/no_apply_path|no_apply_btn|apply_btn_no_form|posting_not_found/.test(reason)) {
+    return 'Discovery/apply-path gap or stale posting: improve apply URL resolution and preflight classification.';
+  }
+  if (/missing_description_evidence|rescore_missing_description|stale_browser_listing|aggregator_without_apply_destination/.test(reason)) {
+    return 'Sourcing/hydration gap: refresh browser discovery, resolve the real apply URL, and hydrate full descriptions before apply planning.';
+  }
+  if (/weak_match_evidence|too_many_match_gaps|hard_match_conflict|low_score_confidence|below_threshold|candidate_fingerprint_mismatch|unscored/.test(reason)) {
+    return 'Scoring/ranking gate: rescore against the current resume/JD evidence or leave out as unsuitable for autonomous apply.';
+  }
+  if (/prior_blocked_host|prior_blocked_record|deferred_retry_disabled|deferred_max_attempts/.test(reason)) {
+    return 'Suppression/retry gate: expected safety drop; use targeted retry only after the prior blocker is manually repaired.';
+  }
+  if (/unsupported_|missing_apply_url|ats_not_allowed|eligible_not_selected/.test(reason)) {
+    return 'Planner routing gate: add/repair an apply handler or adjust run caps/allow-lists if this job should be attempted.';
+  }
+  if (/needs_login|google_sso_only|account_locked|wrong_password/.test(reason)) {
+    return 'Authentication blocker: require manual account/session repair before retry.';
+  }
+  return 'Inspect grouped rows, ledger tail, and debug tail; classify as code fix vs external/manual blocker.';
+}
+
+function summarizeBlockedFromLedger(storage = {}) {
+  const events = storage.pja_application_ledger && storage.pja_application_ledger.events
+    ? Object.values(storage.pja_application_ledger.events) : [];
+  const manualBlockerRe = /captcha|daily_limit|checkpoint|email_verification_required|workday_duplicate_record|workday_account_locked|workday_account_exists_wrong_password|workday_captcha|google_sso_only|ready_to_submit_review|chatbot_apply_manual|unsupported_|no_apply_path/i;
+  const workdayTenantRe = /workday_duplicate_record|workday_captcha|workday_account_locked/i;
+  const blockedRows = events
+    .filter(e => e && /^(failed|skipped|needs_manual|blocked)$/i.test(String(e.status || '')) &&
+      manualBlockerRe.test(String(e.reason || e.status || '')))
+    .map(e => compactReportJob(e, e.status || 'blocked'));
+  const hostOf = url => { try { return new URL(String(url || '')).hostname.toLowerCase(); } catch (_) { return ''; } };
+  const hostRows = events
+    .filter(e => e && workdayTenantRe.test(String(e.reason || e.status || '')))
+    .map(e => ({ host: hostOf(e.applyUrl || e.url), reason: safeReportText(e.reason || e.status || ''), row: compactReportJob(e, e.status || 'blocked') }))
+    .filter(e => e.host);
+  const hosts = groupedReportRows(hostRows, e => e.host).map(g => ({
+    host: g.key,
+    count: g.count,
+    reason: g.example && g.example.reason || '',
+    example: g.example && g.example.row ? {
+      company: g.example.row.company,
+      title: g.example.row.title,
+    } : null,
+  }));
+  const reasons = groupedReportRows(blockedRows, row => row.reason || row.status).map(g => ({
+    reason: g.key,
+    count: g.count,
+    recommendation: developerRecommendation(g.example || {}),
+  }));
+  return { records: blockedRows.length, hosts, reasons };
+}
+
+function renderApplyRunReport(storage, options = {}) {
+  const activeRanked = storage && storage.pja_ranked_apply || null;
+  const completedRanked = storage && storage.pja_last_completed_apply_run || null;
+  const ranked = activeRanked || completedRanked || null;
+  const ledger = storage && storage.pja_application_ledger && storage.pja_application_ledger.events
+    ? Object.values(storage.pja_application_ledger.events) : [];
+  const appliedLog = Array.isArray(storage && storage.pja_applied_log) ? storage.pja_applied_log : [];
+  const hasAnyState = !!(ranked || ledger.length || appliedLog.length ||
+    storage && (storage.pja_last_apply_failure || Array.isArray(storage.pja_dbg) && storage.pja_dbg.length));
+  const runId = safeReportId(options.runId || ranked && ranked.runId || (ledger.find(e => e && e.runId) || {}).runId || '');
+  const generatedAt = new Date().toISOString();
+  const results = ranked && ranked.results || {};
+  const buckets = [
+    ['confirmed', results.confirmed || []],
+    ['failed', results.failed || []],
+    ['skipped', results.skipped || []],
+    ['unverified', results.unverified || []],
+  ];
+  const allRows = [];
+  for (const [status, rows] of buckets) {
+    for (const row of Array.isArray(rows) ? rows : []) allRows.push(compactReportJob(row, status));
+  }
+  const ledgerRows = ledger
+    .filter(e => !ranked || !ranked.runId || e.runId === ranked.runId || e.runId === options.runId)
+    .slice(-80)
+    .map(e => compactReportJob(e, e.status || 'ledger'));
+  const appliedRows = appliedLog
+    .filter(e => !ranked || !ranked.runId || e.runId === ranked.runId || e.runId === options.runId)
+    .slice(-40)
+    .map(e => compactReportJob(e, e.status || (e.success ? 'confirmed' : 'applied_log')));
+  const debugTail = Array.isArray(storage && storage.pja_dbg) ? storage.pja_dbg.slice(-30).map(safeReportText) : [];
+  const lastFailure = compactReportJob(storage && storage.pja_last_apply_failure, 'last_failure');
+  const count = name => Array.isArray(results[name]) ? results[name].length
+    : ranked && ranked.counts && ranked.counts[name] != null ? Number(ranked.counts[name]) || 0
+    : ranked && ranked[name] != null ? Number(ranked[name]) || 0
+    : 0;
+  const planningDropsRaw = ranked && ranked.planningDrops && Array.isArray(ranked.planningDrops.examples)
+    ? ranked.planningDrops.examples : [];
+  const planningDropRows = planningDropsRaw.map(row => compactReportJob(row, 'planning_drop'));
+  const problemRows = allRows.filter(row => /^(failed|skipped|unverified)$/i.test(row.status));
+  const lines = [];
+  lines.push(`# Apply run report — ${runId}`);
+  lines.push('');
+  lines.push(`Generated: ${generatedAt}`);
+  lines.push('');
+  lines.push('This report intentionally omits candidate profile values, resume contents, answers, passwords, email codes, and screenshots. It is for developer debugging of routing, application, and failure/drop behavior.');
+  lines.push('');
+  lines.push('## Summary');
+  lines.push('');
+  lines.push(`- Run status: ${safeReportText(ranked && ranked.status || 'unknown')}`);
+  lines.push(`- State source: ${activeRanked ? 'active ranked run' : completedRanked ? 'last completed ranked run' : 'none'}`);
+  if (ranked && ranked.runMode) lines.push(`- Run mode: ${safeReportText(ranked.runMode)}`);
+  lines.push(`- Current index: ${ranked && ranked.currentIndex != null ? ranked.currentIndex : 'unknown'} / ${ranked && Array.isArray(ranked.jobs) ? ranked.jobs.length : 'unknown'}`);
+  lines.push(`- Confirmed: ${count('confirmed')}`);
+  lines.push(`- Failed: ${count('failed')}`);
+  lines.push(`- Skipped/dropped: ${count('skipped')}`);
+  lines.push(`- Unverified: ${count('unverified')}`);
+  if (ranked && ranked.tabCleanup) {
+    lines.push(`- Last tab cleanup: ${ranked.tabCleanup.closed ? 'closed' : 'not closed'}${ranked.tabCleanup.error ? ' (' + safeReportText(ranked.tabCleanup.error) + ')' : ''}`);
+  }
+  if (ranked && ranked.planningDrops) {
+    lines.push(`- Planning drops before launch: ${ranked.planningDrops.total != null ? ranked.planningDrops.total : planningDropRows.length}`);
+  }
+  if (!hasAnyState) {
+    lines.push('- State warning: no active ranked run, ledger, applied log, last failure, or debug tail was available from extension storage.');
+  }
+  if (lastFailure.company || lastFailure.title || lastFailure.reason) {
+    lines.push(`- Last failure: ${lastFailure.company} — ${lastFailure.title} (${lastFailure.reason || 'no reason'})`);
+  }
+  lines.push('');
+  if (problemRows.length) {
+    lines.push('## Failure/drop groups');
+    lines.push('');
+    lines.push('### By reason');
+    lines.push('');
+    lines.push('| Reason | Count | Example | Channel | ATS |');
+    lines.push('| --- | ---: | --- | --- | --- |');
+    for (const g of groupedReportRows(problemRows, row => row.reason || row.status)) {
+      const ex = g.example || {};
+      lines.push(`| ${g.key} | ${g.count} | ${safeReportText([ex.company, ex.title].filter(Boolean).join(' — '))} | ${safeReportText(ex.channel)} | ${safeReportText(ex.ats)} |`);
+    }
+    lines.push('');
+    lines.push('### Recommended developer focus');
+    lines.push('');
+    lines.push('| Reason | Recommendation |');
+    lines.push('| --- | --- |');
+    for (const g of groupedReportRows(problemRows, row => row.reason || row.status)) {
+      lines.push(`| ${g.key} | ${safeReportText(developerRecommendation(g.example || {}))} |`);
+    }
+    lines.push('');
+    lines.push('### By ATS');
+    lines.push('');
+    lines.push('| ATS | Count | Example reason | Example |');
+    lines.push('| --- | ---: | --- | --- |');
+    for (const g of groupedReportRows(problemRows, row => row.ats || row.channel || row.status)) {
+      const ex = g.example || {};
+      lines.push(`| ${g.key} | ${g.count} | ${safeReportText(ex.reason || ex.status)} | ${safeReportText([ex.company, ex.title].filter(Boolean).join(' — '))} |`);
+    }
+    lines.push('');
+    lines.push('### By channel');
+    lines.push('');
+    lines.push('| Channel | Count | Example reason | Example |');
+    lines.push('| --- | ---: | --- | --- |');
+    for (const g of groupedReportRows(problemRows, row => row.channel || row.status)) {
+      const ex = g.example || {};
+      lines.push(`| ${g.key} | ${g.count} | ${safeReportText(ex.reason || ex.status)} | ${safeReportText([ex.company, ex.title].filter(Boolean).join(' — '))} |`);
+    }
+    lines.push('');
+  }
+  if (ranked && ranked.planningDrops) {
+    lines.push('## Planning drops before launch');
+    lines.push('');
+    lines.push('These jobs were present in the corpus but were not placed into the apply queue. They are planning/safety drops, not browser execution failures.');
+    lines.push('');
+    const dropCounts = ranked.planningDrops.counts && typeof ranked.planningDrops.counts === 'object' ? ranked.planningDrops.counts : {};
+    lines.push('### By reason');
+    lines.push('');
+    lines.push('| Reason | Count | Recommendation |');
+    lines.push('| --- | ---: | --- |');
+    for (const [reason, value] of Object.entries(dropCounts).sort((a, b) => Number(b[1]) - Number(a[1]) || a[0].localeCompare(b[0]))) {
+      lines.push(`| ${safeReportText(reason)} | ${Number(value) || 0} | ${safeReportText(developerRecommendation({ reason }))} |`);
+    }
+    lines.push('');
+    if (planningDropRows.length) {
+      lines.push('### Examples');
+      lines.push('');
+      lines.push('| Reason | Company | Title | Channel | ATS | Fit | URL |');
+      lines.push('| --- | --- | --- | --- | --- | --- | --- |');
+      for (const row of planningDropRows) {
+        lines.push(`| ${row.reason} | ${row.company} | ${row.title} | ${row.channel} | ${row.ats} | ${row.fitScore} | ${row.url} |`);
+      }
+      lines.push('');
+    }
+  }
+  if (allRows.length) {
+    lines.push('## Ranked-run outcomes');
+    lines.push('');
+    lines.push('| Status | Company | Title | Channel | ATS | Fit | Reason | URL |');
+    lines.push('| --- | --- | --- | --- | --- | --- | --- | --- |');
+    for (const row of allRows) {
+      lines.push(`| ${row.status} | ${row.company} | ${row.title} | ${row.channel} | ${row.ats} | ${row.fitScore} | ${row.reason} | ${row.url} |`);
+    }
+    lines.push('');
+  }
+  if (ledgerRows.length) {
+    lines.push('## Ledger tail');
+    lines.push('');
+    lines.push('| Status | Company | Title | Channel | Reason | URL |');
+    lines.push('| --- | --- | --- | --- | --- | --- |');
+    for (const row of ledgerRows) {
+      lines.push(`| ${row.status} | ${row.company} | ${row.title} | ${row.channel} | ${row.reason} | ${row.url} |`);
+    }
+    lines.push('');
+  }
+  if (appliedRows.length) {
+    lines.push('## Applied-log tail');
+    lines.push('');
+    lines.push('| Status | Company | Title | Channel | Reason | URL |');
+    lines.push('| --- | --- | --- | --- | --- | --- |');
+    for (const row of appliedRows) {
+      lines.push(`| ${row.status} | ${row.company} | ${row.title} | ${row.channel} | ${row.reason} | ${row.url} |`);
+    }
+    lines.push('');
+  }
+  if (debugTail.length) {
+    lines.push('## Debug tail');
+    lines.push('');
+    for (const row of debugTail) lines.push(`- ${row}`);
+    lines.push('');
+  }
+  return { runId, markdown: lines.join('\n') };
+}
+
+function writeApplyRunReport(storage, options = {}) {
+  const report = renderApplyRunReport(storage || {}, options);
+  const reportsDir = path.join(__dirname, 'reports');
+  fs.mkdirSync(reportsDir, { recursive: true });
+  const filename = `apply-run-${report.runId}.md`;
+  const filePath = path.join(reportsDir, filename);
+  fs.writeFileSync(filePath, report.markdown, 'utf8');
+  return { runId: report.runId, file: filePath, bytes: Buffer.byteLength(report.markdown) };
+}
+
+function writeApplyPlanningReport(planningDrops, options = {}) {
+  if (!planningDrops) return null;
+  const runId = safeReportId(options.runId || `plan-${Date.now()}`);
+  return writeApplyRunReport({
+    pja_ranked_apply: {
+      runId,
+      status: options.status || 'planning',
+      currentIndex: 0,
+      jobs: Array.isArray(options.jobs) ? options.jobs : [],
+      results: { confirmed: [], failed: [], skipped: [], unverified: [] },
+      planningDrops,
+    },
+  }, { runId });
+}
+
+function appendPlanningDrop(planningDrops, job, reason, dropLimit = 200) {
+  if (!planningDrops) planningDrops = { total: 0, counts: {}, examples: [] };
+  if (!planningDrops.counts || typeof planningDrops.counts !== 'object') planningDrops.counts = {};
+  if (!Array.isArray(planningDrops.examples)) planningDrops.examples = [];
+  planningDrops.total = (Number(planningDrops.total) || 0) + 1;
+  planningDrops.counts[reason] = (planningDrops.counts[reason] || 0) + 1;
+  if (planningDrops.examples.length < dropLimit) {
+    planningDrops.examples.push({
+      id: safeReportText(job && job.id || ''),
+      company: safeReportText(job && job.company || ''),
+      title: safeReportText(job && job.title || ''),
+      channel: safeReportText(job && job.channel || 'external'),
+      ats: safeReportText(job && (job.ats || job.strategy) || ''),
+      strategy: safeReportText(job && job.strategy || ''),
+      fitScore: job && job.fitScore != null && Number.isFinite(Number(job.fitScore)) ? Number(job.fitScore) : null,
+      status: safeReportText(job && job.status || 'sourced'),
+      reason: safeReportText(reason),
+      applyUrl: safeReportText(job && job.applyUrl || ''),
+      descriptionStatus: safeReportText(job && job.descriptionStatus || ''),
+    });
+  }
+  return planningDrops;
+}
+
+async function oneClickPreflight(options = {}) {
+  const status = await refreshRuntimeCandidateProfile();
+  const storage = wsClients.size ? await getStorageFromExtension(['pja_ranked_apply'], 5000) : {};
+  const active = storage && storage.pja_ranked_apply && /^(applying|paused_for_patch|paused_for_fix)$/i
+    .test(String(storage.pja_ranked_apply.status || ''));
+  const problems = [];
+  if (wsClients.size < 1) problems.push('extension_not_connected');
+  if (options.requireCandidateProfile !== false && !status.configured) problems.push('candidate_profile_not_configured');
+  if (active && options.force !== true) problems.push('active_ranked_apply_run');
+  return {
+    ok: problems.length === 0,
+    problems,
+    clients: wsClients.size,
+    candidate: status,
+    activeRun: active ? {
+      runId: storage.pja_ranked_apply.runId || null,
+      status: storage.pja_ranked_apply.status || '',
+      currentIndex: storage.pja_ranked_apply.currentIndex,
+      total: Array.isArray(storage.pja_ranked_apply.jobs) ? storage.pja_ranked_apply.jobs.length : null,
+    } : null,
+  };
+}
+
+function summarizeApplyStatus(storage = {}) {
+  const activeRanked = storage.pja_ranked_apply || null;
+  const completedRanked = storage.pja_last_completed_apply_run || null;
+  const ranked = activeRanked || completedRanked || null;
+  const results = ranked && ranked.results || {};
+  const count = key => Array.isArray(results[key]) ? results[key].length
+    : ranked && ranked.counts && ranked.counts[key] != null ? Number(ranked.counts[key]) || 0
+    : 0;
+  const currentJob = ranked && Array.isArray(ranked.jobs)
+    ? ranked.jobs[ranked.inFlightIndex != null ? ranked.inFlightIndex : ranked.currentIndex]
+    : null;
+  const lastFailure = storage.pja_last_apply_failure || null;
+  const active = !!(activeRanked && /^(applying|paused_for_patch|paused_for_fix)$/i.test(String(activeRanked.status || '')));
+  return {
+    ok: true,
+    clients: wsClients.size,
+    active,
+    run: ranked ? {
+      runId: ranked.runId || null,
+      status: ranked.status || '',
+      active,
+      runMode: ranked.runMode || (ranked.applyAllAboveScore ? 'all_above_score' : 'target_confirmed'),
+      currentIndex: ranked.currentIndex,
+      inFlightIndex: ranked.inFlightIndex,
+      total: Array.isArray(ranked.jobs) ? ranked.jobs.length : 0,
+      targetConfirmed: ranked.targetConfirmed != null ? ranked.targetConfirmed : null,
+      remaining: ranked.remaining != null ? ranked.remaining : null,
+      confirmed: count('confirmed'),
+      failed: count('failed'),
+      skipped: count('skipped'),
+      unverified: count('unverified'),
+      currentJob: currentJob ? {
+        company: safeReportText(currentJob.company || ''),
+        title: safeReportText(currentJob.title || ''),
+        channel: safeReportText(currentJob.channel || 'external'),
+        ats: safeReportText(currentJob.ats || currentJob.strategy || ''),
+      } : null,
+    } : null,
+    lastCompletedRun: completedRanked ? {
+      runId: completedRanked.runId || null,
+      status: completedRanked.status || '',
+      finishedAt: completedRanked.finishedAt || null,
+    } : null,
+    blocked: summarizeBlockedFromLedger(storage),
+    lastFailure: lastFailure ? {
+      company: safeReportText(lastFailure.company || ''),
+      title: safeReportText(lastFailure.title || ''),
+      reason: safeReportText(lastFailure.reason || ''),
+      ats: safeReportText(lastFailure.ats || ''),
+    } : null,
+  };
+}
+
+function isTerminalApplyStatus(status) {
+  return /^(done|exhausted|day_changed|aborted|cancelled|failed)$/i.test(String(status || ''));
+}
+
+function maybeAutoExportApplyReport(storage = {}) {
+  const ranked = storage.pja_ranked_apply || storage.pja_last_completed_apply_run || null;
+  if (!ranked || !ranked.runId || !isTerminalApplyStatus(ranked.status)) return null;
+  return writeApplyRunReport(storage, { runId: ranked.runId });
 }
 
 // Score one chunk (<=10) of jobs via the same prompt /batch-score uses.
@@ -337,6 +771,52 @@ async function handleRequest(req, res) {
     res.writeHead(200, CORS); res.end(JSON.stringify(status)); return;
   }
 
+  if (req.method === 'GET' && req.url === '/one-click-preflight') {
+    const preflight = await oneClickPreflight({});
+    res.writeHead(preflight.ok ? 200 : 409, CORS);
+    res.end(JSON.stringify(preflight));
+    return;
+  }
+
+  if (req.method === 'POST' && req.url === '/one-click-preflight') {
+    let body = '';
+    req.on('data', d => body += d);
+    req.on('end', async () => {
+      try {
+        const o = body ? JSON.parse(body) : {};
+        const preflight = await oneClickPreflight(o);
+        res.writeHead(preflight.ok ? 200 : 409, CORS);
+        res.end(JSON.stringify(preflight));
+      } catch (e) {
+        res.writeHead(500, CORS);
+        res.end(JSON.stringify({ ok: false, problems: ['preflight_error'], error: e.message }));
+      }
+    });
+    return;
+  }
+
+  if (req.method === 'GET' && req.url === '/apply-status') {
+    try {
+      const st = await getStorageFromExtension([
+        'pja_ranked_apply',
+        'pja_last_completed_apply_run',
+        'pja_application_ledger',
+        'pja_applied_log',
+        'pja_last_apply_failure',
+        'pja_dbg',
+      ], 8000);
+      const status = summarizeApplyStatus(st || {});
+      const autoReport = maybeAutoExportApplyReport(st || {});
+      if (autoReport) status.report = autoReport;
+      res.writeHead(200, CORS);
+      res.end(JSON.stringify(status));
+    } catch (e) {
+      res.writeHead(500, CORS);
+      res.end(JSON.stringify({ ok: false, error: e.message, clients: wsClients.size }));
+    }
+    return;
+  }
+
   if (req.method === 'GET' && req.url === '/health') {
     res.writeHead(200, CORS);
     res.end(JSON.stringify({ ok: true, engine: `${AI_ENGINE}-cli`, clients: wsClients.size }));
@@ -434,6 +914,104 @@ async function handleRequest(req, res) {
         res.writeHead(500, CORS); res.end(JSON.stringify({ ok: false, error: e.message }));
       }
     })();
+    return;
+  }
+
+  // ── /recover-active-apply: inspect the current ranked apply tab and ask the AI engine for a
+  // bounded, structured recovery plan. This does not execute actions directly; the extension's
+  // content script remains the executor and allowlist gate.
+  if (req.method === 'POST' && req.url === '/recover-active-apply') {
+    let body = '';
+    req.on('data', d => body += d);
+    req.on('end', async () => {
+      try {
+        const o = body ? JSON.parse(body) : {};
+        const inspect = await wsAsk('inspectActiveApply', {}, 'inspectActiveApplyReply', 12000);
+        const activeTab = (inspect.tabs || [])[0] || null;
+        const activeFrame = activeTab && Array.isArray(activeTab.frames)
+          ? activeTab.frames.find(f => f && f.url && /greenhouse\.io|lever\.co|ashbyhq\.com|myworkdayjobs|workday\.com|smartrecruiters\.com|indeed\.com/i.test(f.url)) || activeTab.frames[0]
+          : null;
+        const job = inspect.ranked && inspect.ranked.currentJob || {};
+        const snapshot = {
+          reason: o.reason || (inspect.lastFailure && inspect.lastFailure.reason) || 'stuck_wait',
+          company: o.company || job.company || (inspect.lastFailure && inspect.lastFailure.company) || '',
+          title: o.title || job.title || (inspect.lastFailure && inspect.lastFailure.title) || '',
+          ats: o.ats || job.ats || '',
+          applyUrl: o.applyUrl || job.applyUrl || (activeFrame && activeFrame.url) || '',
+          hostname: (() => { try { return new URL(o.applyUrl || job.applyUrl || activeFrame?.url || '').hostname; } catch (_) { return ''; } })(),
+          phase: o.phase || '',
+          stuckForMs: Number(o.stuckForMs || 0),
+          recoveryAttempt: Number(o.recoveryAttempt || 0),
+          previousRecovery: Array.isArray(o.previousRecovery) ? o.previousRecovery : [],
+          missingRequired: Array.isArray(o.missingRequired) ? o.missingRequired : (activeFrame && activeFrame.required || []).map(x => x.name || x.label || x.type || '').filter(Boolean),
+          visibleErrors: Array.isArray(o.visibleErrors) ? o.visibleErrors : (activeFrame && activeFrame.errors || []),
+          formSummary: o.formSummary || 'active apply page inspection requested by recovery endpoint',
+          stepLog: Array.isArray(o.stepLog) ? o.stepLog : (inspect.recentDebug || []),
+          domSummary: {
+            tabId: activeTab && activeTab.tabId,
+            url: activeFrame && activeFrame.url,
+            title: activeFrame && activeFrame.title,
+            controls: activeFrame && activeFrame.controls || [],
+            required: activeFrame && activeFrame.required || [],
+            radios: activeFrame && activeFrame.radios || [],
+            errors: activeFrame && activeFrame.errors || [],
+            textTail: activeFrame && activeFrame.textTail || '',
+            ranked: inspect.ranked || null,
+          },
+          screenshot: inspect.screenshot && inspect.screenshot.dataUrl ? inspect.screenshot : null,
+        };
+        const helpResp = await postLocalJson('/apply-help', snapshot, Number(o.timeoutMs) || 150000);
+        res.writeHead(200, CORS);
+        res.end(JSON.stringify({ success: true, inspect, recovery: helpResp, snapshot: summarizeFailureSnapshot(snapshot) }));
+      } catch (e) {
+        res.writeHead(500, CORS);
+        res.end(JSON.stringify({ success: false, error: e.message }));
+      }
+    });
+    return;
+  }
+
+  // Resume a paused/stale ranked application run through the service worker dispatcher. This is
+  // safer than manually opening the URL because it restores in-flight metadata consistently.
+  if (req.method === 'POST' && req.url === '/resume-apply-run') {
+    (async () => {
+      try {
+        const data = await wsAsk('resumeRankedApply', {}, 'resumeRankedApplyReply', 30000);
+        res.writeHead(data && data.ok ? 200 : 409, CORS);
+        res.end(JSON.stringify(data || { ok: false, error: 'empty response' }));
+      } catch (e) {
+        res.writeHead(500, CORS);
+        res.end(JSON.stringify({ ok: false, error: e.message }));
+      }
+    })();
+    return;
+  }
+
+  // ── /export-apply-report: write a sanitized developer-readable markdown artifact ──
+  // This is the durable file counterpart to the extension's volatile pja_ranked_apply /
+  // pja_application_ledger state. It deliberately excludes profile/resume/answer values.
+  if (req.method === 'POST' && req.url === '/export-apply-report') {
+    let body = '';
+    req.on('data', d => body += d);
+    req.on('end', async () => {
+      try {
+        const o = body ? JSON.parse(body) : {};
+        const st = await getStorageFromExtension([
+          'pja_ranked_apply',
+          'pja_last_completed_apply_run',
+          'pja_application_ledger',
+          'pja_applied_log',
+          'pja_last_apply_failure',
+          'pja_dbg',
+        ], Number(o.timeoutMs) || 10000);
+        const written = writeApplyRunReport(st || {}, { runId: o.runId });
+        res.writeHead(200, CORS);
+        res.end(JSON.stringify({ success: true, ...written }));
+      } catch (e) {
+        res.writeHead(500, CORS);
+        res.end(JSON.stringify({ success: false, error: e.message }));
+      }
+    });
     return;
   }
 
@@ -956,7 +1534,8 @@ ${(description || '').slice(0, 6000)}`;
 
         // Dedupe against already-applied: durable applied log (survives queue overwrites) +
         // pja_jobs + current queue results.
-        const st = await getStorageFromExtension(['pja_profile', 'pja_jobs', 'pja_ext_queue', 'pja_shortlist', 'pja_applied_log']);
+        const st = await getStorageFromExtension(['pja_profile', 'pja_jobs', 'pja_ext_queue', 'pja_applied_log']);
+        const browserJobs = await getBrowserShortlistFromExtension(30000);
         const { pjaCollectAppliedRecords } = require('./sourcing/dedupe');
         const applied = pjaCollectAppliedRecords(st);
 
@@ -1024,10 +1603,21 @@ ${(description || '').slice(0, 6000)}`;
     req.on('end', async () => {
       try {
         const o = body ? JSON.parse(body) : {};
+        if (o.preflight !== false) {
+          const preflight = await oneClickPreflight(o);
+          if (!preflight.ok) {
+            res.writeHead(409, CORS);
+            res.end(JSON.stringify({ success: false, stage: 'preflight', preflight,
+              error: 'one-click preflight failed: ' + preflight.problems.join(', ') }));
+            return;
+          }
+        }
+        const applyAllAboveScore = o.applyAllAboveScore === true ||
+          /^(all_above_score|allAboveScore|above_score)$/i.test(String(o.stopMode || ''));
         const targetConfirmed = o.targetConfirmed != null ? Math.max(1, Number(o.targetConfirmed) || 1)
-          : (o.dailyCap != null ? Math.max(1, Number(o.dailyCap) || 1) : 20);
+          : (o.dailyCap != null && !applyAllAboveScore ? Math.max(1, Number(o.dailyCap) || 1) : 20);
         const sourceTarget = o.sourceTarget != null ? Math.max(1, Number(o.sourceTarget) || 1)
-          : Math.max(120, targetConfirmed * 8);
+          : (applyAllAboveScore ? 300 : Math.max(120, targetConfirmed * 8));
         const sourceBody = {
           target: sourceTarget,
           write: o.sourceWrite !== false,
@@ -1037,11 +1627,14 @@ ${(description || '').slice(0, 6000)}`;
         }
         if (o.maxBrowserAgeMs != null) sourceBody.maxBrowserAgeMs = Number(o.maxBrowserAgeMs);
         const applyBody = Object.assign({}, o, {
+          applyAllAboveScore,
+          stopMode: applyAllAboveScore ? 'all_above_score' : (o.stopMode || 'target_confirmed'),
           targetConfirmed,
-          dailyCap: o.dailyCap != null ? o.dailyCap : targetConfirmed,
+          dailyCap: o.dailyCap != null ? o.dailyCap : (applyAllAboveScore ? 0 : targetConfirmed),
           threshold: o.threshold != null ? o.threshold : 70,
           rescore: o.rescore !== false,
           requireEvidence: o.requireEvidence !== false,
+          maxGaps: o.maxGaps != null ? Number(o.maxGaps) : 20,
           includeAssisted: o.includeAssisted !== false,
           perCompanyCap: o.perCompanyCap != null ? o.perCompanyCap : 2,
           e2eSafe: o.e2eSafe !== false,
@@ -1090,7 +1683,8 @@ ${(description || '').slice(0, 6000)}`;
       try {
         const o = body ? JSON.parse(body) : {};
         const write = o.write !== false;
-        const st = await getStorageFromExtension(['pja_profile', 'pja_jobs', 'pja_ext_queue', 'pja_shortlist', 'pja_applied_log']);
+        const st = await getStorageFromExtension(['pja_profile', 'pja_jobs', 'pja_ext_queue', 'pja_applied_log']);
+        const browserJobs = await getBrowserShortlistFromExtension(30000);
         const { pjaCollectAppliedRecords, appliedIdentity } = require('./sourcing/dedupe');
         const applied = appliedIdentity(pjaCollectAppliedRecords(st));
 
@@ -1099,7 +1693,7 @@ ${(description || '').slice(0, 6000)}`;
         const queries = Array.isArray(o.queries) ? o.queries.map(q => String(q || '').trim()).filter(Boolean) : undefined;
         const { store, report } = await sourceAll({ appliedIdentity: applied, target: o.target || 200, nationwideUS: willing,
           queries: queries && queries.length ? queries : undefined,
-          browserJobs: Array.isArray(st.pja_shortlist) ? st.pja_shortlist : [],
+          browserJobs,
           maxBrowserAgeMs: o.maxBrowserAgeMs != null ? Number(o.maxBrowserAgeMs) : 48 * 60 * 60 * 1000 });
 
         let wrote = 0;
@@ -1134,13 +1728,17 @@ ${(description || '').slice(0, 6000)}`;
       try {
         const o = body ? JSON.parse(body) : {};
         const threshold = o.threshold != null ? o.threshold : 75;
-        const dailyCap = o.dailyCap != null ? o.dailyCap : 50;
-        const dailyTarget = o.targetConfirmed != null ? Math.max(1, Number(o.targetConfirmed) || 1)
-          : Math.max(1, Number(dailyCap) || 1);
+        const applyAllAboveScore = o.applyAllAboveScore === true ||
+          /^(all_above_score|allAboveScore|above_score)$/i.test(String(o.stopMode || ''));
+        const runMode = applyAllAboveScore ? 'all_above_score' : 'target_confirmed';
+        const dailyCap = o.dailyCap != null ? Math.max(0, Number(o.dailyCap) || 0) : (applyAllAboveScore ? 0 : 50);
+        const dailyTarget = applyAllAboveScore ? null : (o.targetConfirmed != null ? Math.max(1, Number(o.targetConfirmed) || 1)
+          : Math.max(1, Number(dailyCap) || 1));
         const e2eSafe = o.e2eSafe === true;
         // Zero means keep every qualified reserve. The global dispatcher stops as soon as the
         // confirmed target is reached, so reserves replace failures without causing over-submit.
-        const attemptCap = o.attemptCap != null ? Math.max(0, Number(o.attemptCap) || 0) : (e2eSafe ? Math.max(25, dailyTarget * 2) : 0);
+        const attemptCap = o.attemptCap != null ? Math.max(0, Number(o.attemptCap) || 0)
+          : (applyAllAboveScore ? 0 : (e2eSafe ? Math.max(25, dailyTarget * 2) : 0));
         // Evidence-grounded resume/JD rescoring is the safe default. Callers may explicitly set
         // rescore:false for diagnostics, but autonomous apply planning should never trust title-only
         // heuristic scores.
@@ -1153,6 +1751,12 @@ ${(description || '').slice(0, 6000)}`;
         const maxGaps = o.maxGaps != null ? Number(o.maxGaps) : 2;
         const perCompanyCap = o.perCompanyCap != null ? Math.max(0, Number(o.perCompanyCap) || 0) : 0;
         const includeAssisted = o.includeAssisted === true;
+        // A caller can require real E2E coverage across channels. Never silently turn such a
+        // request into an external-only run when a browser channel lacks hydrated/scored jobs.
+        const requiredChannels = Array.isArray(o.requiredChannels) ? Array.from(new Set(o.requiredChannels
+          .map(x => String(x || '').trim()).filter(Boolean))) : [];
+        const requiredStrategies = Array.isArray(o.requiredStrategies) ? Array.from(new Set(o.requiredStrategies
+          .map(x => String(x || '').trim().toLowerCase()).filter(Boolean))) : [];
         const timeZone = o.timeZone || 'America/Los_Angeles';
         const candidateStatus = await refreshRuntimeCandidateProfile();
         const Ledger = require('./application-ledger');
@@ -1197,10 +1801,10 @@ ${(description || '').slice(0, 6000)}`;
               remaining: run.remaining != null ? run.remaining : run.targetConfirmed })); return;
           }
         }
-        const todayAudit = applicationAuditFromStorage(control, { day, timeZone, target: dailyTarget }).audit;
+        const todayAudit = applicationAuditFromStorage(control, { day, timeZone, target: dailyTarget || 1 }).audit;
         const alreadyConfirmedToday = todayAudit.counts.confirmed;
-        const remainingTarget = todayAudit.remaining;
-        if (remainingTarget <= 0) {
+        const remainingTarget = applyAllAboveScore ? null : todayAudit.remaining;
+        if (!applyAllAboveScore && remainingTarget <= 0) {
           res.writeHead(200, CORS); res.end(JSON.stringify({ success: true, dryRun, planned: 0,
             note: 'daily confirmed target already reached', day, timeZone, dailyTarget,
             alreadyConfirmedToday, remainingTarget: 0 })); return;
@@ -1210,29 +1814,68 @@ ${(description || '').slice(0, 6000)}`;
         // cannot guarantee the true best match, so the autonomous path never pre-truncates it.
         const setResp = await wsAsk('getApplySet', { threshold: rescore ? 0 : threshold,
           dailyCap: rescore ? 0 : dailyCap, perCompanyCap: rescore ? 0 : perCompanyCap,
+          includeUnscored: !!rescore,
           atsAllow, requireEvidence: !rescore && requireEvidence, maxGaps,
           retryDeferred: e2eSafe ? false : undefined,
           maxAttempts: e2eSafe ? 1 : undefined,
-          candidateFingerprint: !rescore ? runtimeCandidateFingerprint : undefined }, 'applySetReply', 20000);
+          candidateFingerprint: !rescore ? runtimeCandidateFingerprint : undefined,
+          explainDrops: true, dropLimit: o.dropLimit != null ? o.dropLimit : 200 }, 'applySetReply', 20000);
         let jobs = (setResp && setResp.jobs) || [];
+        let planningDrops = setResp.planningDrops ? JSON.parse(JSON.stringify(setResp.planningDrops)) : null;
+        const planningDropLimit = o.dropLimit != null ? Math.max(0, Number(o.dropLimit) || 0) : 200;
         if (setResp.error) { res.writeHead(502, CORS); res.end(JSON.stringify({ error: 'getApplySet: ' + setResp.error })); return; }
-        if (candidateAllow.size || candidateIds.size) jobs = jobs.filter(allowed);
-        if (companyDeny.size || titleDeny.length) jobs = jobs.filter(j => !denied(j));
+        if (candidateAllow.size || candidateIds.size) {
+          jobs = jobs.filter(j => {
+            const ok = allowed(j);
+            if (!ok) planningDrops = appendPlanningDrop(planningDrops, j, 'candidate_allow_filter', planningDropLimit);
+            return ok;
+          });
+        }
+        if (companyDeny.size || titleDeny.length) jobs = jobs.filter(j => {
+          const no = denied(j);
+          if (no) planningDrops = appendPlanningDrop(planningDrops, j, 'caller_deny_filter', planningDropLimit);
+          return !no;
+        });
         // LinkedIn Easy Apply is intentionally assisted because its modal-open action is rejected by
         // automation in the current UI. Exclude it from unattended runs instead of silently waiting
         // five minutes per role; callers can opt in with includeAssisted:true.
         let assistedExcluded = 0;
         if (!includeAssisted) {
           const before = jobs.length;
-          jobs = jobs.filter(j => j.channel !== 'linkedin_easy_apply');
+          jobs = jobs.filter(j => {
+            const assisted = j.channel === 'linkedin_easy_apply';
+            if (assisted) planningDrops = appendPlanningDrop(planningDrops, j, 'assisted_channel_excluded', planningDropLimit);
+            return !assisted;
+          });
           assistedExcluded = before - jobs.length;
+        }
+        const channelCoverage = {};
+        for (const channel of requiredChannels) {
+          const candidates = jobs.filter(j => (j.channel || 'external') === channel);
+          channelCoverage[channel] = { discovered: candidates.length, hydrated: 0, qualified: 0 };
+        }
+        const strategyKey = j => String(j && (j.strategy || j.ats) || 'generic').trim().toLowerCase() || 'generic';
+        const strategyCoverage = {};
+        for (const strategy of requiredStrategies) {
+          const candidates = jobs.filter(j => strategyKey(j) === strategy);
+          strategyCoverage[strategy] = { discovered: candidates.length, hydrated: 0, qualified: 0 };
         }
 
         // 2. Score every candidate whose evidence is not already valid for this exact JD. Reuse
         // prior LLM evidence only when the description fingerprint still matches.
         if (rescore && jobs.length) {
           const { descriptionFingerprint } = require('./sourcing/jobstore');
-          jobs = jobs.filter(j => j.description && !/^(missing|stale|needs_description)$/i.test(String(j.descriptionStatus || '')));
+          for (const channel of requiredChannels) channelCoverage[channel].hydrated = jobs.filter(j =>
+            (j.channel || 'external') === channel && j.description &&
+            !/^(missing|stale|needs_description)$/i.test(String(j.descriptionStatus || ''))).length;
+          for (const strategy of requiredStrategies) strategyCoverage[strategy].hydrated = jobs.filter(j =>
+            strategyKey(j) === strategy && j.description &&
+            !/^(missing|stale|needs_description)$/i.test(String(j.descriptionStatus || ''))).length;
+          jobs = jobs.filter(j => {
+            const hydrated = j.description && !/^(missing|stale|needs_description)$/i.test(String(j.descriptionStatus || ''));
+            if (!hydrated) planningDrops = appendPlanningDrop(planningDrops, j, 'rescore_missing_description', planningDropLimit);
+            return hydrated;
+          });
           const reusable = [], needsScore = [];
           for (const j of jobs) {
             const fp = descriptionFingerprint(j.description);
@@ -1248,23 +1891,94 @@ ${(description || '').slice(0, 6000)}`;
             matchEvidence: j.matchEvidence,
             gaps: j.gaps, conflicts: j.conflicts, confidence: j.confidence })) }, 'updateScoresReply', 120000);
           const ranked = reusable.concat(scored)
-            .filter(j => j.fitScore != null && j.fitScore >= threshold && (!requireEvidence || ((j.matchEvidence || []).length >= 3 && (j.gaps || []).length <= maxGaps && !(j.conflicts || []).length && ['high', 'medium'].includes(String(j.confidence || '').toLowerCase()))))
+            .filter(j => {
+              let reason = '';
+              if (j.fitScore == null) reason = 'rescore_missing_fit_score';
+              else if (j.fitScore < threshold) reason = 'rescore_below_threshold';
+              else if (requireEvidence && (j.matchEvidence || []).length < 3) reason = 'rescore_weak_match_evidence';
+              else if (requireEvidence && (j.gaps || []).length > maxGaps) reason = 'rescore_too_many_match_gaps';
+              else if (requireEvidence && (j.conflicts || []).length) reason = 'rescore_hard_match_conflict';
+              else if (requireEvidence && !['high', 'medium'].includes(String(j.confidence || '').toLowerCase())) reason = 'rescore_low_score_confidence';
+              if (reason) planningDrops = appendPlanningDrop(planningDrops, j, reason, planningDropLimit);
+              return !reason;
+            })
             .sort((a, b) => (b.fitScore || 0) - (a.fitScore || 0));
           const perCo = {}, selected = [];
-          for (const j of ranked) {
+          const pushSelected = j => {
+            if (!j || selected.some(x => x.id === j.id)) return false;
             const co = String(j.company || '').trim().toLowerCase();
-            if (perCompanyCap > 0 && (perCo[co] || 0) >= perCompanyCap) continue;
+            if (perCompanyCap > 0 && (perCo[co] || 0) >= perCompanyCap) return false;
             perCo[co] = (perCo[co] || 0) + 1;
             selected.push(j);
+            return true;
+          };
+          // Required-channel E2E coverage is a hard contract: reserve the best available job from
+          // each requested channel before filling the remaining queue by global rank.
+          for (const channel of requiredChannels) {
+            pushSelected(ranked.find(j => (j.channel || 'external') === channel));
+          }
+          for (const strategy of requiredStrategies) {
+            pushSelected(ranked.find(j => strategyKey(j) === strategy));
+          }
+          for (const j of ranked) {
             if (attemptCap > 0 && selected.length >= attemptCap) break;
+            pushSelected(j);
+          }
+          const selectedIds = new Set(selected.map(j => j.id));
+          for (const j of ranked) {
+            if (!selectedIds.has(j.id)) planningDrops = appendPlanningDrop(planningDrops, j,
+              attemptCap > 0 && selected.length >= attemptCap ? 'run_attempt_cap' : 'per_company_cap', planningDropLimit);
           }
           jobs = selected;
-          if (companyDeny.size || titleDeny.length) jobs = jobs.filter(j => !denied(j));
+          if (companyDeny.size || titleDeny.length) jobs = jobs.filter(j => {
+            const no = denied(j);
+            if (no) planningDrops = appendPlanningDrop(planningDrops, j, 'caller_deny_filter_after_rescore', planningDropLimit);
+            return !no;
+          });
+          for (const channel of requiredChannels) channelCoverage[channel].qualified = jobs.filter(j =>
+            (j.channel || 'external') === channel).length;
+          for (const strategy of requiredStrategies) strategyCoverage[strategy].qualified = jobs.filter(j =>
+            strategyKey(j) === strategy).length;
+        } else {
+          for (const channel of requiredChannels) {
+            channelCoverage[channel].hydrated = jobs.filter(j => (j.channel || 'external') === channel &&
+              j.description && !/^(missing|stale|needs_description)$/i.test(String(j.descriptionStatus || ''))).length;
+            channelCoverage[channel].qualified = jobs.filter(j => (j.channel || 'external') === channel).length;
+          }
+          for (const strategy of requiredStrategies) {
+            strategyCoverage[strategy].hydrated = jobs.filter(j => strategyKey(j) === strategy &&
+              j.description && !/^(missing|stale|needs_description)$/i.test(String(j.descriptionStatus || ''))).length;
+            strategyCoverage[strategy].qualified = jobs.filter(j => strategyKey(j) === strategy).length;
+          }
         }
 
-        if (!jobs.length) { res.writeHead(200, CORS); res.end(JSON.stringify({ success: true, planned: 0,
+        const uncoveredChannels = requiredChannels.filter(channel => !channelCoverage[channel].qualified);
+        if (uncoveredChannels.length) {
+          const report = writeApplyPlanningReport(planningDrops || null,
+            { status: 'channel_coverage_blocked' });
+          res.writeHead(409, CORS); res.end(JSON.stringify({ success: false, stage: 'channel_coverage',
+            error: 'required channel coverage is not ready', uncoveredChannels, channelCoverage,
+            planningDrops: planningDrops || null, report,
+            next: 'hydrate missing browser leads, then rescore before starting an apply run' })); return;
+        }
+        const uncoveredStrategies = requiredStrategies.filter(strategy => !strategyCoverage[strategy].qualified);
+        if (uncoveredStrategies.length) {
+          const report = writeApplyPlanningReport(planningDrops || null,
+            { status: 'strategy_coverage_blocked' });
+          res.writeHead(409, CORS); res.end(JSON.stringify({ success: false, stage: 'strategy_coverage',
+            error: 'required apply strategy coverage is not ready', uncoveredStrategies, strategyCoverage,
+            planningDrops: planningDrops || null, report,
+            next: 'source/hydrate at least one qualified real posting per required ATS strategy, then rescore before starting an apply run' })); return;
+        }
+
+        if (!jobs.length) {
+          const report = writeApplyPlanningReport(planningDrops || null,
+            { status: dryRun ? 'dry_run_nothing_eligible' : 'nothing_eligible' });
+          res.writeHead(200, CORS); res.end(JSON.stringify({ success: true, planned: 0,
           note: 'nothing eligible', corpusTotal: setResp.total, assistedExcluded, day, timeZone,
-          dailyTarget, alreadyConfirmedToday, remainingTarget })); return; }
+          dailyTarget, alreadyConfirmedToday, remainingTarget, planningDrops: planningDrops || null,
+          report })); return;
+        }
 
         // 3. build the queue + seed current, then open the first job's tab to start the loop.
         // Keep the active ranked-run object compact. Chrome storage can reject large single-item
@@ -1289,9 +2003,11 @@ ${(description || '').slice(0, 6000)}`;
         if (!dryRun) {
           const master = { status: 'applying', jobs: queueJobs, currentIndex: 0, inFlightIndex: null,
             results: { confirmed: [], failed: [], unverified: [], skipped: [] }, blockedChannels: [],
-            runId, targetConfirmed: dailyTarget, dailyTarget, day, timeZone,
+            runId, runMode, applyAllAboveScore, targetConfirmed: dailyTarget, dailyTarget, attemptCap, threshold,
+            day, timeZone,
             confirmedCount: alreadyConfirmedToday, remaining: remainingTarget,
-            stopBeforeSubmit, e2eSafe, startedAt: plannedAt, updatedAt: plannedAt };
+            stopBeforeSubmit, e2eSafe, planningDrops: planningDrops || null,
+            startedAt: plannedAt, updatedAt: plannedAt };
           const started = await wsAsk('startRankedApply', { master, force: !!o.force },
             'startRankedApplyReply', 30000);
           if (!started || started.ok !== true) {
@@ -1300,15 +2016,26 @@ ${(description || '').slice(0, 6000)}`;
               (started.conflict ? 'an application run became active while planning' : 'ranked start was not acknowledged')) || 'ranked start was not acknowledged',
               activeRunId: started && started.runId })); return;
           }
+          const verifyStart = await getStorageFromExtension(['pja_ranked_apply'], 10000);
+          const activeRun = verifyStart && verifyStart.pja_ranked_apply;
+          if (!activeRun || activeRun.runId !== runId) {
+            res.writeHead(502, CORS);
+            res.end(JSON.stringify({ success: false, error: 'ranked start was acknowledged but active run was not persisted',
+              runId, started })); return;
+          }
         }
         console.log(`[PJA] /apply-run${dryRun ? ' (dry-run)' : ''}: ${dryRun ? 'planned' : 'queued'} ${queueJobs.length} (threshold=${threshold}, rescore=${rescore}) byChannel=${JSON.stringify(byChannel)} byStrategy=${JSON.stringify(byStrategy)}`);
         res.writeHead(200, CORS);
         const previewLimit = Math.max(1, Math.min(500, Number(o.previewLimit) || 12));
+        const report = dryRun ? writeApplyPlanningReport(planningDrops || null,
+          { status: 'dry_run_planned', jobs: queueJobs }) : null;
         res.end(JSON.stringify({ success: true, dryRun, planned: queueJobs.length,
-          targetConfirmed: remainingTarget, dailyTarget, alreadyConfirmedToday, remainingTarget,
+          runMode, applyAllAboveScore, targetConfirmed: remainingTarget, dailyTarget,
+          alreadyConfirmedToday, remainingTarget,
           day, timeZone, assistedExcluded, includeAssisted, e2eSafe,
-          reserveCount: Math.max(0, queueJobs.length - remainingTarget), runId, byChannel,
-          byStrategy, corpusTotal: setResp.total,
+          reserveCount: applyAllAboveScore ? 0 : Math.max(0, queueJobs.length - remainingTarget), runId, byChannel,
+          byStrategy, channelCoverage, strategyCoverage, corpusTotal: setResp.total,
+          planningDrops: planningDrops || null, report,
           top: jobs.slice(0, previewLimit).map(j => ({ fit: j.fitScore, company: j.company, title: j.title,
             ats: j.ats || j.strategy, channel: j.channel || 'external', matchEvidence: j.matchEvidence || [],
             gaps: j.gaps || [], conflicts: j.conflicts || [], confidence: j.confidence || '' })) }));

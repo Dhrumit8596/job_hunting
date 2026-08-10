@@ -138,7 +138,8 @@ function upsert(store, jobs, modality, stateFor) {
     }
     store.index[id] = buildPosting(id, rk, mk, job, modality);
     const st = typeof stateFor === 'function' ? (stateFor(job) || {}) : {};
-    store.state[id] = Object.assign({ status: 'sourced', fitScore: null }, st);
+    store.state[id] = Object.assign({ status: 'sourced', lifecycle: job.pipelineStatus ||
+      (job.description ? 'score_pending' : 'needs_hydration'), fitScore: null }, st);
     store.roleKeys.add(rk);
     if (store.mirrorIds) store.mirrorIds.set(mk, id);
     if (directKey && store.directUrlIds) store.directUrlIds.set(directKey, id);

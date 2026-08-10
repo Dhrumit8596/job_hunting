@@ -2,7 +2,7 @@
 // Phase B core: apply-set selection gating + result→state mapping + pool-cleared summary.
 const path = require('path');
 require(path.resolve(__dirname, '../../sourcing/detect-ats'));
-const { buildApplySet, resultToState, poolStatus, roleKey, greenhouseEmbedFallback, exceededBudget,
+const { buildApplySet, buildApplyPlan, resultToState, poolStatus, roleKey, greenhouseEmbedFallback, exceededBudget,
   watchdogDecision, queueJobKey, unsupportedAutonomousApplyReason } = require(path.resolve(__dirname, '../../sourcing/apply-select'));
 
 function corpus(entries) {
@@ -40,6 +40,13 @@ module.exports = (t) => {
   t.eq(set.map(j => j.id), ['greenhouse:1', 'gh:5', 'greenhouse:2'], 'sorted by fit desc');
   t.eq(set[0].fitScore, 82, 'highest fit first (dead gh:6=88 excluded)');
   t.eq(set.map(j => j.strategy).every(Boolean), true, 'every job stamped with a strategy');
+  const plan = buildApplyPlan(c, { threshold: 70, dailyCap: 30 });
+  t.eq(plan.jobs.map(j => j.id), set.map(j => j.id), 'buildApplyPlan preserves buildApplySet selected jobs');
+  t.eq(plan.dropCounts.below_threshold, 1, 'buildApplyPlan explains below-threshold planning drops');
+  t.eq(plan.dropCounts.state_applied, 1, 'buildApplyPlan explains already-applied state drops');
+  t.eq(plan.dropCounts.state_dead, 1, 'buildApplyPlan explains dead posting drops');
+  t.eq(plan.dropCounts.missing_apply_url, 1, 'buildApplyPlan explains missing apply URL drops');
+  t.ok(plan.dropped.every(j => j.reason && j.company != null && j.title != null), 'buildApplyPlan emits compact developer-readable drop examples');
 
   // dedup vs applied log (role-key)
   const set2 = buildApplySet(c, { threshold: 70, appliedRoleKeys: [roleKey({ company: 'Carbon', title: 'Process Engineer' })] });
@@ -55,6 +62,12 @@ module.exports = (t) => {
   t.eq(exactSet.map(j => j.id), ['greenhouse:11'], 'exact applied id excludes only that requisition, not same-title sibling');
   t.eq(buildApplySet(exactCorpus, { threshold: 70, appliedRecords: [{ company: 'Acme', title: 'Process Engineer' }] }).length, 0,
     'legacy id-less applied record retains conservative role-key fallback');
+  t.eq(buildApplySet(exactCorpus, { threshold: 70, blockedRecords: [{
+    company: 'Acme', title: 'Process Engineer', applyUrl: 'https://boards.greenhouse.io/acme/jobs/10',
+    reason: 'captcha'
+  }] }).map(j => j.id), ['greenhouse:11'], 'blockedRecords suppress only the known manual-blocked requisition');
+  t.eq(buildApplySet(exactCorpus, { threshold: 70, blockedHosts: ['boards.greenhouse.io'] }).length, 0,
+    'blockedHosts suppress every posting on a known blocked tenant/host');
   const collisionCorpus = corpus([
     { id: 'workday:alpha:R1234', company: 'Alpha Fab', title: 'Process Engineer', applyUrl: 'https://alpha.example/jobs/R1234', fit: 90 },
     { id: 'workday:beta:R1234', company: 'Beta Fab', title: 'Process Engineer', applyUrl: 'https://beta.example/jobs/R1234', fit: 89 },
@@ -73,6 +86,18 @@ module.exports = (t) => {
 
   // daily cap
   t.eq(buildApplySet(c, { threshold: 70, dailyCap: 1 }).length, 1, 'daily cap limits set size');
+
+  const unscoredCorpus = corpus([
+    { id: 'indeed:u1', company: 'Pioneer', title: 'PCB Process Engineer', applyUrl: 'https://www.indeed.com/viewjob?jk=u1', fit: null, channel: 'indeed_apply' },
+  ]);
+  unscoredCorpus.index['indeed:u1'].description = 'Long process engineering job description with manufacturing, SPC, validation, yield, and equipment requirements.';
+  unscoredCorpus.index['indeed:u1'].descriptionStatus = 'full';
+  unscoredCorpus.state['indeed:u1'].status = 'score_pending';
+  t.eq(buildApplySet(unscoredCorpus, { threshold: 0, includeUnscored: false }).length, 0,
+    'unscored hydrated jobs are excluded outside rescore planning');
+  const unscoredSet = buildApplySet(unscoredCorpus, { threshold: 0, includeUnscored: true });
+  t.eq(unscoredSet.length, 1, 'rescore planning can include hydrated unscored jobs');
+  t.eq(unscoredSet[0].fitScore, null, 'unscored jobs stay fitScore=null until LLM rescore');
 
   // per-company cap → batch spans multiple employers (no stacking one company)
   const conc = corpus([

@@ -9,6 +9,11 @@
     "test": "node test/check-syntax.js && node test/privacy-scan.js && node test/unit/run.js",
     "start": "node dev-server.js",
     "start:codex": "node dev-server.js --engine codex",
+    "apply:all": "node scripts/pja-apply-all.js",
+    "apply:all:dry-run": "node scripts/pja-apply-all.js --dry-run",
+    "apply:status": "node scripts/pja-apply-all.js status",
+    "apply:report": "node scripts/pja-apply-all.js report",
+    "apply:preflight": "node scripts/pja-apply-all.js preflight",
     "check:profile": "node test/merged_profile.js"
   },
   "keywords": [],

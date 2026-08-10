@@ -15,7 +15,9 @@
   // When true, the flow fills the form and stops WITHOUT clicking the final submit,
   // leaving the completed application on screen for the user to review + submit.
   // Set false to auto-submit. (Read live from storage so it can be toggled per run.)
-  const PJA_EXT_STOP_BEFORE_SUBMIT_DEFAULT = true;
+  // User preference: real E2E runs submit by default. A particular ranked run can still opt into
+  // review mode by setting pja_ext_stop_before_submit / stopBeforeSubmit explicitly.
+  const PJA_EXT_STOP_BEFORE_SUBMIT_DEFAULT = false;
 
   // Catch any unhandled promise rejections so they appear in console
   window.addEventListener('unhandledrejection', e => {
@@ -269,6 +271,19 @@
         }));
       }
       await waitForForm();
+      const router = window.PJAApplyRouter;
+      if (router && typeof router.executeStrategy === 'function') {
+        const dispatched = await router.executeStrategy(job, {
+          url: location.href,
+          signals: typeof router.readSignals === 'function' ? router.readSignals(document) : null,
+          rawAnswers: rawAnswers || {},
+          reason,
+        });
+        if (dispatched && dispatched.handled) return dispatched;
+        // The generic external handler should always be registered below. Fail explicitly if a
+        // future strategy is added without an executor so the master queue gets a useful result.
+        throw new Error((dispatched && dispatched.reason) || 'missing_apply_handler');
+      }
       return await runExternalApply(job, rawAnswers || {});
     } finally {
       if (window.__pjaExtApplyInFlightToken === runToken) {
@@ -277,6 +292,18 @@
         window.__pjaExtApplyInFlightToken = '';
       }
     }
+  }
+
+  // The existing external engine contains mature ATS-specific branches. Register those branches
+  // behind the shared router now; subsequent work can move each wrapper into its own module without
+  // changing queue orchestration or the handler/result contract.
+  function runExternalStrategy(context) {
+    return runExternalApply(context.job, context.rawAnswers || {});
+  }
+  if (window.PJAApplyRouter && typeof window.PJAApplyRouter.registerHandler === 'function') {
+    ['workday', 'greenhouse', 'lever', 'ashby', 'smartrecruiters', 'eightfold', 'icims', 'taleo',
+      'successfactors', 'jobvite', 'workable', 'breezy', 'bamboohr', 'paylocity', 'rippling', 'generic']
+      .forEach(name => window.PJAApplyRouter.registerHandler(name, runExternalStrategy));
   }
 
   if (/workday\.com|myworkdayjobs\.com/i.test(location.hostname)) {
@@ -727,6 +754,59 @@
           }
         });
       return candidates[0] || null;
+    }
+
+    function findEmailCodeActionButton() {
+      const codeField = findEmailCodeField();
+      const buttonText = el => (el.textContent || el.value || el.getAttribute?.('aria-label') || '').replace(/\s+/g, ' ').trim();
+      const visible = el => {
+        try {
+          const r = el.getBoundingClientRect();
+          return r.width > 0 && r.height > 0;
+        } catch (_) {
+          return true;
+        }
+      };
+      const controls = pjaQueryAllExt('button, input[type=submit], input[type=button], [role=button]');
+      const preferred = controls.find(el => visible(el) &&
+        /verify|confirm|continue|next|submit.*code|send code|complete verification|confirm email/i.test(buttonText(el)));
+      if (preferred) return preferred;
+      if (codeField) {
+        const scope = codeField.closest?.('form, [role=form], section, div') || document;
+        const scoped = Array.from(scope.querySelectorAll?.('button, input[type=submit], input[type=button], [role=button]') || [])
+          .find(el => visible(el) && !/resend|cancel|back/i.test(buttonText(el)));
+        if (scoped) return scoped;
+      }
+      return findButton(/submit.*application|submit.*app|apply now|send application|complete application|^submit$|^submit application$/i);
+    }
+
+    async function waitForEmailCodeRecoveryOutcome(preSubmitUrl, branch, clickedAfterCode) {
+      for (let i = 0; i < 30; i++) {
+        await sleep(500);
+        const hasSubmitButton = !!findButton(/submit.*application|submit.*app|apply now|send application|complete application|^submit$|^submit application$/i);
+        const hasFormFields = !!pjaQueryAllExt('form input, form select, form textarea').length;
+        if (pjaIsSubmitSuccess({ text: document.body?.innerText || '', title: document.title,
+          url: location.href, preSubmitUrl, hasSubmitButton, hasFormFields, iterations: i })) {
+          return { success: true };
+        }
+        // Some ATSes use a two-phase gate: code verification first, then the original submit
+        // button reappears/enables. Click it once rather than recording a false verification
+        // failure immediately after the code field disappears.
+        if (i >= 2 && !findEmailCodeField() && hasSubmitButton) {
+          const submitAfterVerify = findButton(/submit.*application|submit.*app|apply now|send application|complete application|^submit$|^submit application$/i);
+          if (submitAfterVerify && !submitAfterVerify.dataset.pjaEmailCodeSubmitRetried) {
+            submitAfterVerify.dataset.pjaEmailCodeSubmitRetried = '1';
+            await addDbg('[email-code] code verified; clicking final submit');
+            try { await pjaCdpClickEl(submitAfterVerify); } catch (_) { try { submitAfterVerify.click(); } catch (__) {} }
+          }
+        }
+      }
+      await addDbg('[email-code] submit after code did not confirm');
+      await capturePostClickDiagnostic('email_code_submit_unconfirmed', {
+        branch,
+        clickedAfterCode,
+      });
+      return { success: false };
     }
 
     async function recoverEmailVerificationCode(contextReason) {
@@ -1539,8 +1619,8 @@
     // Antora watchdog_timeout was an unbounded await in a fill sub-step (e.g. pjaFillUnknownTextFields'
     // AI round-trip never calling back). On timeout we log and proceed — findMissingRequired then
     // catches anything still empty → missing_required (fast), instead of burning the 7-min watchdog.
-    const phaseLog = m => { try { chrome.storage.local.get('pja_dbg', d => { const a = (d.pja_dbg || []).slice(-39); a.push('[phase] ' + m); chrome.storage.local.set({ pja_dbg: a }); }); } catch (_) {} };
-    const withTimeout = (p, ms, label) => {
+    function phaseLog(m) { try { chrome.storage.local.get('pja_dbg', d => { const a = (d.pja_dbg || []).slice(-39); a.push('[phase] ' + m); chrome.storage.local.set({ pja_dbg: a }); }); } catch (_) {} }
+    function withTimeout(p, ms, label) {
       let to;
       const timeout = new Promise(res => { to = setTimeout(() => { phaseLog(label + ' TIMEOUT ' + ms + 'ms'); res(); }, ms); });
       const wrapped = Promise.resolve(p)
@@ -1548,7 +1628,7 @@
         .catch(e => { phaseLog(label + ' err ' + ((e && e.message) || e)); return undefined; })
         .finally(() => clearTimeout(to));
       return Promise.race([wrapped, timeout]);
-    };
+    }
 
     // Some Greenhouse forms require a cover letter but initially expose only an "Enter manually"
     // button, so the regular required-field/AI sweep cannot see a textarea. Reveal it and fill a
@@ -1780,10 +1860,23 @@
         if (/how did you hear|where did you (hear|find)|referral source|source of (this )?application/i.test(cleaned)) return false;
         return true;
       };
-      const selectedReferralText = el => ((typeof pjaWorkdaySelectedChipText === 'function' ? pjaWorkdaySelectedChipText(el) : '') ||
-        (el.closest('[data-uxi-widget-type="multiselect"], [data-automation-id^="formField-"]')
-          ?.querySelector('[data-automation-id="selectedItemList"], [data-automation-id="selectedItem"], [data-automation-id="promptOption"]')
-          ?.textContent || '')).replace(/\s+/g, ' ').trim();
+      const selectedReferralText = el => {
+        const chipText = (typeof pjaWorkdaySelectedChipText === 'function' ? pjaWorkdaySelectedChipText(el) : '') ||
+          (el.closest('[data-uxi-widget-type="multiselect"], [data-automation-id^="formField-"]')
+            ?.querySelector('[data-automation-id="selectedItemList"], [data-automation-id="selectedItem"], [data-automation-id="promptOption"]')
+            ?.textContent || '');
+        if (chipText) return chipText.replace(/\s+/g, ' ').trim();
+        const container = el.closest('[data-automation-id^="formField-"], [data-uxi-widget-type="multiselect"]');
+        const containerText = (container?.textContent || '').replace(/\s+/g, ' ').trim();
+        const selectedAnchor = Array.from(container?.querySelectorAll('a, [data-automation-id="promptOption"], [data-automation-id="selectedItem"]') || [])
+          .map(a => (a.textContent || '').replace(/\s+/g, ' ').trim())
+          .find(txt => referralCommitted(txt));
+        if (selectedAnchor) return selectedAnchor;
+        const fallback = ['LinkedIn Connection', 'Careers Website', 'Career Website', 'Company Website', 'Career Site',
+          'LinkedIn', 'Indeed', 'Job Board or Social Media', 'Social Media', 'Job Board', 'Online Job Board', 'Internet', 'Online']
+          .find(txt => new RegExp('(^|\\\\b)' + txt.replace(/[.*+?^${}()|[\]\\]/g, '\\\\$&') + '(\\\\b|$)', 'i').test(containerText));
+        return fallback || '';
+      };
       if (typeof pjaFillCombobox === 'function') {
         const referralInputs = pjaQueryAllExt('input[data-uxi-widget-type="selectinput"], input[role="combobox"]').filter(el => {
           const id = el.id || el.name || el.getAttribute('data-automation-id') || '';
@@ -3256,31 +3349,27 @@
         });
         const recovery = await recoverEmailVerificationCode('email_verification_required');
         if (recovery.filled) {
-          const btn = findButton(/submit.*application|submit.*app|apply now|send application|complete application|^submit$|^submit application$/i);
+          const btn = findEmailCodeActionButton();
           if (btn) {
-            await addDbg('[email-code] retrying submit after gmail code');
-            await pjaCdpClickEl(btn);
-            let ok = false;
-            for (let i = 0; i < 20; i++) {
-              await sleep(500);
-              if (pjaIsSubmitSuccess({ text: document.body?.innerText || '', title: document.title,
-                url: location.href, preSubmitUrl: job._preSubmitUrl || job.applyUrl || '', hasSubmitButton: !!findButton(/submit/i),
-                hasFormFields: !!pjaQueryAllExt('form input, form select, form textarea').length, iterations: i })) {
-                ok = true; break;
-              }
+            await addDbg('[email-code] retrying verification/submit after gmail code');
+            let clickedAfterCode = false;
+            try {
+              clickedAfterCode = await Promise.race([
+                (async () => { await pjaCdpClickEl(btn); return true; })(),
+                new Promise(resolve => setTimeout(() => resolve(false), 8000))
+              ]);
+            } catch (_) {}
+            if (!clickedAfterCode) {
+              await addDbg('[email-code] cdp verify after code timed out; using DOM click fallback');
+              try { btn.click(); clickedAfterCode = true; } catch (_) {}
             }
-            if (ok) {
+            const outcome = await waitForEmailCodeRecoveryOutcome(job._preSubmitUrl || job.applyUrl || '', 'pre_submit_code_gate', clickedAfterCode);
+            if (outcome.success) {
               sessionStorage.setItem('pja_last_action', 'recordResult:applied:' + job.company);
               await recordResult(job, { success: true, reason: 'applied' });
               navigateBack(job);
               return;
             }
-            await addDbg('[email-code] submit after code did not confirm');
-            await capturePostClickDiagnostic('email_code_submit_unconfirmed', {
-              branch: 'pre_submit_code_gate',
-              clickedAfterCode: true,
-              missingRequired: missingLabels,
-            });
           }
         }
         if (help && help.shouldAdvance === false) await addDbg('[email-code] dev-server advised not to advance without code');
@@ -3614,9 +3703,9 @@
         });
         const recovery = await recoverEmailVerificationCode('post_submit_email_code');
         if (recovery.filled) {
-          const btn = findButton(/submit.*application|submit.*app|apply now|send application|complete application|^submit$|^submit application$/i);
+          const btn = findEmailCodeActionButton();
           if (btn) {
-            await addDbg('[email-code] retrying submit once after post-submit code');
+            await addDbg('[email-code] retrying verification/submit once after post-submit code');
             let clickedAfterCode = false;
             try {
               clickedAfterCode = await Promise.race([
@@ -3628,22 +3717,13 @@
               await addDbg('[email-code] cdp submit after code timed out; using DOM click fallback');
               try { btn.click(); clickedAfterCode = true; } catch (_) {}
             }
-            for (let i = 0; i < 20; i++) {
-              await sleep(500);
-              if (pjaIsSubmitSuccess({ text: document.body?.innerText || '', title: document.title,
-                url: location.href, preSubmitUrl, hasSubmitButton: !!findButton(/submit/i),
-                hasFormFields: !!pjaQueryAllExt('form input, form select, form textarea').length, iterations: i })) {
-                sessionStorage.setItem('pja_last_action', 'recordResult:applied:' + job.company);
-                await recordResult(job, { success: true, reason: 'applied' });
-                navigateBack(job);
-                return;
-              }
+            const outcome = await waitForEmailCodeRecoveryOutcome(preSubmitUrl, 'post_submit_code_gate', clickedAfterCode);
+            if (outcome.success) {
+              sessionStorage.setItem('pja_last_action', 'recordResult:applied:' + job.company);
+              await recordResult(job, { success: true, reason: 'applied' });
+              navigateBack(job);
+              return;
             }
-            await addDbg('[email-code] submit after code did not confirm');
-            await capturePostClickDiagnostic('email_code_submit_unconfirmed', {
-              branch: 'post_submit_code_gate',
-              clickedAfterCode,
-            });
           }
         }
         if (help && help.shouldAdvance === false) await addDbg('[email-code] recovery incomplete; recording email_verification_required');
@@ -3910,6 +3990,11 @@
     // "Are you eligible for a 24-month OPT extension?" wrongly matches workAuth -> Yes.
     if (/state and federal law[\s\S]{0,160}(health care professional|hcp|physician|prescriber|payments and transfers of value)|payments and transfers of value[\s\S]{0,120}(physician|prescriber|health care professional|hcp)|massachusetts-licensed prescriber|none of the above/i.test(label)) {
       return 'C';    // Abbott HCP tracking disclosure: C = none of the listed HCP/prescriber categories.
+    } else if (/(terms(?:\s+and\s+conditions)?|acceptTermsAndAgreements)[\s\S]{0,120}(read|agree|acknowledge|consent|accept)|(read|agree|acknowledge|consent|accept)[\s\S]{0,120}(terms(?:\s+and\s+conditions)?|acceptTermsAndAgreements)/i.test(label)) {
+      // Some Workday tenants render this as a Yes/No questionnaire button rather than the
+      // usual checkbox. It is an acknowledgement of the displayed application terms, not a
+      // candidate-specific factual question, so the truthful answer is Yes.
+      return 'Yes';
     } else if (/optional practical training|opt extension|\bopt\b|curricular practical|\bcpt\b|f-1 visa|f1 visa|j-1 visa/i.test(label)) {
       return 'No';   // Canadian on TN — not on OPT/CPT/F-1
     } else if (/sponsor/i.test(label)) {
@@ -5083,7 +5168,7 @@
           el.getAttribute('aria-autocomplete') ||
           (el.type === 'search' && el.closest('[class*="iti"]'))) continue;
       if (!el.offsetParent || el.value.trim()) continue;
-      const label = getLabelFor(el);
+      const label = getLabelFor(el) || pjaAsteriskLabelText(el);
       if (!label) continue;
       if (/\b(phone\s*)?extension\b|--extension\b/i.test([label, el.id, el.name].join(' '))) continue;
       const key = typeof pjaClassify === 'function' ? pjaClassify(label) : null;
@@ -5223,7 +5308,7 @@
         }
       }
       if (val && val !== 'Select an option' && val !== '' && val !== 'Select...') continue;
-      const label = getLabelFor(el);
+      const label = getLabelFor(el) || pjaAsteriskLabelText(el);
       // Skip labels that look like resume/cv upload display fields
       if (label && /^resume|^cv\b|curriculum vitae/i.test(label.trim())) continue;
       if (!label || seen.has(label.toLowerCase())) continue;
@@ -5406,8 +5491,12 @@
     if (/agreement[\s\S]{0,140}(prohibit|limit|restrict)[\s\S]{0,100}(employment|work)|prohibit or limit your employment|signed (a )?document[\s\S]{0,120}restrict[\s\S]{0,120}(ability to work|employ|competitor)/i.test(t)) return 'No';
     if (/referred\b.*\b(employee|internal)|\b(employee|internal)\b.*\brefer/i.test(t)) return 'No';
     if (/how did you hear|where did you (hear|find)|referral source|source of (this )?application/i.test(t)) return 'LinkedIn';
+    if (/salary[\s\S]{0,80}(benefits|matched)|benefits[\s\S]{0,80}(salary|matched)/i.test(t))
+      return '$80,000 - $95,000 depending on role and responsibilities; standard health, dental, vision, retirement, and PTO benefits.';
     if (/desired (?:base )?salary|salary expectation|expected (?:base )?(?:salary|compensation)|compensation expectation/i.test(t))
       return '$80,000 - $95,000 depending on role and responsibilities';
+    if (/how many years[\s\S]{0,80}hands.?on[\s\S]{0,80}deposition equipment|hands.?on[\s\S]{0,80}deposition equipment[\s\S]{0,80}years/i.test(t))
+      return '0 years of direct hands-on deposition equipment experience; 6 years of inspection, metrology, and manufacturing quality experience.';
     // Acknowledgment / certification statements ("I have read and understand the Export Control
     // statement…", "I acknowledge…", "I certify…", "I agree…") — honest Yes: reading and agreeing
     // to a posted statement is part of applying. Excludes eligibility/legal-status framings, which
@@ -5578,10 +5667,27 @@
     const lc = el.closest && el.closest('label'); if (lc) texts.push(lc.textContent);
     const al = el.getAttribute && el.getAttribute('aria-labelledby');
     if (al) al.split(/\s+/).forEach(id => { const n = document.getElementById(id); if (n) texts.push(n.textContent); });
-    const fld = el.closest && el.closest('.field, [class*="field"], [class*="question"], .form-group');
+    const fld = el.closest && el.closest('.application-question, [class*="application-question"], .field, [class*="field"], [class*="question"], .form-group');
     if (fld) { const lbl = fld.querySelector('label, .label, legend'); if (lbl) texts.push(lbl.textContent); }
+    const ast = pjaAsteriskLabelText(el);
+    if (ast) texts.push(ast);
     return texts.some(t => /[*✱]/.test(t || ''));
   }
+
+  function pjaAsteriskLabelText(el) {
+    try {
+      const root = el.closest && el.closest('.application-question, [class*="application-question"], [class*="question"], .field, [class*="field"], .form-group');
+      if (!root) return '';
+      const direct = root.querySelector('label, legend, .application-label, [class*="label"], [class*="question-title"], [class*="question_text"]');
+      if (direct && /[*✱]/.test(direct.textContent || '')) return direct.textContent.replace(/\s+/g, ' ').trim();
+      const clone = root.cloneNode(true);
+      clone.querySelectorAll('input, textarea, select, button, [role="listbox"], [class*="select__menu"], [class*="select-menu"]').forEach(n => n.remove());
+      const text = (clone.textContent || '').replace(/\s+/g, ' ').trim();
+      const star = text.match(/([^*✱]{8,260}[*✱])/);
+      return star ? star[1].trim() : '';
+    } catch (_) { return ''; }
+  }
+  if (typeof window !== 'undefined') window.pjaAsteriskLabelText = pjaAsteriskLabelText;
 
   // Route still-empty required fields to the AI answerer (background ANSWER_QUESTIONS ->
   // dev-server /answer-questions using profile + resume + pja_prefs) and apply the answers.

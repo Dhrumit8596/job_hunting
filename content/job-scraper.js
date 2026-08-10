@@ -485,7 +485,11 @@
             description: description.slice(0, 20000),
             descriptionStatus: description ? (description.length > 20000 ? 'partial' : 'full') : 'missing',
             query: new URLSearchParams(location.search).get('keywords') || '',
-            discoveredAt: Date.now(), scrapedAt: Date.now(), status: 'scoring'
+            discoveredAt: Date.now(), scrapedAt: Date.now(),
+            // FAST collection intentionally has no detail panel. Preserve that truth so the
+            // unified pipeline schedules hydration before evidence scoring.
+            pipelineStatus: description ? 'score_pending' : 'needs_hydration',
+            status: description ? 'score_pending' : 'needs_hydration'
           });
           scoredCount++;
           if (jobsToScore.length >= 10) { await sendBatchToBackground(jobsToScore.splice(0, 10), FAST); }
@@ -552,7 +556,11 @@
     return new Promise(resolve => {
       chrome.storage.local.get('pja_shortlist', r => {
         const list = r.pja_shortlist || [];
-        resolve(list.some(j => j.id === jobId));
+        // A fast card-only capture is not terminal cache state: a later detail scan must be
+        // allowed to hydrate the same canonical browser job.
+        const prior = list.find(j => j.id === jobId);
+        resolve(!!prior && prior.pipelineStatus !== 'needs_hydration' &&
+          !/^(missing|stale|needs_description)$/i.test(String(prior.descriptionStatus || '')));
       });
     });
   }
