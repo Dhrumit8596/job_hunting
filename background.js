@@ -257,6 +257,7 @@ function pjaRankedStopsOnTarget(master) {
 
 function pjaCompactRankedJob(job) {
   if (!job) return null;
+  const diagnostic = pjaCompactApplyDiagnostic(job.diagnostic || job.applyDiagnostic || null);
   return {
     id: job.id || '',
     jobId: job.jobId || job.sourceJobId || '',
@@ -272,6 +273,55 @@ function pjaCompactRankedJob(job) {
     confidence: job.confidence || '',
     reason: job.reason || job.skipReason || '',
     status: job.status || '',
+    diagnostic,
+  };
+}
+
+function pjaCompactApplyDiagnostic(value) {
+  if (!value || typeof value !== 'object') return null;
+  const text = (v, max = 180) => String(v || '')
+    .replace(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi, '[email]')
+    .replace(/(?:\+?1[\s.-]?)?(?:\(?\d{3}\)?[\s.-]?)\d{3}[\s.-]?\d{4}/g, '[phone]')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, max);
+  const list = (arr, maxItems = 12, maxText = 160) => Array.isArray(arr)
+    ? arr.map(x => typeof x === 'string' ? text(x, maxText) : text(x && (x.label || x.name || x.text || x.reason || ''), maxText))
+      .filter(Boolean).slice(0, maxItems)
+    : [];
+  return {
+    schemaVersion: 1,
+    phase: text(value.phase, 80),
+    reason: text(value.reason, 80),
+    ats: text(value.ats, 80),
+    strategy: text(value.strategy, 80),
+    hostname: text(value.hostname, 120),
+    url: text(value.url || value.applyUrl, 240),
+    missingRequired: list(value.missingRequired, 24, 140),
+    visibleErrors: list(value.visibleErrors, 24, 180),
+    formSummary: text(value.formSummary, 320),
+    controlCounts: value.controlCounts && typeof value.controlCounts === 'object' ? value.controlCounts : null,
+    submitButtons: list(value.submitButtons, 12, 120),
+    radioGroups: Array.isArray(value.radioGroups) ? value.radioGroups.slice(0, 12).map(g => ({
+      name: text(g && g.name, 100),
+      checked: Number(g && g.checked) || 0,
+      options: list(g && g.options, 8, 100),
+    })) : [],
+    recovery: Array.isArray(value.recovery) ? value.recovery.slice(-6).map(r => ({
+      attempt: Number(r && r.attempt) || 0,
+      reason: text(r && r.reason, 80),
+      classification: text(r && r.classification, 80),
+      likelyCause: text(r && r.likelyCause, 220),
+      actionsProposed: list(r && r.actionsProposed, 6, 80),
+      actionsExecuted: Number(r && r.actionsExecuted) || 0,
+      retrySubmit: !!(r && r.retrySubmit),
+      advanceReason: text(r && r.advanceReason, 80),
+      recovered: !!(r && r.recovered),
+      beforeErrors: list(r && r.beforeErrors, 6, 120),
+      afterErrors: list(r && r.afterErrors, 6, 120),
+    })) : [],
+    likelyCause: text(value.likelyCause, 280),
+    capturedAt: Number(value.capturedAt || value.ts) || null,
   };
 }
 
@@ -528,19 +578,21 @@ function pjaRankedApplyTerminal(master, job, event) {
     if (!Array.isArray(master.results[key])) master.results[key] = [];
   }
   const confirmed = self.PJAApplicationLedger.confirmationKinds(event).length > 0;
-  if (confirmed) master.results.confirmed.push({ ...job, confirmedAt: event.confirmedAt });
+  const diagnostic = pjaCompactApplyDiagnostic(event.diagnostic || job.diagnostic || null);
+  const row = { ...job, diagnostic };
+  if (confirmed) master.results.confirmed.push({ ...row, confirmedAt: event.confirmedAt });
   else if (/ready_to_submit/i.test(event.reason || '')) {
-    master.results.skipped.push({ ...job, reason: event.reason || 'ready_to_submit_review' });
+    master.results.skipped.push({ ...row, reason: event.reason || 'ready_to_submit_review' });
   }
   else if (/^already_applied\b/i.test(event.reason || '')) {
-    master.results.skipped.push({ ...job, reason: event.reason || 'already_applied' });
+    master.results.skipped.push({ ...row, reason: event.reason || 'already_applied' });
   }
   else if (/captcha/i.test(event.reason || '')) {
-    master.results.skipped.push({ ...job, reason: event.reason || 'captcha' });
+    master.results.skipped.push({ ...row, reason: event.reason || 'captcha' });
   }
   else if (/^(failed|failure|error|blocked|aborted|skipped)$/.test(event.status) || event.success === false) {
-    master.results.failed.push({ ...job, reason: event.reason || event.status });
-  } else master.results.unverified.push({ ...job, reason: event.reason || 'unverified' });
+    master.results.failed.push({ ...row, reason: event.reason || event.status });
+  } else master.results.unverified.push({ ...row, reason: event.reason || 'unverified' });
 }
 
 function pjaRankedApplyHostname(url) {
@@ -660,7 +712,9 @@ async function pjaRecoverRankedLastFailure(master) {
   const reason = String(failure.reason || '');
   const isSuccessFactors = /successfactors|talentcommunity/i.test(String(job.ats || job.channel || '') + ' ' + String(job.applyUrl || ''));
   const recoveredReason = isSuccessFactors && reason === 'no_submit_btn' ? 'no_apply_path' : reason;
-  if (!/^(no_apply_path|no_submit_btn|posting_not_found|apply_btn_no_form|no_apply_btn_on_description)$/.test(reason)) return master;
+  if (!/^(no_apply_path|no_submit_btn|posting_not_found|apply_btn_no_form|no_apply_btn_on_description|submit_unclear|missing_required|needs_manual|captcha|email_verification_required|wd_selectinput_blocked)$/.test(reason)) return master;
+  const uncertain = /submit_unclear/i.test(reason);
+  const skipped = /captcha|ready_to_submit/i.test(reason);
   const event = {
     runId: master.runId,
     jobId: job.jobId || job.id || null,
@@ -668,9 +722,10 @@ async function pjaRecoverRankedLastFailure(master) {
     company: job.company,
     title: job.title,
     channel: job.channel || job.ats || 'external',
-    status: 'failed',
-    success: false,
+    status: uncertain ? 'submitted' : skipped ? 'skipped' : 'failed',
+    success: uncertain ? null : false,
     reason: recoveredReason,
+    diagnostic: pjaCompactApplyDiagnostic(failure),
     applicationAt: job.applicationAt || master.inFlightAt || Date.now(),
     occurredAt: Date.now(),
   };
@@ -4142,14 +4197,27 @@ ${questionList}`;
           screenshot: screenshot ? { mime: screenshot.mime, truncated: screenshot.truncated, bytes: screenshot.dataUrl.length } : null,
           capturedAt: diagnostic.capturedAt,
         };
-        const existing = await chrome.storage.local.get(['pja_post_click_diagnostics', 'pja_dbg']);
+        const existing = await chrome.storage.local.get(['pja_post_click_diagnostics', 'pja_apply_diagnostics', 'pja_dbg']);
         const diagnostics = (existing.pja_post_click_diagnostics || []).slice(-4);
         diagnostics.push(compact);
+        const applyDiagnostics = (Array.isArray(existing.pja_apply_diagnostics) ? existing.pja_apply_diagnostics : []).slice(-199);
+        applyDiagnostics.push(pjaCompactApplyDiagnostic({
+          ...compact,
+          ats: snapshot.ats || '',
+          strategy: snapshot.strategy || '',
+          hostname: (() => { try { return new URL(snapshot.applyUrl || compact.page?.url || '').hostname; } catch (_) { return ''; } })(),
+          url: compact.page?.url || snapshot.applyUrl || '',
+          missingRequired: snapshot.missingRequired || [],
+          visibleErrors: compact.page?.errors || snapshot.visibleErrors || [],
+          formSummary: snapshot.formSummary || '',
+          recovery: snapshot.previousRecovery || [],
+        }));
         const dbg = (existing.pja_dbg || []).slice(-39);
         dbg.push('[diag] captured post-click ' + String(snapshot.reason || 'unknown') + ' screenshot=' + (screenshot ? 'yes' : 'no'));
         await chrome.storage.local.set({
           pja_last_post_click_diagnostic: diagnostic,
           pja_post_click_diagnostics: diagnostics,
+          pja_apply_diagnostics: applyDiagnostics,
           pja_dbg: dbg,
         });
         sendResponse({ ok: true, screenshot: !!screenshot, controls: compact.page?.controls?.length || 0, errors: compact.page?.errors?.length || 0 });

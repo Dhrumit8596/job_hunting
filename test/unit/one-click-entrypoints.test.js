@@ -46,6 +46,12 @@ module.exports = (t) => {
     cli.includes('--all-above-score') &&
     cli.includes('--required-channel <c>') &&
     cli.includes('--required-strategy <s>') &&
+    cli.includes('--coverage') &&
+    cli.includes('--coverage-count <n>') &&
+    cli.includes('--coverage-strategy <s>') &&
+    cli.includes('--coverage-all-supported') &&
+    cli.includes('--coverage-submit') &&
+    cli.includes('--browser-scan-timeout <n>') &&
     cli.includes('--attempt-cap <n>') &&
     cli.includes('retryBlockedHosts') &&
     cli.includes('planningDrops') &&
@@ -76,10 +82,17 @@ module.exports = (t) => {
     dev.includes('dry_run_planned') &&
     dev.includes('## Planning drops before launch') &&
     dev.includes('## Failure/drop groups') &&
+    dev.includes('## Highest reward fix clusters') &&
+    dev.includes('## Per-job failure diagnostics') &&
+    dev.includes('buildRetestManifest') &&
+    dev.includes('retestFile') &&
+    dev.includes('pja_apply_diagnostics') &&
     dev.includes('### By reason') &&
     dev.includes('### Recommended developer focus') &&
     dev.includes('Automation/confirmation gap') &&
     dev.includes('oneClickPreflight') &&
+    dev.includes('for (let attempt = 0; attempt < 3; attempt += 1)') &&
+    dev.includes("Object.prototype.hasOwnProperty.call(st, 'pja_resume_filename')") &&
     dev.includes('extension_not_connected') &&
     dev.includes('writeApplyRunReport') &&
     dev.includes('pja_ranked_apply') &&
@@ -87,6 +100,16 @@ module.exports = (t) => {
     dev.includes('applyAllAboveScore') &&
     dev.includes('requiredStrategies') &&
     dev.includes('strategyCoverage') &&
+    dev.includes('DEFAULT_COVERAGE_CHANNELS') &&
+    dev.includes('DEFAULT_COVERAGE_STRATEGIES') &&
+    dev.includes('coverageMode') &&
+    dev.includes('waitForBrowserChannelCoverage') &&
+    dev.includes('browserScan') &&
+    dev.includes("await launch('linkedin'") &&
+    dev.includes("{ fast: false }") &&
+    dev.includes('counts.hydrated = hydrated') &&
+    dev.includes('lastCounts.hydrated?.linkedin_easy_apply') &&
+    dev.includes('## Strategy coverage matrix') &&
     dev.includes('pja_application_ledger') &&
     dev.includes('This report intentionally omits candidate profile values'),
     'dev server can export sanitized apply-run failure/drop reports to reports/*.md'

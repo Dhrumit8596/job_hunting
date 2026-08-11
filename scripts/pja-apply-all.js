@@ -24,6 +24,12 @@ Options:
   --source-target <n>       Sourcing target before ranking
   --attempt-cap <n>         Maximum attempted jobs; 0 means no attempt cap
   --query <text>            Add a targeted sourcing query; can repeat
+  --coverage                Require real-job coverage across the default supported strategies
+  --coverage-count <n>      Require/reserve this many jobs per coverage bucket
+  --coverage-strategy <s>   Add one coverage ATS strategy; can repeat
+  --coverage-all-supported  Cover all currently supported default strategies/channels
+  --coverage-submit         Explicitly run coverage as full submit (default unless --dry-run)
+  --browser-scan-timeout <n> Browser scan wait in ms for LinkedIn/Indeed coverage
   --no-evidence             Allow lower-evidence jobs into the plan
   --port <n>                Dev server port (default: 6174)
   --json '<object>'         Merge arbitrary /apply-all JSON options
@@ -67,6 +73,20 @@ function readArgs(argv) {
       out.command = arg.toLowerCase();
     } else if (arg === '--help' || arg === '-h') out.help = true;
     else if (arg === '--dry-run') out.body.dryRun = true;
+    else if (arg === '--coverage' || arg === '--coverage-all-supported') {
+      out.body.coverage = true;
+    }
+    else if (arg === '--coverage-submit') {
+      out.body.coverage = true;
+      out.body.dryRun = false;
+    }
+    else if (arg === '--coverage-count') {
+      out.body.coverage = true;
+      out.body.coverageCount = Number(next());
+    }
+    else if (arg === '--browser-scan-timeout') {
+      out.body.browserScanTimeoutMs = Number(next());
+    }
     else if (arg === '--all-above-score') {
       out.body.applyAllAboveScore = true;
       out.body.stopMode = 'all_above_score';
@@ -91,6 +111,11 @@ function readArgs(argv) {
     else if (arg === '--required-strategy') {
       if (!Array.isArray(out.body.requiredStrategies)) out.body.requiredStrategies = [];
       out.body.requiredStrategies.push(next());
+    }
+    else if (arg === '--coverage-strategy') {
+      out.body.coverage = true;
+      if (!Array.isArray(out.body.coverageStrategies)) out.body.coverageStrategies = [];
+      out.body.coverageStrategies.push(next());
     }
     else if (arg === '--query') {
       if (!Array.isArray(out.body.queries)) out.body.queries = [];
@@ -171,12 +196,17 @@ function summarize(result) {
     planned: apply.planned ?? null,
     byChannel: apply.byChannel || null,
     byStrategy: apply.byStrategy || null,
+    coverage: apply.coverage || null,
+    coverageCount: apply.coverageCount || null,
+    channelCoverage: apply.channelCoverage || null,
+    strategyCoverage: apply.strategyCoverage || null,
     sourceWrote: source.wrote ?? null,
     sourceGate: source.report && source.report.gate ? {
       pass: source.report.gate.pass,
       uniqueIds: source.report.gate.uniqueIds,
       modalities: source.report.gate.modalities,
     } : null,
+    browserScan: source.report && source.report.browserScan ? source.report.browserScan : null,
     planningDrops: planningDrops ? { total: planningDrops.total, topReasons: dropCounts } : null,
     report: apply.report || null,
     error: data.error || apply.error || source.error || null,
@@ -207,6 +237,8 @@ function summarizeReport(result) {
     runId: data.runId || null,
     file: data.file || null,
     bytes: data.bytes ?? null,
+    retestFile: data.retestFile || null,
+    retestBytes: data.retestBytes ?? null,
     error: data.error || null,
   };
 }

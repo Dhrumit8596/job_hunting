@@ -115,10 +115,17 @@ module.exports = async (t) => {
   t.ok(source.includes("msg.type === 'CAPTURE_APPLY_DIAGNOSTIC'") &&
     source.includes('pja_last_post_click_diagnostic') &&
     source.includes('pja_post_click_diagnostics') &&
+    source.includes('pja_apply_diagnostics') &&
     source.includes('chrome.tabs.captureVisibleTab') &&
     source.includes('dataUrl.length > 650000') &&
     source.includes('[diag] captured post-click'),
   'background: post-click submit diagnostics persist bounded screenshot plus compact history');
+
+  t.ok(source.includes('function pjaCompactApplyDiagnostic(value)') &&
+    source.includes('const diagnostic = pjaCompactApplyDiagnostic(event.diagnostic || job.diagnostic || null)') &&
+    source.includes('diagnostic: pjaCompactApplyDiagnostic(failure)') &&
+    source.includes('submit_unclear|missing_required|needs_manual'),
+  'ranked dispatch: per-job diagnostics survive ledger reconciliation, resume recovery, and completed-run snapshots');
 
   t.ok(source.includes("chrome.tabs.create({ url: 'about:blank', active: true }") &&
     source.includes("pja_email_code_session") &&

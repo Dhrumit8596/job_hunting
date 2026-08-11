@@ -44,6 +44,12 @@ module.exports = (t) => {
     externalSource.includes('if (result.diagnostic) skipped.diagnostic = result.diagnostic') &&
     externalSource.includes('diagnostic: collectPostClickPageSnapshot()'),
   'external apply: email-code submit failures persist post-click URL/DOM diagnostics before deferral');
+  t.ok(externalSource.includes('async function buildTerminalApplyDiagnostic(job, result, applicationAt)') &&
+    externalSource.includes('pja_apply_diagnostics') &&
+    externalSource.includes('persistTerminalApplyDiagnostic(job, terminalDiagnostic)') &&
+    externalSource.includes('diagnostic: terminalDiagnostic') &&
+    externalSource.includes('inferDiagnosticPhase(reason)'),
+  'external apply: failed/unverified terminal outcomes persist compact per-job diagnostics into storage and ledger events');
   t.ok(externalSource.includes('committedReactSelectValue') &&
     externalSource.includes('[class*="single-value"],[class*="singleValue"],[class*="multi-value"],[class*="multiValue"]') &&
     externalSource.includes("role === 'combobox' ? committedReactSelectValue(el) : ''"),

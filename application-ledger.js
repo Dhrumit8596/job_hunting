@@ -113,6 +113,7 @@ function normalizeEvent(raw) {
   const occurredAt = firstMs(raw.occurredAt, raw.eventAt, confirmedAt, raw.updatedAt, raw.ts, raw.at, raw.appliedAt, applicationAt);
   const confirmationEmailId = String(raw.confirmationEmailId || raw.emailMessageId || raw.messageId || '').trim();
   const reason = String(raw.reason || raw.skipReason || '').trim();
+  const diagnostic = compactDiagnostic(raw.diagnostic);
   const eventSeed = [raw.runId || '', aliases.join('|'), role, status,
     confirmationSource, reason, confirmedAt == null ? '' : confirmedAt,
     occurredAt == null ? '' : occurredAt, confirmationEmailId].join('::');
@@ -135,6 +136,56 @@ function normalizeEvent(raw) {
     confirmedAt,
     applicationAt,
     occurredAt,
+    diagnostic,
+  };
+}
+
+function compactDiagnostic(value) {
+  if (!value || typeof value !== 'object') return null;
+  const pickText = (v, max = 220) => String(v || '')
+    .replace(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi, '[email]')
+    .replace(/(?:\+?1[\s.-]?)?(?:\(?\d{3}\)?[\s.-]?)\d{3}[\s.-]?\d{4}/g, '[phone]')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, max);
+  const arrayText = (arr, maxItems = 12, maxText = 160) => Array.isArray(arr)
+    ? arr.map(x => typeof x === 'string' ? pickText(x, maxText) : pickText(x && (x.label || x.name || x.text || x.reason || ''), maxText))
+      .filter(Boolean).slice(0, maxItems)
+    : [];
+  const recovery = Array.isArray(value.recovery) ? value.recovery.slice(-5).map(item => ({
+    attempt: Number(item && item.attempt) || 0,
+    reason: pickText(item && item.reason, 80),
+    classification: pickText(item && item.classification, 80),
+    likelyCause: pickText(item && item.likelyCause, 220),
+    actionsProposed: arrayText(item && item.actionsProposed, 6, 80),
+    actionsExecuted: Number(item && item.actionsExecuted) || 0,
+    retrySubmit: !!(item && item.retrySubmit),
+    advanceReason: pickText(item && item.advanceReason, 80),
+    recovered: !!(item && item.recovered),
+    beforeErrors: arrayText(item && item.beforeErrors, 6, 120),
+    afterErrors: arrayText(item && item.afterErrors, 6, 120),
+  })) : [];
+  return {
+    schemaVersion: 1,
+    phase: pickText(value.phase, 80),
+    reason: pickText(value.reason, 80),
+    ats: pickText(value.ats, 80),
+    strategy: pickText(value.strategy, 80),
+    hostname: pickText(value.hostname, 120),
+    url: pickText(value.url || value.applyUrl, 240),
+    missingRequired: arrayText(value.missingRequired, 20, 140),
+    visibleErrors: arrayText(value.visibleErrors, 20, 180),
+    formSummary: pickText(value.formSummary, 320),
+    controlCounts: value.controlCounts && typeof value.controlCounts === 'object' ? value.controlCounts : null,
+    submitButtons: arrayText(value.submitButtons, 10, 120),
+    radioGroups: Array.isArray(value.radioGroups) ? value.radioGroups.slice(0, 12).map(g => ({
+      name: pickText(g && g.name, 100),
+      checked: Number(g && g.checked) || 0,
+      options: arrayText(g && g.options, 8, 100),
+    })) : [],
+    recovery,
+    likelyCause: pickText(value.likelyCause, 280),
+    capturedAt: Number(value.capturedAt || value.ts) || null,
   };
 }
 

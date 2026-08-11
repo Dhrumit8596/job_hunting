@@ -6015,6 +6015,117 @@
   }
   if (typeof window !== 'undefined') window.pjaSameQueuedJob = pjaSameQueuedJob;
 
+  function pjaDiagnosticText(value, max = 180) {
+    return String(value || '')
+      .replace(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi, '[email]')
+      .replace(/(?:\+?1[\s.-]?)?(?:\(?\d{3}\)?[\s.-]?)\d{3}[\s.-]?\d{4}/g, '[phone]')
+      .replace(/\s+/g, ' ')
+      .trim()
+      .slice(0, max);
+  }
+
+  function inferDiagnosticPhase(reason) {
+    const r = String(reason || '').toLowerCase();
+    if (/posting_not_found|no_apply|apply_btn_no_form/.test(r)) return 'preflight';
+    if (/missing_required|selectinput|needs_manual/.test(r)) return 'required_field_check';
+    if (/resume/.test(r)) return 'resume_upload';
+    if (/submit|captcha|email_verification/.test(r)) return 'post_submit_confirmation';
+    if (/watchdog|stuck/.test(r)) return 'watchdog';
+    return 'fill';
+  }
+
+  async function buildTerminalApplyDiagnostic(job, result, applicationAt) {
+    const reason = result && result.reason || '';
+    const dom = collectApplyDomSummary();
+    const missing = Array.from(new Set([
+      ...(Array.isArray(result && result.fields) ? result.fields : []),
+      ...(Array.isArray(dom && dom.required) ? dom.required.map(m => m && (m.label || m.name || m.type || '')).filter(Boolean) : []),
+    ].map(x => pjaDiagnosticText(x, 140)).filter(Boolean))).slice(0, 30);
+    const controls = Array.isArray(dom && dom.controls) ? dom.controls : [];
+    const controlCounts = {};
+    for (const c of controls) {
+      const key = [String(c.tag || '').toLowerCase(), String(c.type || c.role || '').toLowerCase()].filter(Boolean).join(':') || 'unknown';
+      controlCounts[key] = (controlCounts[key] || 0) + 1;
+    }
+    const submitButtons = controls
+      .filter(c => /button|submit/i.test(String(c.tag || '') + ' ' + String(c.type || '') + ' ' + String(c.role || '') + ' ' + String(c.text || '')))
+      .map(c => pjaDiagnosticText(c.text || c.name || c.id || '', 120))
+      .filter(Boolean)
+      .slice(0, 12);
+    const radioGroups = (() => {
+      try {
+        const groups = {};
+        for (const input of pjaQueryAllExt('input[type="radio"]')) {
+          const name = input.name || input.id || 'radio';
+          let label = input.getAttribute('aria-label') || '';
+          try { if (!label && input.id) label = document.querySelector(`label[for="${CSS.escape(input.id)}"]`)?.textContent || ''; } catch (_) {}
+          label = label || input.closest('label')?.textContent || input.parentElement?.textContent || input.value || '';
+          const g = groups[name] || { name: pjaDiagnosticText(name, 100), checked: 0, options: [] };
+          if (input.checked) g.checked++;
+          if (g.options.length < 8) g.options.push(pjaDiagnosticText(label, 100));
+          groups[name] = g;
+        }
+        return Object.values(groups).slice(0, 12);
+      } catch (_) {
+        return [];
+      }
+    })();
+    let recovery = [];
+    try {
+      const rlog = await new Promise(resolve => chrome.storage.local.get('pja_recovery_log', d => resolve(Array.isArray(d.pja_recovery_log) ? d.pja_recovery_log : [])));
+      const jid = String(job.id || job.jobId || '');
+      recovery = rlog.filter(x => x && x.runId === (job.runId || '') &&
+        (String(x.jobId || '') === jid || (x.company === job.company && x.title === job.title))).slice(-6);
+    } catch (_) {}
+    const visibleErrors = Array.from(new Set([
+      ...(Array.isArray(dom && dom.errors) ? dom.errors : []),
+      ...(result && result.diagnostic && Array.isArray(result.diagnostic.visibleErrors) ? result.diagnostic.visibleErrors : []),
+    ].map(x => pjaDiagnosticText(x, 180)).filter(Boolean))).slice(0, 30);
+    return {
+      schemaVersion: 1,
+      runId: job.runId || '',
+      jobId: job.jobId || job.id || '',
+      company: pjaDiagnosticText(job.company, 120),
+      title: pjaDiagnosticText(job.title, 160),
+      ats: pjaDiagnosticText(job.ats || job.strategy || '', 80),
+      strategy: pjaDiagnosticText(job.strategy || job.ats || '', 80),
+      channel: pjaDiagnosticText(job.channel || job.ats || 'external', 80),
+      applyUrl: pjaDiagnosticText(job.applyUrl || location.href, 260),
+      url: pjaDiagnosticText(location.href, 260),
+      hostname: location.hostname,
+      phase: inferDiagnosticPhase(reason),
+      reason: pjaDiagnosticText(reason, 100),
+      missingRequired: missing,
+      visibleErrors,
+      formSummary: pjaDiagnosticText(`controls=${controls.length} missing=${missing.length} errors=${visibleErrors.length} title=${document.title || ''}`, 320),
+      controlCounts,
+      submitButtons,
+      radioGroups,
+      recovery,
+      stepLog: await readRecentDbg(),
+      applicationAt,
+      capturedAt: Date.now(),
+    };
+  }
+
+  async function persistTerminalApplyDiagnostic(job, diagnostic) {
+    if (!diagnostic) return null;
+    try {
+      await new Promise(resolve => chrome.storage.local.get('pja_apply_diagnostics', d => {
+        const list = (Array.isArray(d.pja_apply_diagnostics) ? d.pja_apply_diagnostics : []).slice(-199);
+        const key = [diagnostic.runId || '', diagnostic.jobId || '', diagnostic.applyUrl || '', diagnostic.reason || '', diagnostic.phase || ''].join('::');
+        const existing = list.findIndex(x => [x.runId || '', x.jobId || '', x.applyUrl || '', x.reason || '', x.phase || ''].join('::') === key);
+        if (existing >= 0) list[existing] = diagnostic;
+        else list.push(diagnostic);
+        chrome.storage.local.set({
+          pja_apply_diagnostics: list,
+          pja_last_apply_failure: { ...diagnostic, ts: Date.now() },
+        }, resolve);
+      }));
+    } catch (_) {}
+    return diagnostic;
+  }
+
   async function recordResult(job, result) {
     console.log('PJA ext-apply RESULT:', job.company, result.success ? '✓ APPLIED' : '✗ SKIP:', result.reason || '', result.fields?.join('; ') || '');
     // A recovered/reopened tab can finish after another tab or the service-worker watchdog has
@@ -6048,6 +6159,14 @@
     await new Promise(resolve => chrome.storage.local.set({ pja_ext_current: job }, resolve));
 
     const alreadyApplied = /^already_applied\b/i.test(String(result.reason || ''));
+    let terminalDiagnostic = null;
+    if (!result.success && !alreadyApplied) {
+      terminalDiagnostic = result.diagnostic && result.diagnostic.schemaVersion
+        ? result.diagnostic
+        : await buildTerminalApplyDiagnostic(job, result, applicationAt);
+      await persistTerminalApplyDiagnostic(job, terminalDiagnostic);
+      result.diagnostic = terminalDiagnostic;
+    }
 
     // Persist successful applies — and prior-session already-applied detections — to a DURABLE log
     // (pja_ext_queue gets overwritten each run, so sourcing dedupe needs this to avoid re-surfacing
@@ -6068,6 +6187,7 @@
         success: result.success ? true : (uncertain || pending ? null : false), reason: result.reason || '',
         confirmationSource: result.success ? 'page' : null,
         confirmedAt: result.success ? job._confirmedAt : null,
+        diagnostic: terminalDiagnostic,
         applicationAt, occurredAt: Date.now()
       };
 
