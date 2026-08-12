@@ -22,10 +22,13 @@ module.exports = async (t) => {
     called += 1;
     t.ok(String(url).includes('https://www.indeed.com/jobs'), 'indeed adapter calls indeed search endpoint');
     t.ok(/q=quality%20engineer/.test(String(url)), 'indeed adapter sends query term');
+    t.ok(/l=Santa%20Clara%2C%20CA/.test(String(url)) && /radius=60/.test(String(url)),
+      'indeed adapter uses caller-provided target location and radius');
     return okResponse;
   };
 
-  const first = await adapter.fetchJobs({}, { queries: ['quality engineer'], timeoutMs: 2000 });
+  const first = await adapter.fetchJobs({}, { queries: ['quality engineer'], timeoutMs: 2000,
+    locationQuery: 'Santa Clara, CA', targetRadiusMiles: 60 });
   t.eq(called, 1, 'indeed adapter performs exactly one search request for one query');
   t.eq(first.length, 2, 'indeed adapter extracts two jobs from embedded JSON');
   const firstJob = first.find(j => j.id === 'jk_qa_001');

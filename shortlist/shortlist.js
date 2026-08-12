@@ -369,6 +369,13 @@ function setRankedStatus(text, cls = '') {
   el.textContent = text || '';
 }
 
+function setRunCenterStatus(text, cls = '') {
+  const el = document.getElementById('run-center-status');
+  if (!el) return;
+  el.className = 'ranked-status' + (cls ? ' ' + cls : '');
+  el.textContent = text || '';
+}
+
 async function callApplyAll({ dryRun }) {
   const target = rankedNumber('ranked-target', 30, 1, 200);
   const batch = rankedNumber('ranked-batch', 5, 1, 25);
@@ -424,7 +431,42 @@ function wireRankedApplyLauncher() {
   });
 }
 
+function initAdvancedApplyTools() {
+  chrome.storage.local.get(['pja_dev_mode', 'pja_advanced_ui', 'pja_prefs'], r => {
+    const advanced = !!(r.pja_dev_mode || r.pja_advanced_ui || r.pja_prefs && r.pja_prefs.advancedUi);
+    document.querySelectorAll('.pja-advanced-apply-tools').forEach(el => {
+      el.style.display = advanced ? '' : 'none';
+    });
+  });
+}
+
+async function refreshRunCenterStatus() {
+  try {
+    const resp = await fetch('http://localhost:6174/apply-status');
+    const data = await resp.json().catch(() => ({}));
+    const r = data.run || data.lastCompletedRun || null;
+    if (!r) {
+      setRunCenterStatus(data.clients ? 'No active run. Start the unified flow from the extension popup.' : 'Extension/dev server disconnected.', data.clients ? '' : 'err');
+      return;
+    }
+    const total = r.total || 0;
+    const idx = r.currentIndex != null ? Math.min(r.currentIndex, total) : '?';
+    setRunCenterStatus(`${r.status || 'run'} · ${idx}/${total} · confirmed ${r.confirmed || 0} · failed ${r.failed || 0}`, 'ok');
+  } catch (e) {
+    setRunCenterStatus('Run status unavailable: ' + (e.message || e), 'err');
+  }
+}
+
+function wireRunCenterPanel() {
+  document.getElementById('btn-open-popup-help')?.addEventListener('click', () => {
+    setRunCenterStatus('Open the extension toolbar popup, then click Find & Apply.');
+  });
+  document.getElementById('btn-ranked-status')?.addEventListener('click', refreshRunCenterStatus);
+}
+
 // ── Init ──────────────────────────────────────────────────────────────────────
 load();
 loadCorpusBanner();
+initAdvancedApplyTools();
+wireRunCenterPanel();
 wireRankedApplyLauncher();

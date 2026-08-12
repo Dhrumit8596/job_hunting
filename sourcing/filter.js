@@ -15,6 +15,46 @@ const CA_LOC = /\b(california|\bca\b|san jose|santa clara|sunnyvale|fremont|alam
 const NON_US_LOC = /\b(canada|ontario|quebec|british columbia|vancouver|toronto|montreal|mexico|europe|united kingdom|\buk\b|ireland|germany|france|italy|spain|netherlands|sweden|poland|romania|israel|india|china|taiwan|japan|korea|singapore|australia|brazil|argentina|emea|apac|latam)\b/i;
 const US_LOC = /\b(united states|u\.s\.|usa|alabama|alaska|arizona|arkansas|california|colorado|connecticut|delaware|florida|georgia|hawaii|idaho|illinois|indiana|iowa|kansas|kentucky|louisiana|maine|maryland|massachusetts|michigan|minnesota|mississippi|missouri|montana|nebraska|nevada|new hampshire|new jersey|new mexico|new york|north carolina|north dakota|ohio|oklahoma|oregon|pennsylvania|rhode island|south carolina|south dakota|tennessee|texas|utah|vermont|virginia|washington|west virginia|wisconsin|wyoming|district of columbia|washington,? dc|phoenix|chandler|hillsboro|portland|austin|dallas|boise|albany|malta,? ny|manassas)\b/i;
 const US_STATE_CODE = /(?:^|[,\s])(AL|AK|AZ|AR|CA|CO|CT|DE|FL|GA|HI|ID|IL|IN|IA|KS|KY|LA|ME|MD|MA|MI|MN|MS|MO|MT|NE|NV|NH|NJ|NM|NY|NC|ND|OH|OK|OR|PA|RI|SC|SD|TN|TX|UT|VT|VA|WA|WV|WI|WY|DC)(?:\s|,|$)/;
+const CITY_COORDS = {
+  'santa clara, ca': [37.3541, -121.9552],
+  'san jose, ca': [37.3382, -121.8863],
+  'sunnyvale, ca': [37.3688, -122.0363],
+  'mountain view, ca': [37.3861, -122.0839],
+  'palo alto, ca': [37.4419, -122.1430],
+  'menlo park, ca': [37.4530, -122.1817],
+  'redwood city, ca': [37.4852, -122.2364],
+  'san mateo, ca': [37.5630, -122.3255],
+  'foster city, ca': [37.5585, -122.2711],
+  'san carlos, ca': [37.5072, -122.2605],
+  'milpitas, ca': [37.4323, -121.8996],
+  'fremont, ca': [37.5485, -121.9886],
+  'newark, ca': [37.5297, -122.0402],
+  'union city, ca': [37.5934, -122.0438],
+  'hayward, ca': [37.6688, -122.0808],
+  'pleasanton, ca': [37.6624, -121.8747],
+  'livermore, ca': [37.6819, -121.7680],
+  'oakland, ca': [37.8044, -122.2712],
+  'alameda, ca': [37.7652, -122.2416],
+  'berkeley, ca': [37.8715, -122.2730],
+  'emeryville, ca': [37.8395, -122.2892],
+  'south san francisco, ca': [37.6547, -122.4077],
+  'san francisco, ca': [37.7749, -122.4194],
+  'cupertino, ca': [37.3230, -122.0322],
+  'campbell, ca': [37.2872, -121.9500],
+  'los gatos, ca': [37.2358, -121.9624],
+  'saratoga, ca': [37.2638, -122.0230],
+  'morgan hill, ca': [37.1305, -121.6544],
+  'gilroy, ca': [37.0058, -121.5683],
+  'santa cruz, ca': [36.9741, -122.0308],
+  'sacramento, ca': [38.5816, -121.4944],
+  'roseville, ca': [38.7521, -121.2880],
+  'irvine, ca': [33.6846, -117.8265],
+  'san diego, ca': [32.7157, -117.1611],
+  'carlsbad, ca': [33.1581, -117.3506],
+};
+const ZIP_COORDS = {
+  '95051': CITY_COORDS['santa clara, ca'],
+};
 
 // Export-control / defense roles that block a TN (non-US-person) candidate.
 const ITAR_EXCLUDE = /\b(itar|ear|export control|export-control|us person|u\.s\. person|us citizen(ship)? required|security clearance|secret clearance|defense|aerospace & defense|dod\b|missile|munition|weapon)\b/i;
@@ -64,6 +104,61 @@ function isEligibleUSLocation(location, remote) {
   return US_LOC.test(loc) || US_STATE_CODE.test(loc);
 }
 
+function normCity(value) {
+  return String(value || '').toLowerCase().replace(/\s+/g, ' ').replace(/\./g, '').trim();
+}
+
+function targetCoords(target = {}) {
+  const zip = String(target.zip || '').trim();
+  if (ZIP_COORDS[zip]) return ZIP_COORDS[zip];
+  const city = normCity(target.city || target.label);
+  const state = normCity(target.state || 'CA').toUpperCase();
+  return CITY_COORDS[`${city}, ${state.toLowerCase()}`] || null;
+}
+
+function locationCoords(location) {
+  const text = normCity(location);
+  for (const [key, coords] of Object.entries(CITY_COORDS)) {
+    const city = key.split(',')[0];
+    if (new RegExp(`\\b${city.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`).test(text)) return coords;
+  }
+  return null;
+}
+
+function milesBetween(a, b) {
+  if (!a || !b) return null;
+  const toRad = n => n * Math.PI / 180;
+  const [lat1, lon1] = a, [lat2, lon2] = b;
+  const dLat = toRad(lat2 - lat1);
+  const dLon = toRad(lon2 - lon1);
+  const h = Math.sin(dLat / 2) ** 2 + Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLon / 2) ** 2;
+  return 3958.8 * 2 * Math.atan2(Math.sqrt(h), Math.sqrt(1 - h));
+}
+
+function isAllowedRemote(location, remote, policy) {
+  if (!(/\b(remote|work from home|wfh)\b/i.test(String(location || '')) || remote)) return false;
+  if (NON_US_LOC.test(String(location || ''))) return false;
+  if (policy === 'no_remote') return false;
+  if (policy === 'ca_remote_only') return /\b(california|\bca\b)\b/i.test(String(location || ''));
+  return true;
+}
+
+function isWithinTargetRadius(location, target, radiusMiles) {
+  const center = targetCoords(target);
+  const point = locationCoords(location);
+  const radius = Number(radiusMiles);
+  if (!center || !point || !Number.isFinite(radius) || radius <= 0) return null;
+  return milesBetween(center, point) <= radius;
+}
+
+function isEligibleTargetLocation(location, remote, opts = {}) {
+  if (isAllowedRemote(location, remote, opts.remotePolicy)) return true;
+  const within = isWithinTargetRadius(location, opts.targetLocation || {}, opts.targetRadiusMiles);
+  if (within != null) return within;
+  if (/^hard$/i.test(String(opts.locationStrictness || ''))) return false;
+  return isEligibleLocation(location, remote);
+}
+
 function isItarExcluded(text) {
   return ITAR_EXCLUDE.test(String(text || ''));
 }
@@ -82,6 +177,8 @@ function filterJobs(jobs, opts = {}) {
     // export-control: drop on company-level blocklist OR any ITAR/EAR text in title+company+desc
     if (isExportControlledCompany(j.company)) return false;
     if (isItarExcluded([j.title, j.company, j.description].filter(Boolean).join(' '))) return false;
+    if (/^hard$/i.test(String(opts.locationStrictness || '')) &&
+        !isEligibleTargetLocation(j.location, j.remote, opts)) return false;
     if (nationwideUS && !isEligibleUSLocation(j.location, j.remote)) return false;
     if (!nationwideUS && caOrRemoteOnly && !isEligibleLocation(j.location, j.remote)) return false;
     return true;
@@ -119,4 +216,4 @@ function medicalWaferBoost(title, company, description, score) {
   return Math.min(100, s + boost);
 }
 
-module.exports = { isEligibleTitle, isEligibleLocation, isEligibleUSLocation, isItarExcluded, isExportControlledCompany, filterJobs, tnAdjustScore, medicalWaferBoost, MEDICAL_RE, CORE_DOMAIN_RE, ELIGIBLE_TITLE, TITLE_EXCLUDE, COMPANY_EXPORT_BLOCK };
+module.exports = { isEligibleTitle, isEligibleLocation, isEligibleUSLocation, isEligibleTargetLocation, isWithinTargetRadius, isItarExcluded, isExportControlledCompany, filterJobs, tnAdjustScore, medicalWaferBoost, MEDICAL_RE, CORE_DOMAIN_RE, ELIGIBLE_TITLE, TITLE_EXCLUDE, COMPANY_EXPORT_BLOCK };

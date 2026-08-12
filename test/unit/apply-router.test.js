@@ -54,6 +54,10 @@ module.exports = (t) => {
   for (const k of Object.keys(STRATEGIES)) {
     t.ok(STRATEGIES[k].engine && STRATEGIES[k].tier, 'registry entry complete: ' + k);
   }
+  t.eq(STRATEGIES.eightfold.applyStrategyStatus, 'unsupported', 'eightfold is visible as unsupported for autonomous E2E');
+  t.eq(STRATEGIES.eightfold.engine, 'unsupported', 'eightfold cannot silently fall through to generic apply');
+  t.eq(STRATEGIES.workday.applyStrategyStatus, 'supported_but_auth_sensitive', 'workday is supported but auth-sensitive');
+  t.eq(STRATEGIES.greenhouse.applyStrategyStatus, 'supported', 'greenhouse is supported');
 
   // --- readSignals tolerates a null/garbage doc ---
   const sig = readSignals(null);

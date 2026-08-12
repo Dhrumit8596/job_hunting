@@ -18,12 +18,12 @@
   // phases). tier reflects current coverage (see APPLY_ENGINE_PLAN.md §2.3). needsAccount/multiStep/
   // iframe drive prepare() and the hardening work in Phase D.
   const STRATEGIES = {
-    workday:        { ats: 'workday',        engine: 'workday',   tier: 'deep',        needsAccount: true,  multiStep: true,  iframe: false },
-    greenhouse:     { ats: 'greenhouse',     engine: 'greenhouse', tier: 'deep',       needsAccount: false, multiStep: false, iframe: false },
-    lever:          { ats: 'lever',          engine: 'generic',   tier: 'partial',     needsAccount: false, multiStep: false, iframe: false },
-    ashby:          { ats: 'ashby',          engine: 'generic',   tier: 'partial',     needsAccount: false, multiStep: false, iframe: false },
-    smartrecruiters:{ ats: 'smartrecruiters',engine: 'generic',   tier: 'partial',     needsAccount: false, multiStep: false, iframe: false },
-    eightfold:      { ats: 'eightfold',      engine: 'generic',   tier: 'hard',        needsAccount: true,  multiStep: true,  iframe: false },
+    workday:        { ats: 'workday',        engine: 'workday',   tier: 'deep',        applyStrategyStatus: 'supported_but_auth_sensitive', needsAccount: true,  multiStep: true,  iframe: false },
+    greenhouse:     { ats: 'greenhouse',     engine: 'greenhouse', tier: 'deep',       applyStrategyStatus: 'supported', needsAccount: false, multiStep: false, iframe: false },
+    lever:          { ats: 'lever',          engine: 'generic',   tier: 'partial',     applyStrategyStatus: 'supported', needsAccount: false, multiStep: false, iframe: false },
+    ashby:          { ats: 'ashby',          engine: 'generic',   tier: 'partial',     applyStrategyStatus: 'supported', needsAccount: false, multiStep: false, iframe: false },
+    smartrecruiters:{ ats: 'smartrecruiters',engine: 'generic',   tier: 'partial',     applyStrategyStatus: 'supported', needsAccount: false, multiStep: false, iframe: false },
+    eightfold:      { ats: 'eightfold',      engine: 'unsupported', tier: 'none',      applyStrategyStatus: 'unsupported', needsAccount: true,  multiStep: true,  iframe: false, unsupportedReason: 'unsupported_eightfold_portal_auth' },
     icims:          { ats: 'icims',          engine: 'generic',   tier: 'hard',        needsAccount: true,  multiStep: true,  iframe: true  },
     taleo:          { ats: 'taleo',          engine: 'generic',   tier: 'hard',        needsAccount: true,  multiStep: true,  iframe: true  },
     successfactors: { ats: 'successfactors', engine: 'generic',   tier: 'hard',        needsAccount: true,  multiStep: true,  iframe: false },
@@ -33,10 +33,10 @@
     bamboohr:       { ats: 'bamboohr',       engine: 'generic',   tier: 'single-page', needsAccount: false, multiStep: false, iframe: false },
     paylocity:      { ats: 'paylocity',      engine: 'generic',   tier: 'single-page', needsAccount: false, multiStep: false, iframe: false },
     rippling:       { ats: 'rippling',       engine: 'generic',   tier: 'single-page', needsAccount: false, multiStep: false, iframe: false },
-    indeed:         { ats: 'indeed',         engine: 'indeed',    tier: 'partial',     needsAccount: false, multiStep: true,  iframe: false },
-    linkedin_ea:    { ats: 'linkedin',       engine: 'linkedin_ea', tier: 'partial',   needsAccount: false, multiStep: true,  iframe: false },
-    generic:        { ats: '',               engine: 'generic',   tier: 'unknown',     needsAccount: false, multiStep: false, iframe: false },
-    unsupported:    { ats: '',               engine: 'unsupported', tier: 'none',      needsAccount: false, multiStep: false, iframe: false },
+    indeed:         { ats: 'indeed',         engine: 'indeed',    tier: 'partial',     applyStrategyStatus: 'supported_but_auth_sensitive', needsAccount: false, multiStep: true,  iframe: false },
+    linkedin_ea:    { ats: 'linkedin',       engine: 'linkedin_ea', tier: 'partial',   applyStrategyStatus: 'supported_but_auth_sensitive', needsAccount: false, multiStep: true,  iframe: false },
+    generic:        { ats: '',               engine: 'generic',   tier: 'unknown',     applyStrategyStatus: 'unknown_needs_resolution', needsAccount: false, multiStep: false, iframe: false },
+    unsupported:    { ats: '',               engine: 'unsupported', tier: 'none',      applyStrategyStatus: 'unsupported', needsAccount: false, multiStep: false, iframe: false, unsupportedReason: 'unsupported_apply_strategy' },
   };
   const handlers = Object.create(null);
 
@@ -113,8 +113,8 @@
   async function executeStrategy(job, context) {
     const route = resolveStrategy(job || {}, context && context.url, context && context.signals);
     const handler = handlers[route.name] || handlers[route.engine] || handlers.generic;
-    if (!handler || route.name === 'unsupported') {
-      return { handled: false, route, reason: route.name === 'unsupported' ? 'unsupported_apply_strategy' : 'missing_apply_handler' };
+    if (!handler || route.name === 'unsupported' || route.applyStrategyStatus === 'unsupported') {
+      return { handled: false, route, reason: route.unsupportedReason || (route.name === 'unsupported' ? 'unsupported_apply_strategy' : 'missing_apply_handler') };
     }
     const result = await handler(Object.assign({}, context || {}, { job: job || {}, route }));
     return Object.assign({ handled: true, route }, result || {});

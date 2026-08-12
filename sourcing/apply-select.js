@@ -75,20 +75,32 @@
     try { u = new URL(String(applyUrl || '')); } catch (_) { return 'invalid_apply_url'; }
     const host = u.hostname.toLowerCase();
     const path = u.pathname.toLowerCase();
+    const strat = String(strategy || '').toLowerCase();
     // SAP SuccessFactors Talent Community URLs are lead-capture/signup shells in the observed
     // corpus, not requisition application forms. They render only search/cookie/talent controls.
-    if (/successfactors|careers\.tsmc\.com/i.test(host + path) && /\/talentcommunity\/apply\//i.test(path)) {
+    if ((/successfactors|careers\.tsmc\.com/i.test(host + path) || strat === 'successfactors') && /\/talentcommunity\/apply\//i.test(path)) {
       return 'unsupported_successfactors_talentcommunity';
     }
     // Jobicy apply buttons open hash popups/outbound lead capture, not inline forms under our
     // current autonomous external-apply path.
-    if (/(^|\.)jobicy\.com$/i.test(host)) return 'unsupported_jobicy_no_inline_form';
+    if (/(^|\.)jobicy\.com$/i.test(host) || strat === 'jobicy') return 'unsupported_jobicy_no_inline_form';
     // Eightfold/GF career portals require account-auth portal navigation before a real form; keep
     // them out of autonomous batches until that auth path is implemented.
-    if (/careers\.gf\.com$/i.test(host) || String(strategy || '').toLowerCase() === 'eightfold') {
+    if (/careers\.gf\.com$/i.test(host) || /eightfold|phenompeople|oraclecloud/i.test(host) || strat === 'eightfold') {
       return 'unsupported_eightfold_portal_auth';
     }
     return '';
+  }
+
+  function applyCapabilityStatus(applyUrl, strategy) {
+    const unsupportedReason = unsupportedAutonomousApplyReason(applyUrl, strategy);
+    if (unsupportedReason) return { status: 'unsupported', reason: unsupportedReason };
+    const s = String(strategy || '').toLowerCase();
+    if (/^(workday|indeed|linkedin_ea)$/.test(s)) return { status: 'supported_but_auth_sensitive', reason: '' };
+    if (/^(greenhouse|lever|ashby|smartrecruiters|workable|breezy|bamboohr|paylocity|rippling|jobvite|generic)$/.test(s)) {
+      return { status: 'supported', reason: '' };
+    }
+    return { status: 'unknown_needs_resolution', reason: 'unknown_apply_strategy' };
   }
 
   function compactPlanJob(id, p, st, reason, extra = {}) {
@@ -98,6 +110,8 @@
     if (!channel && p && (p.isEasyApply || (p.ats === 'linkedin' && p.sourcePlatform === 'linkedin'))) channel = p.isEasyApply ? 'linkedin_easy_apply' : '';
     if (!channel && p && p.indeedApply) channel = 'indeed_apply';
     if (!channel) channel = 'external';
+    if (channel === 'linkedin_easy_apply') strategy = 'linkedin_ea';
+    else if (channel === 'indeed_apply') strategy = 'indeed';
     return {
       id,
       company: p && p.company || '',
@@ -169,13 +183,16 @@
     const scorePending = includeUnscored && status === 'score_pending';
     if (!deferred && status !== 'sourced' && !scorePending) return 'ineligible_state';
     if (!p.applyUrl) return 'missing_apply_url';
-    const strategy = detectAts(p.applyUrl) || p.detectedAts || p.ats || '';
-    const unsupportedReason = unsupportedAutonomousApplyReason(p.applyUrl, strategy);
-    if (unsupportedReason) return unsupportedReason;
     let channel = p.channel || '';
     if (!channel && (p.isEasyApply || (p.ats === 'linkedin' && p.sourcePlatform === 'linkedin'))) channel = p.isEasyApply ? 'linkedin_easy_apply' : '';
     if (!channel && p.indeedApply) channel = 'indeed_apply';
     if (!channel) channel = 'external';
+    const strategy = channel === 'linkedin_easy_apply' ? 'linkedin_ea'
+      : channel === 'indeed_apply' ? 'indeed'
+      : detectAts(p.applyUrl) || p.detectedAts || p.ats || '';
+    const capability = applyCapabilityStatus(p.applyUrl, strategy || 'generic');
+    if (capability.status === 'unsupported') return capability.reason;
+    if (capability.status === 'unknown_needs_resolution') return capability.reason;
     const aggregatorOnly = /(^|\.)(linkedin|indeed|glassdoor)\.com$/i.test(applyHost);
     if (channel === 'external' && aggregatorOnly && !p.detectedAts) return 'aggregator_without_apply_destination';
     if (atsAllow && !atsAllow.has(String(strategy).toLowerCase())) return 'ats_not_allowed';
@@ -271,13 +288,15 @@
       const scorePending = includeUnscored && status === 'score_pending';
       if (!deferred && status !== 'sourced' && !scorePending) continue; // in-flight/unknown → skip
       if (!p.applyUrl) continue;                                     // nothing to open
-      const strategy = detectAts(p.applyUrl) || p.detectedAts || p.ats || '';
-      const unsupportedReason = unsupportedAutonomousApplyReason(p.applyUrl, strategy);
-      if (unsupportedReason) continue;
       let channel = p.channel || '';
       if (!channel && (p.isEasyApply || (p.ats === 'linkedin' && p.sourcePlatform === 'linkedin'))) channel = p.isEasyApply ? 'linkedin_easy_apply' : '';
       if (!channel && p.indeedApply) channel = 'indeed_apply';
       if (!channel) channel = 'external';
+      const strategy = channel === 'linkedin_easy_apply' ? 'linkedin_ea'
+        : channel === 'indeed_apply' ? 'indeed'
+        : detectAts(p.applyUrl) || p.detectedAts || p.ats || '';
+      const capability = applyCapabilityStatus(p.applyUrl, strategy || 'generic');
+      if (capability.status === 'unsupported' || capability.status === 'unknown_needs_resolution') continue;
       // Browser listings whose external destination was not resolved are valid sourcing leads,
       // but they are not safe autonomous-apply targets yet.
       const aggregatorOnly = /(^|\.)(linkedin|indeed|glassdoor)\.com$/i.test(applyHost);
@@ -286,6 +305,7 @@
       out.push({
         id, applyUrl: p.applyUrl, company: p.company, title: p.title, location: p.location,
         ats: p.ats || '', fitScore: hasFit ? Number(fit) : null, attempts: st.attempts || 0, strategy, channel,
+        applyStrategyStatus: capability.status,
         sourcePlatform: p.sourcePlatform || '', sourceJobId: p.sourceJobId || '',
         discoveredAt: p.discoveredAt || '',
         jobId: p.sourceJobId || '', listingUrl: p.listingUrl || '',
@@ -356,12 +376,12 @@
   // Result reason (from external-apply.js recordResult) → next corpus state.
   const APPLIED = new Set(['applied', 'already_applied']);
   const DEAD = new Set(['posting_not_found']);
-  const NEEDS_LOGIN = new Set(['needs_login', 'google_sso_only', 'workday_account_locked']);
+  const NEEDS_LOGIN = new Set(['needs_login', 'auth_blocked', 'google_sso_only', 'workday_account_locked']);
   // Blocked by something a human must clear (never auto-solved) — defer immediately, don't retry-spin.
   // stuck_budget = exceeded the cross-reload wall-clock/load budget (unbounded stall) → defer.
-  const NEEDS_MANUAL = new Set(['workday_captcha', 'captcha', 'captcha_after_submit', 'email_verification_required',
+  const NEEDS_MANUAL = new Set(['workday_captcha', 'captcha', 'captcha_or_antibot', 'captcha_after_submit', 'email_verification_required',
     'linkedin_checkpoint', 'daily_limit', 'linkedin_daily_limit', 'chatbot_apply_manual',
-    'ready_to_submit_review', 'stuck_budget',
+    'ready_to_submit_review', 'stuck_budget', 'handler_timeout', 'success_unverified', 'unsupported_strategy',
     // These are stable ATS/UI blockers observed in live runs. Retrying them three times only
     // burns the batch budget; defer for manual review and let the queue advance immediately.
     'no_apply_btn_on_description', 'no_apply_path', 'no_submit_btn', 'wd_selectinput_blocked',
@@ -404,7 +424,7 @@
 
   const API = { buildApplySet, buildApplyPlan, resultToState, poolStatus, roleKey, applyUrlKey, stableRecordId,
     recordIdentityIds, appliedIdentity, greenhouseEmbedFallback, exceededBudget, queueJobKey,
-    watchdogDecision, unsupportedAutonomousApplyReason };
+    watchdogDecision, unsupportedAutonomousApplyReason, applyCapabilityStatus };
   if (root) root.PJAApplySelect = API;
   if (typeof module !== 'undefined' && module.exports) module.exports = API;
 })(typeof self !== 'undefined' ? self : (typeof globalThis !== 'undefined' ? globalThis : this));

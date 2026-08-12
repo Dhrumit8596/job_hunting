@@ -172,6 +172,8 @@ async function fetchText(url, timeoutMs) {
 async function fetchJobs(_source, opts = {}) {
   const queries = opts.queries || ['quality engineer', 'process engineer', 'manufacturing engineer'];
   const timeoutMs = opts.timeoutMs || 15000;
+  const locationQuery = String(opts.locationQuery || LOCATION_DEFAULT).trim() || LOCATION_DEFAULT;
+  const radius = opts.targetRadiusMiles != null ? Math.max(1, Math.min(500, Number(opts.targetRadiusMiles) || 0)) : null;
   const seen = new Set();
   const out = [];
   const pushUnique = job => {
@@ -182,7 +184,7 @@ async function fetchJobs(_source, opts = {}) {
   };
 
   for (const q of queries) {
-    const url = `https://www.indeed.com/jobs?q=${encodeURIComponent(String(q))}&l=${encodeURIComponent(LOCATION_DEFAULT)}&sort=date`;
+    const url = `https://www.indeed.com/jobs?q=${encodeURIComponent(String(q))}&l=${encodeURIComponent(locationQuery)}${radius ? `&radius=${radius}` : ''}&sort=date`;
     try {
       const html = await fetchText(url, timeoutMs);
       if (isBlockedPage(html)) return out;

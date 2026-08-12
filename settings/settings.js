@@ -44,6 +44,40 @@ const PROFILE_FIELDS = [
   'workAuth','requireSponsorship','visaStatus','willingToRelocate','referralSource'
 ];
 
+function meaningfulProfileCount(profile) {
+  if (!profile || typeof profile !== 'object' || Array.isArray(profile)) return 0;
+  return Object.entries(profile).filter(([k, v]) => k !== 'savedAt' && v != null && String(v).trim()).length;
+}
+
+function mergeProfileForSave(previous, incoming) {
+  const prev = previous && typeof previous === 'object' && !Array.isArray(previous) ? previous : {};
+  const nextIn = incoming && typeof incoming === 'object' && !Array.isArray(incoming) ? incoming : {};
+  if (meaningfulProfileCount(nextIn) === 0 && meaningfulProfileCount(prev) > 0) {
+    return { ok: false, profile: prev, reason: 'rejected_empty_profile_overwrite' };
+  }
+  const merged = Object.assign({}, prev);
+  for (const [k, v] of Object.entries(nextIn)) {
+    if (v === '' && prev[k] != null && String(prev[k]).trim()) continue;
+    merged[k] = v;
+  }
+  const deletedRequired = ['firstName', 'lastName', 'email', 'phone'].filter(k =>
+    prev[k] != null && String(prev[k]).trim() && !(merged[k] != null && String(merged[k]).trim()));
+  if (meaningfulProfileCount(prev) >= 3 && deletedRequired.length) {
+    return { ok: false, profile: prev, reason: 'rejected_required_profile_field_deletion:' + deletedRequired.join(',') };
+  }
+  return { ok: true, profile: merged, reason: 'merged_profile_write' };
+}
+
+function auditProfileSave(previous, attempted, accepted, reason) {
+  chrome.storage.local.get('pja_profile_write_audit', r => {
+    const audit = Array.isArray(r.pja_profile_write_audit) ? r.pja_profile_write_audit.slice(-39) : [];
+    audit.push({ ts: Date.now(), source: 'settings:save-profile',
+      previousKeyCount: meaningfulProfileCount(previous), nextKeyCount: meaningfulProfileCount(attempted),
+      accepted: !!accepted, reason });
+    chrome.storage.local.set({ pja_profile_write_audit: audit });
+  });
+}
+
 chrome.storage.local.get('pja_profile', r => {
   const saved = r.pja_profile || {};
   const profile = Object.assign({}, PROFILE_DEFAULTS, saved);
@@ -99,27 +133,102 @@ document.getElementById('btn-save-profile').addEventListener('click', () => {
   });
   // Keep fullName in sync
   profile.fullName = [profile.firstName, profile.lastName].filter(Boolean).join(' ');
-  chrome.storage.local.set({ pja_profile: profile }, () => {
-    showStatus(document.getElementById('profile-status'), '✓ Profile saved', 'success');
+  chrome.storage.local.get('pja_profile', r => {
+    const decision = mergeProfileForSave(r.pja_profile || {}, profile);
+    auditProfileSave(r.pja_profile || {}, profile, decision.ok, decision.reason);
+    if (!decision.ok) {
+      chrome.storage.local.set({ pja_profile_write_rejected: { ts: Date.now(), source: 'settings:save-profile', reason: decision.reason } });
+      showStatus(document.getElementById('profile-status'), 'Profile save blocked: ' + decision.reason, 'error');
+      return;
+    }
+    chrome.storage.local.set({ pja_profile: decision.profile, pja_profile_backup: decision.profile,
+      pja_profile_last_good_at: Date.now() }, () => {
+      showStatus(document.getElementById('profile-status'), '✓ Profile saved', 'success');
+    });
   });
 });
 
 // ── Application Preferences (pja_prefs) ─────────────────────────────────────────
-const PREF_FIELDS = ['compensation', 'workMode', 'relocation', 'startDate', 'screeningStance'];
-chrome.storage.local.get('pja_prefs', r => {
+const PREF_FIELDS = [
+  'compensation', 'workMode', 'relocation', 'startDate', 'screeningStance',
+  'targetLocationLabel', 'targetLocationCity', 'targetLocationState', 'targetLocationZip',
+  'targetLocationCountry', 'targetRadiusMiles', 'locationStrictness', 'remotePolicy', 'searchTitles'
+];
+const DEFAULT_SEARCH_TITLES = [
+  'quality engineer',
+  'manufacturing quality engineer',
+  'inspection engineer',
+  'metrology engineer',
+  'process engineer',
+  'supplier quality engineer',
+  'validation engineer',
+  'test engineer',
+  'equipment engineer',
+  'failure analysis engineer',
+];
+
+function normalizedSearchTitles(value) {
+  if (Array.isArray(value)) return value.join('\n');
+  return String(value || '');
+}
+
+function deriveSearchPrefs(prefs, profile) {
+  const next = Object.assign({}, prefs || {});
+  if (!next.targetLocationCity && profile.city) next.targetLocationCity = profile.city;
+  if (!next.targetLocationState && profile.state) next.targetLocationState = profile.state;
+  if (!next.targetLocationZip && profile.zip) next.targetLocationZip = profile.zip;
+  if (!next.targetLocationCountry && profile.country) next.targetLocationCountry = profile.country;
+  if (!next.targetLocationLabel && (next.targetLocationCity || next.targetLocationState)) {
+    next.targetLocationLabel = [next.targetLocationCity, next.targetLocationState].filter(Boolean).join(', ');
+  }
+  if (!next.targetRadiusMiles) next.targetRadiusMiles = '60';
+  if (!next.locationStrictness) next.locationStrictness = 'hard';
+  if (!next.remotePolicy) next.remotePolicy = 'us_or_ca_remote_allowed';
+  if (!next.searchTitles || !normalizedSearchTitles(next.searchTitles).trim()) {
+    next.searchTitles = DEFAULT_SEARCH_TITLES.join('\n');
+  }
+  return next;
+}
+
+chrome.storage.local.get(['pja_prefs', 'pja_profile'], r => {
   const prefs = r.pja_prefs || {};
-  PREF_FIELDS.forEach(k => { const el = document.getElementById('pref-' + k); if (el && prefs[k]) el.value = prefs[k]; });
+  const profile = r.pja_profile || {};
+  const derived = deriveSearchPrefs(prefs, profile);
+  PREF_FIELDS.forEach(k => {
+    const el = document.getElementById('pref-' + k);
+    if (!el) return;
+    if (k === 'searchTitles') el.value = normalizedSearchTitles(derived[k]);
+    else if (derived[k] != null) el.value = derived[k];
+  });
+  const advancedEl = document.getElementById('pref-advancedUi');
+  if (advancedEl) advancedEl.checked = !!derived.advancedUi;
 });
-const btnSavePrefs = document.getElementById('btn-save-prefs');
-if (btnSavePrefs) btnSavePrefs.addEventListener('click', () => {
+function savePrefs(statusEl) {
   chrome.storage.local.get('pja_prefs', r => {
     const prefs = r.pja_prefs || {};
-    PREF_FIELDS.forEach(k => { const el = document.getElementById('pref-' + k); if (el) prefs[k] = el.value.trim(); });
+    PREF_FIELDS.forEach(k => {
+      const el = document.getElementById('pref-' + k);
+      if (!el) return;
+      if (k === 'searchTitles') {
+        prefs[k] = el.value.split(/[\n,]+/).map(s => s.trim()).filter(Boolean);
+      } else {
+        prefs[k] = el.value.trim();
+      }
+    });
+    const advancedEl = document.getElementById('pref-advancedUi');
+    if (advancedEl) {
+      prefs.advancedUi = !!advancedEl.checked;
+      chrome.storage.local.set({ pja_advanced_ui: !!advancedEl.checked });
+    }
     prefs.updatedAt = new Date().toISOString().slice(0, 10);
     chrome.storage.local.set({ pja_prefs: prefs }, () =>
-      showStatus(document.getElementById('prefs-status'), '✓ Preferences saved', 'success'));
+      showStatus(statusEl || document.getElementById('prefs-status'), '✓ Preferences saved', 'success'));
   });
-});
+}
+const btnSavePrefs = document.getElementById('btn-save-prefs');
+if (btnSavePrefs) btnSavePrefs.addEventListener('click', () => savePrefs(document.getElementById('prefs-status')));
+const btnSaveE2ePrefs = document.getElementById('btn-save-e2e-prefs');
+if (btnSaveE2ePrefs) btnSaveE2ePrefs.addEventListener('click', () => savePrefs(document.getElementById('e2e-prefs-status')));
 
 // ── Resume Upload ─────────────────────────────────────────────────────────────
 const resumeStatus  = document.getElementById('resume-status');

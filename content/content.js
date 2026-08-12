@@ -414,6 +414,18 @@ select.pcw-input{cursor:pointer}
         hide(s, '#pja-app-tools');
       }
     });
+    initAdvancedApplyTools();
+  }
+
+  function initAdvancedApplyTools() {
+    chrome.storage.local.get(['pja_dev_mode', 'pja_advanced_ui', 'pja_prefs'], r => {
+      const s = shadow;
+      if (!s) return;
+      const advanced = !!(r.pja_dev_mode || r.pja_advanced_ui || r.pja_prefs && r.pja_prefs.advancedUi);
+      s.querySelectorAll('.pja-advanced-apply-tools').forEach(el => {
+        el.style.display = advanced ? '' : 'none';
+      });
+    });
   }
 
   function handleLearnToggle() {
@@ -1836,7 +1848,7 @@ select.pcw-input{cursor:pointer}
       </div>
 
       <!-- Auto-Apply section -->
-      <div class="pja-section pja-auto-section">
+      <div class="pja-section pja-auto-section pja-advanced-apply-tools" style="display:none">
         <div class="pja-section-label">🚀 Auto-Apply</div>
         <div class="pja-auto-hint">Scans saved searches · collects jobs · review before applying</div>
 
@@ -1861,7 +1873,7 @@ select.pcw-input{cursor:pointer}
       </div>
 
       <!-- External Apply section -->
-      <div class="pja-section pja-ext-section">
+      <div class="pja-section pja-ext-section pja-advanced-apply-tools" style="display:none">
         <div class="pja-section-label">🌐 External Apply</div>
         <div class="pja-auto-hint">Scans for non-Easy-Apply jobs · Opens ATS pages · Auto-fills & submits</div>
 

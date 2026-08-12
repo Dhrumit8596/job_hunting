@@ -162,6 +162,44 @@
     </div>
   </div>
 
+  <!-- E2E Search & Apply Preferences -->
+  <div class="card">
+    <h2>E2E Search &amp; Apply Preferences</h2>
+    <p class="card-desc">Controls the one-click flow: find jobs, score them, route to the right applier, submit, and log blockers.</p>
+    <div class="field-grid">
+      <div class="form-group"><label>Target label</label><input id="pref-targetLocationLabel" placeholder="Bay Area"></div>
+      <div class="form-group"><label>Target city</label><input id="pref-targetLocationCity" placeholder="Santa Clara"></div>
+      <div class="form-group"><label>Target state</label><input id="pref-targetLocationState" placeholder="CA"></div>
+      <div class="form-group"><label>Target ZIP</label><input id="pref-targetLocationZip" placeholder="95051"></div>
+      <div class="form-group"><label>Target country</label><input id="pref-targetLocationCountry" placeholder="United States"></div>
+      <div class="form-group"><label>Radius miles</label><input id="pref-targetRadiusMiles" type="number" min="1" max="500" placeholder="60"></div>
+      <div class="form-group">
+        <label>Location strictness</label>
+        <select id="pref-locationStrictness">
+          <option value="hard">Hard target only</option>
+          <option value="preferred">Prefer target, allow overflow</option>
+        </select>
+      </div>
+      <div class="form-group">
+        <label>Remote policy</label>
+        <select id="pref-remotePolicy">
+          <option value="us_or_ca_remote_allowed">US/CA remote allowed</option>
+          <option value="ca_remote_only">California remote only</option>
+          <option value="no_remote">No remote unless location is in target</option>
+        </select>
+      </div>
+      <div class="form-group full"><label>Search titles / queries</label><textarea id="pref-searchTitles" rows="4" placeholder="quality engineer&#10;manufacturing quality engineer&#10;inspection engineer&#10;metrology engineer"></textarea></div>
+      <div class="form-group full">
+        <label><input id="pref-advancedUi" type="checkbox" style="width:auto;margin-right:6px"> Show Advanced / Developer apply controls</label>
+        <div class="help">When off, the extension shows only the unified one-click E2E flow. Legacy per-channel launchers stay hidden.</div>
+      </div>
+    </div>
+    <div class="btn-row">
+      <button class="btn btn-primary" id="btn-save-e2e-prefs">Save E2E Preferences</button>
+      <span class="status-msg" id="e2e-prefs-status"></span>
+    </div>
+  </div>
+
   <!-- Resume Upload -->
   <div class="card">
     <h2>Resume</h2>

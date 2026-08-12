@@ -202,6 +202,7 @@ function pjaWorkdayReferralCommittedText(text) {
   const selectedItem = cleaned.match(/\b\d+\s+items?\s+selected,?\s+(.+)$/i);
   if (selectedItem) cleaned = selectedItem[1].trim();
   if (!cleaned) return false;
+  if (/^\d+\s+items?\s+selected$/i.test(cleaned)) return false;
   if (/^(select one|select\.{0,3}|choose|search|type to search|required only)$/i.test(cleaned)) return false;
   if (/select one|select\.\.\.|choose an option|required only/i.test(cleaned)) return false;
   if (/how did you hear|where did you (hear|find)|referral source|source of (this )?application/i.test(cleaned)) return false;

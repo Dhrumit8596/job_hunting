@@ -37,8 +37,21 @@
     <button class="btn btn-outline" id="btn-load-corpus">Load top 200 into review</button>
   </div>
 
-  <!-- Ranked apply launcher (dev server /apply-all) -->
-  <div class="ranked-apply-panel">
+  <!-- Unified E2E launcher lives in the popup Run Center -->
+  <div class="ranked-apply-panel run-center-panel">
+    <div>
+      <div class="ranked-title">Unified E2E Run Center</div>
+      <div class="ranked-help">Use the popup's <strong>Find &amp; Apply</strong> button for the production flow. It finds, scores, routes, applies, and logs failures.</div>
+    </div>
+    <div class="ranked-controls">
+      <button class="btn btn-primary" id="btn-open-popup-help">Open extension popup</button>
+      <button class="btn btn-outline" id="btn-ranked-status">Refresh run status</button>
+    </div>
+    <div id="run-center-status" class="ranked-status"></div>
+  </div>
+
+  <!-- Advanced ranked apply launcher (dev server /apply-all) -->
+  <div class="ranked-apply-panel pja-advanced-apply-tools" style="display:none">
     <div>
       <div class="ranked-title">Ranked apply run</div>
       <div class="ranked-help">Find top-N evidence-backed jobs, then apply the next batch through all supported flows.</div>
@@ -48,8 +61,8 @@
       <label>Batch <input id="ranked-batch" type="number" min="1" max="25" value="5"></label>
       <label>Score ≥ <input id="ranked-threshold" type="number" min="0" max="100" value="60"></label>
       <label>Max gaps <input id="ranked-max-gaps" type="number" min="0" max="10" value="4"></label>
-      <button class="btn btn-outline" id="btn-ranked-plan">Plan top jobs</button>
-      <button class="btn btn-primary" id="btn-ranked-apply">Apply next batch</button>
+      <button class="btn btn-outline" id="btn-ranked-plan">Advanced plan top jobs</button>
+      <button class="btn btn-primary" id="btn-ranked-apply">Advanced apply next batch</button>
     </div>
     <textarea id="ranked-queries" rows="2" placeholder="Optional targeted queries, one per line or comma-separated">quality engineer medical device
 manufacturing quality engineer medical device

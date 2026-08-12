@@ -29,7 +29,9 @@ async function sourceAll(opts = {}) {
 
   // --- Modality A: API registry ---
   const a = await fetchAll(sources, { concurrency: opts.concurrency || 8, timeoutMs: 12000 });
-  const filterOpts = { nationwideUS: opts.nationwideUS === true };
+  const filterOpts = { nationwideUS: opts.nationwideUS === true,
+    targetLocation: opts.targetLocation, targetRadiusMiles: opts.targetRadiusMiles,
+    locationStrictness: opts.locationStrictness, remotePolicy: opts.remotePolicy };
   const aEligible = filterJobs(a.jobs, filterOpts);
   const aRes = upsert(store, aEligible, 'api-registry', stateFor);
   report.modalityA = { fetched: a.jobs.length, eligible: aEligible.length, added: aRes.added,
@@ -40,8 +42,11 @@ async function sourceAll(opts = {}) {
   let bFetched = 0, bEligible = 0;
   const discoveryAdapters = opts.discoveryAdapters || DISCOVERY;
   let bAdded = 0, bEnriched = 0;
+  const target = opts.targetLocation && typeof opts.targetLocation === 'object' ? opts.targetLocation : {};
+  const locationQuery = [target.city, target.state].filter(Boolean).join(', ') || target.label || target.zip || undefined;
   for (const name of Object.keys(discoveryAdapters)) {
-    const jobs = await discoveryAdapters[name].fetchJobs(null, { queries, timeoutMs: 15000 });
+    const jobs = await discoveryAdapters[name].fetchJobs(null, { queries, timeoutMs: 15000,
+      locationQuery, targetRadiusMiles: opts.targetRadiusMiles });
     bFetched += jobs.length;
     const elig = filterJobs(jobs, filterOpts);
     bEligible += elig.length;

@@ -32,6 +32,18 @@ const ONE_CLICK_DEFAULTS = {
   rescore: true,
   requireEvidence: true,
 };
+const DEFAULT_SEARCH_TITLES = [
+  'quality engineer',
+  'manufacturing quality engineer',
+  'inspection engineer',
+  'metrology engineer',
+  'process engineer',
+  'supplier quality engineer',
+  'validation engineer',
+  'test engineer',
+  'equipment engineer',
+  'failure analysis engineer',
+];
 
 // ── State ─────────────────────────────────────────────────────────────────────
 let allJobs = [];
@@ -101,6 +113,52 @@ document.getElementById('btn-one-click-apply')?.addEventListener('click', startO
 document.getElementById('btn-one-click-refresh')?.addEventListener('click', refreshOneClickStatus);
 document.getElementById('btn-one-click-report')?.addEventListener('click', exportOneClickReport);
 
+function getLocalStorage(keys) {
+  return new Promise(resolve => chrome.storage.local.get(keys, resolve));
+}
+
+function splitSearchTitles(value) {
+  if (Array.isArray(value)) return value.map(s => String(s || '').trim()).filter(Boolean);
+  return String(value || '').split(/[\n,]+/).map(s => s.trim()).filter(Boolean);
+}
+
+function buildOneClickPrefsPayload(prefs = {}, profile = {}) {
+  const targetLocation = {
+    label: prefs.targetLocationLabel || [prefs.targetLocationCity || profile.city, prefs.targetLocationState || profile.state].filter(Boolean).join(', '),
+    city: prefs.targetLocationCity || profile.city || '',
+    state: prefs.targetLocationState || profile.state || '',
+    zip: prefs.targetLocationZip || profile.zip || '',
+    country: prefs.targetLocationCountry || profile.country || 'United States',
+  };
+  const targetRadiusMiles = Number(prefs.targetRadiusMiles) || 60;
+  const queries = splitSearchTitles(prefs.searchTitles);
+  return {
+    targetLocation,
+    targetRadiusMiles,
+    locationStrictness: prefs.locationStrictness || 'hard',
+    remotePolicy: prefs.remotePolicy || 'us_or_ca_remote_allowed',
+    queries: queries.length ? queries : DEFAULT_SEARCH_TITLES,
+  };
+}
+
+async function getOneClickPayload() {
+  const st = await getLocalStorage(['pja_prefs', 'pja_profile']);
+  return Object.assign({}, ONE_CLICK_DEFAULTS, buildOneClickPrefsPayload(st.pja_prefs || {}, st.pja_profile || {}));
+}
+
+async function renderOneClickConfig() {
+  const el = document.getElementById('one-click-config');
+  if (!el) return;
+  try {
+    const payload = await getOneClickPayload();
+    const loc = payload.targetLocation || {};
+    const label = loc.label || [loc.city, loc.state].filter(Boolean).join(', ') || 'profile location';
+    el.textContent = `Target: ${label}${payload.targetRadiusMiles ? ` · ${payload.targetRadiusMiles} mi` : ''} · ${payload.queries.length} search titles`;
+  } catch (_) {
+    el.textContent = 'Target: profile-driven search settings';
+  }
+}
+
 function forceOpenSidebar() {
   chrome.tabs.query({ active: true, currentWindow: true }, tabs => {
     const tab = tabs[0];
@@ -142,10 +200,11 @@ async function startOneClickApply() {
   status.textContent = 'Checking extension/profile readiness…';
   status.className = 'one-click-status running';
   try {
+    const payload = await getOneClickPayload();
     const preflightResp = await fetch(`${PJA_DEV_SERVER}/one-click-preflight`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(ONE_CLICK_DEFAULTS),
+      body: JSON.stringify(payload),
     });
     const preflight = await preflightResp.json().catch(() => ({}));
     if (!preflightResp.ok || preflight.ok === false) {
@@ -155,7 +214,7 @@ async function startOneClickApply() {
     const resp = await fetch(`${PJA_DEV_SERVER}/apply-all`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(ONE_CLICK_DEFAULTS),
+      body: JSON.stringify(payload),
     });
     const data = await resp.json().catch(() => ({}));
     if (!resp.ok || data.success === false) {
@@ -237,6 +296,7 @@ async function exportOneClickReport() {
 
 loadJobs();
 loadContacts();
+renderOneClickConfig();
 refreshOneClickStatus();
 chrome.runtime.sendMessage({ type: 'REFRESH_BADGE' });
 

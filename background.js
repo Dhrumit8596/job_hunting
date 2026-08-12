@@ -131,6 +131,84 @@ function pjaSetLocal(values) {
   });
 }
 
+const PJA_PROFILE_MIN_KEYS = ['firstName', 'lastName', 'email', 'phone'];
+
+function pjaProfileMeaningfulCount(profile) {
+  if (!profile || typeof profile !== 'object' || Array.isArray(profile)) return 0;
+  return Object.entries(profile).filter(([k, v]) => k !== 'savedAt' && v != null && String(v).trim()).length;
+}
+
+function pjaProfileAudit(source, prev, next, accepted, reason) {
+  const entry = {
+    ts: Date.now(),
+    source: String(source || 'unknown').slice(0, 80),
+    previousKeyCount: pjaProfileMeaningfulCount(prev),
+    nextKeyCount: pjaProfileMeaningfulCount(next),
+    accepted: !!accepted,
+    reason: String(reason || '').slice(0, 160),
+  };
+  try {
+    chrome.storage.local.get('pja_profile_write_audit', d => {
+      const audit = Array.isArray(d.pja_profile_write_audit) ? d.pja_profile_write_audit.slice(-39) : [];
+      audit.push(entry);
+      chrome.storage.local.set({ pja_profile_write_audit: audit });
+    });
+  } catch (_) {}
+}
+
+function pjaMergeProfileWrite(previous, incoming, opts = {}) {
+  const prev = previous && typeof previous === 'object' && !Array.isArray(previous) ? previous : {};
+  const nextIn = incoming && typeof incoming === 'object' && !Array.isArray(incoming) ? incoming : null;
+  if (!nextIn) return { ok: false, profile: prev, reason: 'profile_write_not_object' };
+  const prevCount = pjaProfileMeaningfulCount(prev);
+  const nextCount = pjaProfileMeaningfulCount(nextIn);
+  if (!opts.explicitReset && nextCount === 0 && prevCount > 0) {
+    return { ok: false, profile: prev, reason: 'rejected_empty_profile_overwrite' };
+  }
+  const merged = Object.assign({}, prev);
+  for (const [k, v] of Object.entries(nextIn)) {
+    if (!opts.explicitReset && v === '' && prev[k] != null && String(prev[k]).trim()) continue;
+    merged[k] = v;
+  }
+  if (!opts.explicitReset && prevCount >= 3) {
+    const deletedRequired = PJA_PROFILE_MIN_KEYS.filter(k =>
+      prev[k] != null && String(prev[k]).trim() && !(merged[k] != null && String(merged[k]).trim()));
+    if (deletedRequired.length) {
+      return { ok: false, profile: prev, reason: 'rejected_required_profile_field_deletion:' + deletedRequired.join(',') };
+    }
+  }
+  return { ok: true, profile: merged, reason: 'merged_profile_write' };
+}
+
+function pjaSafeSetStorageFromExternal(data, source) {
+  return new Promise(resolve => {
+    if (!data || typeof data !== 'object' || Array.isArray(data) || !Object.prototype.hasOwnProperty.call(data, 'pja_profile')) {
+      chrome.storage.local.set(data || {}, () => resolve({ ok: true, data: data || {} }));
+      return;
+    }
+    chrome.storage.local.get(['pja_profile', 'pja_profile_backup'], current => {
+      const incoming = data.pja_profile;
+      const decision = pjaMergeProfileWrite(current.pja_profile || {}, incoming, { explicitReset: data.pja_profile_reset === true });
+      pjaProfileAudit(source, current.pja_profile || {}, incoming, decision.ok, decision.reason);
+      if (!decision.ok) {
+        chrome.storage.local.set({ pja_profile_write_rejected: {
+          ts: Date.now(), source, reason: decision.reason,
+          previousKeyCount: pjaProfileMeaningfulCount(current.pja_profile || {}),
+          attemptedKeyCount: pjaProfileMeaningfulCount(incoming),
+        } }, () => resolve({ ok: false, reason: decision.reason, data: null }));
+        return;
+      }
+      const next = Object.assign({}, data, {
+        pja_profile: decision.profile,
+        pja_profile_backup: decision.profile,
+        pja_profile_last_good_at: Date.now(),
+      });
+      delete next.pja_profile_reset;
+      chrome.storage.local.set(next, () => resolve({ ok: true, data: next }));
+    });
+  });
+}
+
 function pjaLaunchEasyApplySingle(job, master) {
   return new Promise((resolve, reject) => {
     chrome.storage.local.get(['pja_profile', 'pja_answers'], d => {
@@ -230,6 +308,9 @@ async function pjaDispatchRankedJob(job, master) {
   const route = self.PJAApplyRouter && typeof self.PJAApplyRouter.resolveStrategy === 'function'
     ? self.PJAApplyRouter.resolveStrategy(job, job.applyUrl)
     : { name: job.channel === 'linkedin_easy_apply' ? 'linkedin_ea' : job.channel === 'indeed_apply' ? 'indeed' : 'generic' };
+  if (route.applyStrategyStatus === 'unsupported' || route.engine === 'unsupported') {
+    throw new Error(route.unsupportedReason || ('unsupported_apply_strategy:' + route.name));
+  }
   const launch = PJA_RANKED_LAUNCHERS[route.name];
   if (!launch) throw new Error('unsupported_apply_strategy:' + route.name);
   job.strategy = route.name;
@@ -712,7 +793,7 @@ async function pjaRecoverRankedLastFailure(master) {
   const reason = String(failure.reason || '');
   const isSuccessFactors = /successfactors|talentcommunity/i.test(String(job.ats || job.channel || '') + ' ' + String(job.applyUrl || ''));
   const recoveredReason = isSuccessFactors && reason === 'no_submit_btn' ? 'no_apply_path' : reason;
-  if (!/^(no_apply_path|no_submit_btn|posting_not_found|apply_btn_no_form|no_apply_btn_on_description|submit_unclear|missing_required|needs_manual|captcha|email_verification_required|wd_selectinput_blocked)$/.test(reason)) return master;
+  if (!/^(no_apply_path|no_submit_btn|posting_not_found|apply_btn_no_form|no_apply_btn_on_description|submit_unclear|missing_required|needs_manual|captcha|captcha_or_antibot|email_verification_required|auth_blocked|wd_selectinput_blocked|workday_duplicate_record|workday_account_locked|workday_account_exists_wrong_password|workday_captcha|workday_auth_sign_in_error|unsupported_strategy|unsupported_apply_strategy|stuck_budget|handler_timeout|watchdog_timeout|stuck_watchdog|ranked_watchdog_timeout|success_unverified|no_submit_after_spa)$/.test(reason)) return master;
   const uncertain = /submit_unclear/i.test(reason);
   const skipped = /captcha|ready_to_submit/i.test(reason);
   const event = {
@@ -915,6 +996,12 @@ async function pjaApplyWatchdogTick() {
     ranked = await pjaReconcileRankedLedger(ranked, ledgerData[PJA_APPLICATION_LEDGER_KEY]);
   }
   ranked = await pjaReconcileRankedExtCurrent(ranked);
+  ranked = await pjaRecoverRankedLastFailure(ranked);
+  if (ranked && ranked.status === 'applying' && ranked.inFlightIndex == null &&
+      ranked.currentIndex <= (ranked.jobs || []).length) {
+    await pjaDispatchRankedCurrent(ranked);
+    return;
+  }
   if (ranked && ranked.status === 'applying' && ranked.inFlightIndex === ranked.currentIndex &&
       ranked.inFlightTabId && !await pjaRankedTabExists(ranked.inFlightTabId, ranked.jobs && ranked.jobs[ranked.currentIndex])) {
     console.warn('PJA apply-watchdog: in-flight tab missing; redispatching current ranked job', ranked.currentIndex);
@@ -929,7 +1016,11 @@ async function pjaApplyWatchdogTick() {
   const rankedIsWorkday = !!(rankedJob && /workday\.com|myworkdayjobs\.com|workday/i.test(
     String(rankedJob.applyUrl || '') + ' ' + String(rankedJob.ats || rankedJob.channel || rankedJob.strategy || '')
   ));
-  const rankedCapMs = rankedIsWorkday ? 20 * 60 * 1000 : (ranked && ranked.e2eSafe ? 3 * 60 * 1000 : 10 * 60 * 1000);
+  const configuredWorkdayCap = ranked && ranked.workdayAttemptTimeoutMs != null ? Number(ranked.workdayAttemptTimeoutMs) : null;
+  const rankedCapMs = rankedIsWorkday
+    ? (Number.isFinite(configuredWorkdayCap) && configuredWorkdayCap > 0 ? configuredWorkdayCap
+      : ranked && ranked.e2eSafe ? 5 * 60 * 1000 : 20 * 60 * 1000)
+    : (ranked && ranked.e2eSafe ? 3 * 60 * 1000 : 10 * 60 * 1000);
   if (ranked && ranked.status === 'applying' && ranked.inFlightIndex != null &&
       Date.now() - (ranked.inFlightAt || Date.now()) > rankedCapMs) {
     const stuck = ranked.jobs[ranked.currentIndex];
@@ -1059,7 +1150,8 @@ if (DEV_MODE) {
           try {
             const msg = JSON.parse(event.data);
             if (msg.cmd === 'setStorage') {
-              chrome.storage.local.set(msg.data, () => console.log('PJA: storage set via WS:', Object.keys(msg.data)));
+              pjaSafeSetStorageFromExternal(msg.data, 'dev-server:setStorage')
+                .then(result => console.log('PJA: storage set via WS:', result.ok ? Object.keys(result.data || {}) : ('rejected ' + result.reason)));
               // A /source-v2 payload carries the normalized corpus — ingest it into IndexedDB.
               if (msg.data && msg.data.pja_job_index) {
                 pjaIngestCorpus(msg.data.pja_job_index, msg.data.pja_job_state || {})
@@ -3404,7 +3496,17 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   }
 
   if (msg.type === 'SAVE_PROFILE') {
-    chrome.storage.local.set({ pja_profile: msg.profile }, () => sendResponse({ success: true }));
+    chrome.storage.local.get(['pja_profile', 'pja_profile_backup'], r => {
+      const decision = pjaMergeProfileWrite(r.pja_profile || {}, msg.profile || {}, { explicitReset: msg.explicitReset === true });
+      pjaProfileAudit('runtime:SAVE_PROFILE', r.pja_profile || {}, msg.profile || {}, decision.ok, decision.reason);
+      if (!decision.ok) {
+        chrome.storage.local.set({ pja_profile_write_rejected: { ts: Date.now(), source: 'runtime:SAVE_PROFILE', reason: decision.reason } },
+          () => sendResponse({ success: false, error: decision.reason }));
+        return;
+      }
+      chrome.storage.local.set({ pja_profile: decision.profile, pja_profile_backup: decision.profile,
+        pja_profile_last_good_at: Date.now() }, () => sendResponse({ success: true }));
+    });
     return true;
   }
 
@@ -3412,7 +3514,11 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     chrome.storage.local.get('pja_profile', r => {
       const profile = r.pja_profile || {};
       profile[msg.key] = msg.value;
-      chrome.storage.local.set({ pja_profile: profile }, () => sendResponse({ success: true }));
+      chrome.storage.local.set({ pja_profile: profile, pja_profile_backup: profile,
+        pja_profile_last_good_at: Date.now() }, () => {
+        pjaProfileAudit('runtime:SAVE_PROFILE_FIELD:' + String(msg.key || ''), r.pja_profile || {}, profile, true, 'field_merge');
+        sendResponse({ success: true });
+      });
     });
     return true;
   }

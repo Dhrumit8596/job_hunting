@@ -3,7 +3,7 @@
 const path = require('path');
 require(path.resolve(__dirname, '../../sourcing/detect-ats'));
 const { buildApplySet, buildApplyPlan, resultToState, poolStatus, roleKey, greenhouseEmbedFallback, exceededBudget,
-  watchdogDecision, queueJobKey, unsupportedAutonomousApplyReason } = require(path.resolve(__dirname, '../../sourcing/apply-select'));
+  watchdogDecision, queueJobKey, unsupportedAutonomousApplyReason, applyCapabilityStatus } = require(path.resolve(__dirname, '../../sourcing/apply-select'));
 
 function corpus(entries) {
   const index = {}, state = {};
@@ -98,6 +98,15 @@ module.exports = (t) => {
   const unscoredSet = buildApplySet(unscoredCorpus, { threshold: 0, includeUnscored: true });
   t.eq(unscoredSet.length, 1, 'rescore planning can include hydrated unscored jobs');
   t.eq(unscoredSet[0].fitScore, null, 'unscored jobs stay fitScore=null until LLM rescore');
+  const linkedInEaCorpus = corpus([
+    { id: 'linkedin:ea1', company: 'Mainspring', title: 'Test Engineer', applyUrl: 'https://www.linkedin.com/jobs/view/4387724983/', fit: 75, channel: 'linkedin_easy_apply', ats: 'linkedin' },
+  ]);
+  linkedInEaCorpus.state['linkedin:ea1'].matchEvidence = ['test engineering', 'manufacturing', 'quality'];
+  linkedInEaCorpus.state['linkedin:ea1'].confidence = 'high';
+  const linkedInEaPlan = buildApplyPlan(linkedInEaCorpus, { threshold: 70, requireEvidence: true });
+  t.eq(linkedInEaPlan.jobs.length, 1, 'LinkedIn Easy Apply is eligible when channel marks it native-supported');
+  t.eq(linkedInEaPlan.jobs[0].strategy, 'linkedin_ea', 'LinkedIn Easy Apply is stamped with linkedin_ea strategy');
+  t.eq(linkedInEaPlan.dropCounts.unknown_apply_strategy || 0, 0, 'LinkedIn Easy Apply is not dropped as unknown strategy');
 
   // per-company cap → batch spans multiple employers (no stacking one company)
   const conc = corpus([
@@ -145,6 +154,8 @@ module.exports = (t) => {
     'unsupported_jobicy_no_inline_form', 'unsupported: Jobicy hash-popup/no-inline-form route');
   t.eq(unsupportedAutonomousApplyReason('https://careers.gf.com/careers/apply?pid=563980769981826', 'eightfold'),
     'unsupported_eightfold_portal_auth', 'unsupported: Eightfold/GF auth portal route');
+  t.eq(applyCapabilityStatus('https://careers.gf.com/careers/apply?pid=563980769981826', 'eightfold').status,
+    'unsupported', 'capability registry marks Eightfold as unsupported before apply');
   const unsupportedCorpus = corpus([
     { id: 'sf:bad', company: 'TSMC', title: 'Engineer', applyUrl: 'https://ro.careers.tsmc.com/talentcommunity/apply/1213393266/?locale=en_US', fit: 90, ats: 'successfactors' },
     { id: 'jobicy:bad', company: 'Spirax', title: 'Engineer', applyUrl: 'https://jobicy.com/jobs/146657-associate-application-engineer', fit: 90, ats: 'jobicy' },

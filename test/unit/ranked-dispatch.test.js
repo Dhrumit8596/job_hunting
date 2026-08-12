@@ -90,9 +90,19 @@ module.exports = async (t) => {
 
   t.ok(source.includes('async function pjaRecoverRankedLastFailure(master)') &&
     source.includes("recoveredReason = isSuccessFactors && reason === 'no_submit_btn' ? 'no_apply_path' : reason") &&
+    source.includes('workday_duplicate_record|workday_account_locked') &&
+    source.includes('stuck_budget|handler_timeout|watchdog_timeout|stuck_watchdog') &&
     source.includes('await pjaAppendApplicationEvent(event)') &&
     source.includes('master = await pjaRecoverRankedLastFailure(master)'),
   'ranked dispatch: resume recovers SuccessFactors landing-page no-submit failures as terminal no_apply_path events');
+
+  t.ok(source.includes('function pjaMergeProfileWrite(previous, incoming') &&
+    source.includes('rejected_empty_profile_overwrite') &&
+    source.includes('rejected_required_profile_field_deletion') &&
+    source.includes('pja_profile_backup') &&
+    source.includes('pja_profile_write_audit') &&
+    source.includes('pjaSafeSetStorageFromExternal(msg.data'),
+  'profile storage: background guards external/full-profile writes with merge, backup, audit, and empty-overwrite rejection');
 
   t.ok(source.includes("PJAIdb.getAll(), 15000, 'PJAIdb.getAll'") &&
     source.includes("chrome.storage applied records"),
@@ -239,11 +249,15 @@ module.exports = async (t) => {
   'ranked dispatch: active ATS tabs get bounded guard-reset reinjection watchdogs while still in-flight');
 
   t.ok(source.includes('PJA apply-watchdog: in-flight tab missing; redispatching current ranked job') &&
+    source.includes('ranked = await pjaRecoverRankedLastFailure(ranked)') &&
+    source.includes('ranked.inFlightIndex == null') &&
+    source.includes('ranked.currentIndex <= (ranked.jobs || []).length') &&
     source.includes('await pjaDispatchRankedCurrent(ranked);'),
-  'apply watchdog: missing in-flight tabs are redispatched instead of leaving a stale active run');
+  'apply watchdog: terminal last-failure state is reconciled and missing in-flight tabs are redispatched instead of leaving a stale active run');
 
   t.ok(source.includes('const rankedIsWorkday = !!(rankedJob && /workday') &&
-    source.includes('const rankedCapMs = rankedIsWorkday ? 20 * 60 * 1000 : (ranked && ranked.e2eSafe ? 3 * 60 * 1000 : 10 * 60 * 1000)') &&
+    source.includes('const configuredWorkdayCap = ranked && ranked.workdayAttemptTimeoutMs') &&
+    source.includes('ranked && ranked.e2eSafe ? 5 * 60 * 1000 : 20 * 60 * 1000') &&
     source.includes('qIsWorkday ? { capMs: 20 * 60 * 1000 } : {}') &&
     source.includes('Date.now() - (ranked.inFlightAt || Date.now()) > rankedCapMs'),
   'ranked dispatch: Workday ranked runs get an ATS-aware longer watchdog cap while other E2E-safe runs stay short');

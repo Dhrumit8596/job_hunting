@@ -155,6 +155,7 @@ module.exports = async (t) => {
   'combobox: Workday referral-source accepts tenant-specific selected chips as committed');
   t.ok(autofillSource.includes('selectedItem = cleaned.match') &&
     autofillSource.includes('\\b\\d+\\s+items?\\s+selected') &&
+    autofillSource.includes('^\\d+\\s+items?\\s+selected$') &&
     autofillSource.includes('waitWorkdaySelectionCommitted') &&
     autofillSource.includes("key === 'referralSource' ? 1300") &&
     autofillSource.includes("key === 'referralSource' ? 5500 : 1800"),

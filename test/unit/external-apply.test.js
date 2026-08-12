@@ -230,6 +230,7 @@ module.exports = (t) => {
     externalSource.includes("window._pjaComboChain.catch") &&
     externalSource.includes('Careers Website') &&
     externalSource.includes('const referralCommitted = text =>') &&
+    externalSource.includes('^\\d+\\s+items?\\s+selected$') &&
     externalSource.includes('selectedReferralText') &&
     externalSource.includes('forced referralSource already committed') &&
     externalSource.includes('await closeWorkdayTransientMenus()'),

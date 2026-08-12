@@ -68,14 +68,23 @@ let runtimeHasCandidateProfile = HAS_CANDIDATE_PROFILE;
 async function refreshRuntimeCandidateProfile() {
   let st = {};
   for (let attempt = 0; attempt < 3; attempt += 1) {
-    st = await getStorageFromExtension(['pja_profile', 'pja_resume_filename'], attempt === 0 ? 5000 : 10000);
+    st = await getStorageFromExtension(['pja_profile', 'pja_profile_backup', 'pja_resume_filename'], attempt === 0 ? 5000 : 10000);
     if (st && (Object.prototype.hasOwnProperty.call(st, 'pja_profile') ||
         Object.prototype.hasOwnProperty.call(st, 'pja_resume_filename'))) break;
     if (wsClients.size && attempt < 2) await new Promise(r => setTimeout(r, 500));
   }
   const profile = st && st.pja_profile && typeof st.pja_profile === 'object' ? st.pja_profile : {};
+  const backup = st && st.pja_profile_backup && typeof st.pja_profile_backup === 'object' ? st.pja_profile_backup : {};
   const resume = String(st && st.pja_resume_filename || '').trim();
   const meaningful = Object.entries(profile).filter(([k, v]) => v != null && String(v).trim() && !/^savedAt$/i.test(k));
+  const backupMeaningful = Object.entries(backup).filter(([k, v]) => v != null && String(v).trim() && !/^savedAt$/i.test(k));
+  if (meaningful.length < 3 && backupMeaningful.length >= 3 && wsClients.size) {
+    setStorageToExtension({ pja_profile: backup, pja_profile_restored_from_backup: {
+      ts: Date.now(), reason: 'preflight_empty_profile', restoredFieldCount: backupMeaningful.length,
+    } });
+    st.pja_profile = backup;
+    return refreshRuntimeCandidateProfile();
+  }
   if (meaningful.length < 3 || !resume) {
     runtimeCandidatePrompt = SYSTEM_PROMPT;
     runtimeCandidateFingerprint = CANDIDATE_FINGERPRINT;
@@ -170,6 +179,24 @@ function gateScoredApplyJobs(inputJobs, opts = {}) {
 
 // ── Sourcing pipeline wiring ────────────────────────────────────────────────
 const { runPipeline } = require('./sourcing/pipeline');
+const { isEligibleTargetLocation } = require('./sourcing/filter');
+
+function deriveTargetLocationOptions(input = {}, storage = {}) {
+  const prefs = storage.pja_prefs && typeof storage.pja_prefs === 'object' ? storage.pja_prefs : {};
+  const profile = storage.pja_profile && typeof storage.pja_profile === 'object' ? storage.pja_profile : {};
+  const targetLocation = input.targetLocation && typeof input.targetLocation === 'object' ? input.targetLocation : {
+    label: prefs.targetLocationLabel || [prefs.targetLocationCity || profile.city, prefs.targetLocationState || profile.state].filter(Boolean).join(', '),
+    city: prefs.targetLocationCity || profile.city || '',
+    state: prefs.targetLocationState || profile.state || '',
+    zip: prefs.targetLocationZip || profile.zip || '',
+    country: prefs.targetLocationCountry || profile.country || 'United States',
+  };
+  const targetRadiusMiles = input.targetRadiusMiles != null ? Number(input.targetRadiusMiles)
+    : prefs.targetRadiusMiles != null ? Number(prefs.targetRadiusMiles) : undefined;
+  const locationStrictness = input.locationStrictness || prefs.locationStrictness || '';
+  const remotePolicy = input.remotePolicy || prefs.remotePolicy || '';
+  return { targetLocation, targetRadiusMiles, locationStrictness, remotePolicy, prefs, profile };
+}
 
 // Read chrome.storage from the connected extension (best-effort; [] if none).
 function getStorageFromExtension(keys, timeoutMs = 4000) {
@@ -238,11 +265,15 @@ async function waitForBrowserChannelCoverage(channels, options = {}) {
       error: resp.data && resp.data.error || null, url, fast: launchOptions.fast !== false });
   };
   const query = encodeURIComponent(String((options.queries && options.queries[0]) || 'quality engineer'));
+  const target = options.targetLocation && typeof options.targetLocation === 'object' ? options.targetLocation : {};
+  const locText = [target.city, target.state].filter(Boolean).join(', ') || target.label || target.zip || 'United States';
+  const location = encodeURIComponent(locText);
+  const radius = Math.max(1, Math.min(500, Number(options.targetRadiusMiles) || 50));
   if (wanted.has('linkedin_easy_apply') && (lastCounts.hydrated?.linkedin_easy_apply || 0) < minPerChannel) {
-    await launch('linkedin', `https://www.linkedin.com/jobs/search/?f_AL=true&keywords=${query}&location=United%20States`, { fast: false });
+    await launch('linkedin', `https://www.linkedin.com/jobs/search/?f_AL=true&keywords=${query}&location=${location}&distance=${radius}`, { fast: false });
   }
   if (wanted.has('indeed_apply') && (lastCounts.hydrated?.indeed_apply || 0) < minPerChannel) {
-    await launch('indeed', `https://www.indeed.com/jobs?q=${query}&l=United%20States`);
+    await launch('indeed', `https://www.indeed.com/jobs?q=${query}&l=${location}&radius=${radius}`);
   }
   let terminal = {};
   while (Date.now() - startedAt < timeoutMs) {
@@ -339,12 +370,14 @@ function compactReportJob(job, fallbackStatus) {
   const row = job && typeof job === 'object' ? job : {};
   return {
     status: safeReportText(row.status || fallbackStatus || ''),
+    runId: safeReportText(row.runId || ''),
     jobId: safeReportText(row.jobId || row.id || row.sourceJobId || ''),
     company: safeReportText(row.company || ''),
     title: safeReportText(row.title || ''),
     channel: safeReportText(row.channel || 'external'),
     ats: safeReportText(row.ats || row.strategy || row.handler || ''),
     strategy: safeReportText(row.strategy || row.ats || row.handler || ''),
+    location: safeReportText(row.location || ''),
     reason: safeReportText(row.reason || row.skipReason || row.error || ''),
     fitScore: row.fitScore == null || row.fitScore === '' ? '' : safeReportText(row.fitScore),
     url: safeReportText(row.applyUrl || row.url || row.listingUrl || ''),
@@ -359,6 +392,11 @@ function compactReportDiagnostic(diag = {}) {
     : [];
   return {
     phase: safeReportText(diag.phase || '').slice(0, 80),
+    runId: safeReportText(diag.runId || ''),
+    jobId: safeReportText(diag.jobId || diag.id || ''),
+    company: safeReportText(diag.company || ''),
+    title: safeReportText(diag.title || ''),
+    applyUrl: safeReportText(diag.applyUrl || diag.url || '').slice(0, 240),
     reason: safeReportText(diag.reason || '').slice(0, 80),
     ats: safeReportText(diag.ats || diag.strategy || '').slice(0, 80),
     strategy: safeReportText(diag.strategy || diag.ats || '').slice(0, 80),
@@ -404,6 +442,8 @@ function groupedReportRows(rows, keyFn) {
 
 function reportJobKey(row = {}) {
   return [
+    String(row.runId || '').toLowerCase(),
+    String(row.id || '').toLowerCase(),
     String(row.jobId || '').toLowerCase(),
     String(row.url || row.applyUrl || '').toLowerCase(),
     String(row.company || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim(),
@@ -411,25 +451,46 @@ function reportJobKey(row = {}) {
   ].join('::');
 }
 
+function reportHost(value) {
+  try { return new URL(String(value || '')).hostname.toLowerCase(); } catch (_) { return ''; }
+}
+
+function diagnosticMatchesReportRow(row = {}, diagnostic = {}, runId = '') {
+  if (runId && diagnostic.runId && diagnostic.runId !== runId) return false;
+  const rowHost = reportHost(row.url || row.applyUrl);
+  const diagHost = reportHost(diagnostic.applyUrl || diagnostic.url);
+  if (rowHost && diagHost && rowHost !== diagHost) return false;
+  const rowJobId = String(row.jobId || row.id || '').trim().toLowerCase();
+  const diagJobId = String(diagnostic.jobId || diagnostic.id || '').trim().toLowerCase();
+  if (rowJobId && diagJobId && rowJobId !== diagJobId) return false;
+  const norm = value => String(value || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+  const rowCompany = norm(row.company), diagCompany = norm(diagnostic.company);
+  const rowTitle = norm(row.title), diagTitle = norm(diagnostic.title);
+  if (rowCompany && diagCompany && rowCompany !== diagCompany) return false;
+  if (rowTitle && diagTitle && rowTitle !== diagTitle) return false;
+  return true;
+}
+
 function collectReportDiagnostics(storage = {}, ranked = null, allRows = [], runId = '') {
   const raw = [];
-  for (const row of allRows || []) if (row.diagnostic) raw.push({ row, diagnostic: row.diagnostic });
+  for (const row of allRows || []) {
+    if (row.diagnostic && diagnosticMatchesReportRow(row, row.diagnostic, runId)) raw.push({ row, diagnostic: row.diagnostic });
+  }
   const stored = Array.isArray(storage.pja_apply_diagnostics) ? storage.pja_apply_diagnostics : [];
   for (const d of stored) {
     if (runId && d.runId && d.runId !== runId) continue;
-    raw.push({
-      row: {
-        jobId: d.jobId || '',
-        company: d.company || '',
-        title: d.title || '',
-        ats: d.ats || d.strategy || '',
-        strategy: d.strategy || d.ats || '',
-        channel: d.channel || 'external',
-        reason: d.reason || '',
-        url: d.applyUrl || d.url || '',
-      },
-      diagnostic: compactReportDiagnostic(d),
-    });
+    const row = {
+      runId: d.runId || '',
+      jobId: d.jobId || '',
+      company: d.company || '',
+      title: d.title || '',
+      ats: d.ats || d.strategy || '',
+      strategy: d.strategy || d.ats || '',
+      channel: d.channel || 'external',
+      reason: d.reason || '',
+      url: d.applyUrl || d.url || '',
+    };
+    if (diagnosticMatchesReportRow(row, d, runId)) raw.push({ row, diagnostic: compactReportDiagnostic(d) });
   }
   const byKey = new Map();
   for (const item of raw) {
@@ -441,8 +502,9 @@ function collectReportDiagnostics(storage = {}, ranked = null, allRows = [], run
 }
 
 function lookupDiagnostic(row, diagnostics) {
+  if (row && row.diagnostic && !diagnosticMatchesReportRow(row, row.diagnostic, row.runId || '')) return null;
   const key = reportJobKey(row);
-  const found = diagnostics.find(item => reportJobKey(item.row) === key);
+  const found = diagnostics.find(item => reportJobKey(item.row) === key && diagnosticMatchesReportRow(row, item.diagnostic || {}, row.runId || ''));
   return found && found.diagnostic || row.diagnostic || null;
 }
 
@@ -657,6 +719,9 @@ function developerRecommendation(row = {}) {
   if (/missing_description_evidence|rescore_missing_description|stale_browser_listing|aggregator_without_apply_destination/.test(reason)) {
     return 'Sourcing/hydration gap: refresh browser discovery, resolve the real apply URL, and hydrate full descriptions before apply planning.';
   }
+  if (/outside_target_location/.test(reason)) {
+    return 'Location safety gate: verify profile target-location preferences and keep stale/out-of-radius corpus rows out of apply planning.';
+  }
   if (/weak_match_evidence|too_many_match_gaps|hard_match_conflict|low_score_confidence|below_threshold|candidate_fingerprint_mismatch|unscored/.test(reason)) {
     return 'Scoring/ranking gate: rescore against the current resume/JD evidence or leave out as unsuitable for autonomous apply.';
   }
@@ -735,6 +800,9 @@ function renderApplyRunReport(storage, options = {}) {
     .map(e => compactReportJob(e, e.status || (e.success ? 'confirmed' : 'applied_log')));
   const debugTail = Array.isArray(storage && storage.pja_dbg) ? storage.pja_dbg.slice(-30).map(safeReportText) : [];
   const lastFailure = compactReportJob(storage && storage.pja_last_apply_failure, 'last_failure');
+  const profileFieldCount = storage && storage.pja_profile && typeof storage.pja_profile === 'object'
+    ? Object.entries(storage.pja_profile).filter(([k, v]) => k !== 'savedAt' && v != null && String(v).trim()).length : null;
+  const resumeConfigured = !!(storage && storage.pja_resume_filename);
   const count = name => Array.isArray(results[name]) ? results[name].length
     : ranked && ranked.counts && ranked.counts[name] != null ? Number(ranked.counts[name]) || 0
     : ranked && ranked[name] != null ? Number(ranked[name]) || 0
@@ -776,6 +844,28 @@ function renderApplyRunReport(storage, options = {}) {
     lines.push(`- Last failure: ${lastFailure.company} — ${lastFailure.title} (${lastFailure.reason || 'no reason'})`);
   }
   lines.push('');
+  lines.push('## Run health');
+  lines.push('');
+  lines.push(`- Extension clients: ${wsClients.size}`);
+  lines.push(`- Profile configured: ${profileFieldCount == null ? 'unknown' : profileFieldCount >= 3 ? 'yes' : 'no'}${profileFieldCount == null ? '' : ` (${profileFieldCount} non-empty fields)`}`);
+  lines.push(`- Resume configured: ${resumeConfigured ? 'yes' : 'no'}`);
+  lines.push(`- Active/in-flight: ${ranked && ranked.status === 'applying' ? 'yes' : 'no'} / ${ranked && ranked.inFlightIndex != null ? 'yes' : 'no'}`);
+  lines.push(`- Job tab cleanup: ${ranked && (ranked.tabCleanup || ranked.lastTabCleanup) ? safeReportText(JSON.stringify(ranked.tabCleanup || ranked.lastTabCleanup)) : 'not recorded'}`);
+  if (storage && storage.pja_profile_restored_from_backup) lines.push('- Profile backup recovery: yes');
+  if (storage && storage.pja_profile_write_rejected) lines.push(`- Last rejected profile write: ${safeReportText(storage.pja_profile_write_rejected.reason || '')}`);
+  lines.push('');
+  const plannedRows = ranked && Array.isArray(ranked.jobs)
+    ? ranked.jobs.slice(0, 80).map(row => compactReportJob(row, 'planned')) : [];
+  if (plannedRows.length && /planned|applying|paused|aborted|blocked/i.test(String(ranked && ranked.status || ''))) {
+    lines.push('## Planned apply queue');
+    lines.push('');
+    lines.push('| # | Company | Title | Location | Channel | ATS | Fit | Job ID | URL |');
+    lines.push('| ---: | --- | --- | --- | --- | --- | --- | --- | --- |');
+    for (const [idx, row] of plannedRows.entries()) {
+      lines.push(`| ${idx + 1} | ${row.company} | ${row.title} | ${row.location} | ${row.channel} | ${row.ats} | ${row.fitScore} | ${row.jobId} | ${row.url} |`);
+    }
+    lines.push('');
+  }
   if (coverageMatrix.length) {
     lines.push('## Strategy coverage matrix');
     lines.push('');
@@ -869,6 +959,17 @@ function renderApplyRunReport(storage, options = {}) {
     }
     lines.push('');
     if (planningDropRows.length) {
+      const unsupportedRows = planningDropRows.filter(row => /^unsupported_|unknown_apply_strategy|aggregator_without_apply_destination|missing_apply_url/i.test(String(row.reason || '')));
+      if (unsupportedRows.length) {
+        lines.push('### Good jobs found but not autonomously applyable yet');
+        lines.push('');
+        lines.push('| Reason | Company | Title | Channel | ATS | Fit | URL |');
+        lines.push('| --- | --- | --- | --- | --- | --- | --- |');
+        for (const row of unsupportedRows.slice(0, 80).sort((a, b) => (Number(b.fitScore) || 0) - (Number(a.fitScore) || 0))) {
+          lines.push(`| ${row.reason} | ${row.company} | ${row.title} | ${row.channel} | ${row.ats} | ${row.fitScore} | ${row.url} |`);
+        }
+        lines.push('');
+      }
       lines.push('### Examples');
       lines.push('');
       lines.push('| Reason | Company | Title | Channel | ATS | Fit | URL |');
@@ -880,6 +981,14 @@ function renderApplyRunReport(storage, options = {}) {
     }
   }
   if (allRows.length) {
+    lines.push('## Per-job lifecycle');
+    lines.push('');
+    lines.push('| Company | Title | Sourced | Scored | Planned | Routed | Attempted | Terminal result | Reason |');
+    lines.push('| --- | --- | --- | --- | --- | --- | --- | --- | --- |');
+    for (const row of allRows) {
+      lines.push(`| ${row.company} | ${row.title} | yes | ${row.fitScore === '' ? 'unknown' : 'yes'} | yes | ${safeReportText(row.ats || row.strategy || row.channel)} | yes | ${safeReportText(row.status)} | ${safeReportText(row.reason)} |`);
+    }
+    lines.push('');
     lines.push('## Ranked-run outcomes');
     lines.push('');
     lines.push('| Status | Company | Title | Channel | ATS | Fit | Reason | URL |');
@@ -950,7 +1059,8 @@ function writeApplyRunReport(storage, options = {}) {
 function writeApplyPlanningReport(planningDrops, options = {}) {
   if (!planningDrops && !options.channelCoverage && !options.strategyCoverage) return null;
   const runId = safeReportId(options.runId || `plan-${Date.now()}`);
-  return writeApplyRunReport({
+  const storage = options.storage && typeof options.storage === 'object' ? options.storage : {};
+  return writeApplyRunReport(Object.assign({}, storage, {
     pja_ranked_apply: {
       runId,
       status: options.status || 'planning',
@@ -963,7 +1073,7 @@ function writeApplyPlanningReport(planningDrops, options = {}) {
       channelCoverage: options.channelCoverage || null,
       strategyCoverage: options.strategyCoverage || null,
     },
-  }, { runId });
+  }), { runId });
 }
 
 function appendPlanningDrop(planningDrops, job, reason, dropLimit = 200) {
@@ -998,6 +1108,7 @@ async function oneClickPreflight(options = {}) {
   const problems = [];
   if (wsClients.size < 1) problems.push('extension_not_connected');
   if (options.requireCandidateProfile !== false && !status.configured) problems.push('candidate_profile_not_configured');
+  if (options.requireResume !== false && !status.resume) problems.push('resume_not_configured');
   if (active && options.force !== true) problems.push('active_ranked_apply_run');
   return {
     ok: problems.length === 0,
@@ -1218,6 +1329,10 @@ async function handleRequest(req, res) {
         'pja_apply_diagnostics',
         'pja_last_apply_failure',
         'pja_dbg',
+        'pja_profile',
+        'pja_profile_restored_from_backup',
+        'pja_profile_write_rejected',
+        'pja_resume_filename',
       ], 8000);
       const status = summarizeApplyStatus(st || {});
       const autoReport = maybeAutoExportApplyReport(st || {});
@@ -1418,6 +1533,10 @@ async function handleRequest(req, res) {
           'pja_apply_diagnostics',
           'pja_last_apply_failure',
           'pja_dbg',
+          'pja_profile',
+          'pja_profile_restored_from_backup',
+          'pja_profile_write_rejected',
+          'pja_resume_filename',
         ], Number(o.timeoutMs) || 10000);
         const written = writeApplyRunReport(st || {}, { runId: o.runId });
         res.writeHead(200, CORS);
@@ -1949,7 +2068,7 @@ ${(description || '').slice(0, 6000)}`;
 
         // Dedupe against already-applied: durable applied log (survives queue overwrites) +
         // pja_jobs + current queue results.
-        const st = await getStorageFromExtension(['pja_profile', 'pja_jobs', 'pja_ext_queue', 'pja_applied_log']);
+        const st = await getStorageFromExtension(['pja_profile', 'pja_prefs', 'pja_jobs', 'pja_ext_queue', 'pja_applied_log']);
         const browserJobs = await getBrowserShortlistFromExtension(30000);
         const { pjaCollectAppliedRecords } = require('./sourcing/dedupe');
         const applied = pjaCollectAppliedRecords(st);
@@ -2051,6 +2170,10 @@ ${(description || '').slice(0, 6000)}`;
           target: sourceTarget,
           write: o.sourceWrite !== false,
         };
+        if (o.targetLocation && typeof o.targetLocation === 'object') sourceBody.targetLocation = o.targetLocation;
+        if (o.targetRadiusMiles != null) sourceBody.targetRadiusMiles = Number(o.targetRadiusMiles);
+        if (o.remotePolicy != null) sourceBody.remotePolicy = o.remotePolicy;
+        if (o.locationStrictness != null) sourceBody.locationStrictness = o.locationStrictness;
         if (Array.isArray(o.queries) && o.queries.length) {
           sourceBody.queries = o.queries.map(q => String(q || '').trim()).filter(Boolean);
         }
@@ -2073,6 +2196,8 @@ ${(description || '').slice(0, 6000)}`;
           includeAssisted: o.includeAssisted !== false,
           perCompanyCap: o.perCompanyCap != null ? o.perCompanyCap : 2,
           e2eSafe: o.e2eSafe !== false,
+          workdayAttemptTimeoutMs: o.workdayAttemptTimeoutMs != null ? Number(o.workdayAttemptTimeoutMs)
+            : o.e2eSafe !== false ? 180000 : undefined,
           coverage: coverageMode,
           coverageCount,
           requiredChannels: coverageMode ? Array.from(new Set(coverageChannels.map(x => String(x || '').trim()).filter(Boolean))) : o.requiredChannels,
@@ -2093,6 +2218,16 @@ ${(description || '').slice(0, 6000)}`;
             res.end(JSON.stringify({ success: false, stage: 'source-v2', sourceOptions: sourceBody,
               source: sourceResp.data }));
             return;
+          }
+          if (!applyBody.dryRun && o.preflight !== false) {
+            const postSourcePreflight = await oneClickPreflight({ ...o, force: true });
+            if (!postSourcePreflight.ok) {
+              res.writeHead(409, CORS);
+              res.end(JSON.stringify({ success: false, stage: 'pre_apply_storage_guard', sourceOptions: sourceBody,
+                source: sourceResp.data, preflight: postSourcePreflight,
+                error: 'required profile/resume storage was not readable after sourcing; refusing to start apply-run' }));
+              return;
+            }
           }
         }
 
@@ -2123,25 +2258,37 @@ ${(description || '').slice(0, 6000)}`;
       try {
         const o = body ? JSON.parse(body) : {};
         const write = o.write !== false;
-        const st = await getStorageFromExtension(['pja_profile', 'pja_jobs', 'pja_ext_queue', 'pja_applied_log']);
+        const st = await getStorageFromExtension(['pja_profile', 'pja_prefs', 'pja_jobs', 'pja_ext_queue', 'pja_applied_log']);
         const { pjaCollectAppliedRecords, appliedIdentity } = require('./sourcing/dedupe');
         const applied = appliedIdentity(pjaCollectAppliedRecords(st));
 
         const { sourceAll } = require('./sourcing/source-run');
         const willing = /^(yes|true|1)$/i.test(String((st.pja_profile || {}).willingToRelocate || ''));
-        const queries = Array.isArray(o.queries) ? o.queries.map(q => String(q || '').trim()).filter(Boolean) : undefined;
+        const { prefs, targetLocation, targetRadiusMiles, locationStrictness, remotePolicy } = deriveTargetLocationOptions(o, st);
+        const prefQueries = Array.isArray(prefs.searchTitles) ? prefs.searchTitles
+          : String(prefs.searchTitles || '').split(/[\n,]+/);
+        const queries = Array.isArray(o.queries) && o.queries.length
+          ? o.queries.map(q => String(q || '').trim()).filter(Boolean)
+          : prefQueries.map(q => String(q || '').trim()).filter(Boolean);
         const requiredChannels = Array.isArray(o.requiredChannels) ? o.requiredChannels
           .map(x => String(x || '').trim()).filter(Boolean) : [];
         const browserScan = o.coverage === true && requiredChannels.some(c => /^(linkedin_easy_apply|indeed_apply)$/.test(c))
           ? await waitForBrowserChannelCoverage(requiredChannels.filter(c => /^(linkedin_easy_apply|indeed_apply)$/.test(c)), {
             queries,
+            targetLocation,
+            targetRadiusMiles,
             minPerChannel: o.coverageCount != null ? Number(o.coverageCount) || 1 : 1,
             timeoutMs: o.browserScanTimeoutMs != null ? Number(o.browserScanTimeoutMs) : 180000,
             maxAgeMs: o.maxBrowserAgeMs != null ? Number(o.maxBrowserAgeMs) : 48 * 60 * 60 * 1000,
           }) : null;
         const browserJobs = await getBrowserShortlistFromExtension(30000);
-        const { store, report } = await sourceAll({ appliedIdentity: applied, target: o.target || 200, nationwideUS: willing,
+        const { store, report } = await sourceAll({ appliedIdentity: applied, target: o.target || 200,
+          nationwideUS: willing && !/^hard$/i.test(String(locationStrictness || '')),
           queries: queries && queries.length ? queries : undefined,
+          targetLocation,
+          targetRadiusMiles,
+          locationStrictness,
+          remotePolicy,
           browserJobs,
           maxBrowserAgeMs: o.maxBrowserAgeMs != null ? Number(o.maxBrowserAgeMs) : 48 * 60 * 60 * 1000 });
         if (browserScan) report.browserScan = browserScan;
@@ -2260,7 +2407,8 @@ ${(description || '').slice(0, 6000)}`;
           applyRunPlanning = true;
           ownsPlanningLock = true;
         }
-        const control = await getStorageFromExtension(['pja_ranked_apply', 'pja_application_ledger', 'pja_applied_log']);
+        const control = await getStorageFromExtension(['pja_ranked_apply', 'pja_application_ledger', 'pja_applied_log', 'pja_profile', 'pja_prefs']);
+        const targetFilter = deriveTargetLocationOptions(o, control);
         if (!dryRun && !o.force) {
           const run = control.pja_ranked_apply;
           if (run && run.status === 'applying') {
@@ -2292,6 +2440,14 @@ ${(description || '').slice(0, 6000)}`;
         let planningDrops = setResp.planningDrops ? JSON.parse(JSON.stringify(setResp.planningDrops)) : null;
         const planningDropLimit = o.dropLimit != null ? Math.max(0, Number(o.dropLimit) || 0) : 200;
         if (setResp.error) { res.writeHead(502, CORS); res.end(JSON.stringify({ error: 'getApplySet: ' + setResp.error })); return; }
+        if (/^hard$/i.test(String(targetFilter.locationStrictness || '')) &&
+            (targetFilter.targetLocation.city || targetFilter.targetLocation.state || targetFilter.targetLocation.zip)) {
+          jobs = jobs.filter(j => {
+            const ok = isEligibleTargetLocation(j.location, j.remote, targetFilter);
+            if (!ok) planningDrops = appendPlanningDrop(planningDrops, j, 'outside_target_location', planningDropLimit);
+            return ok;
+          });
+        }
         if (candidateAllow.size || candidateIds.size) {
           jobs = jobs.filter(j => {
             const ok = allowed(j);
@@ -2482,7 +2638,7 @@ ${(description || '').slice(0, 6000)}`;
         const uncoveredChannels = requiredChannels.filter(channel => (channelCoverage[channel].qualified || 0) < coverageCount);
         if (uncoveredChannels.length) {
           const report = writeApplyPlanningReport(planningDrops || null,
-            { status: 'channel_coverage_blocked', coverage: coverageMode, coverageCount, channelCoverage, strategyCoverage });
+            { status: 'channel_coverage_blocked', coverage: coverageMode, coverageCount, channelCoverage, strategyCoverage, storage: control });
           res.writeHead(409, CORS); res.end(JSON.stringify({ success: false, stage: 'channel_coverage',
             error: 'required channel coverage is not ready', uncoveredChannels, coverageCount, channelCoverage,
             planningDrops: planningDrops || null, report,
@@ -2491,7 +2647,7 @@ ${(description || '').slice(0, 6000)}`;
         const uncoveredStrategies = requiredStrategies.filter(strategy => (strategyCoverage[strategy].qualified || 0) < coverageCount);
         if (uncoveredStrategies.length) {
           const report = writeApplyPlanningReport(planningDrops || null,
-            { status: 'strategy_coverage_blocked', coverage: coverageMode, coverageCount, channelCoverage, strategyCoverage });
+            { status: 'strategy_coverage_blocked', coverage: coverageMode, coverageCount, channelCoverage, strategyCoverage, storage: control });
           res.writeHead(409, CORS); res.end(JSON.stringify({ success: false, stage: 'strategy_coverage',
             error: 'required apply strategy coverage is not ready', uncoveredStrategies, coverageCount, strategyCoverage,
             planningDrops: planningDrops || null, report,
@@ -2501,7 +2657,7 @@ ${(description || '').slice(0, 6000)}`;
         if (!jobs.length) {
           const report = writeApplyPlanningReport(planningDrops || null,
             { status: dryRun ? 'dry_run_nothing_eligible' : 'nothing_eligible',
-              coverage: coverageMode, coverageCount, channelCoverage, strategyCoverage });
+              coverage: coverageMode, coverageCount, channelCoverage, strategyCoverage, storage: control });
           res.writeHead(200, CORS); res.end(JSON.stringify({ success: true, planned: 0,
           note: 'nothing eligible', corpusTotal: setResp.total, assistedExcluded, day, timeZone,
           dailyTarget, alreadyConfirmedToday, remainingTarget, planningDrops: planningDrops || null,
@@ -2534,7 +2690,9 @@ ${(description || '').slice(0, 6000)}`;
             runId, runMode, applyAllAboveScore, targetConfirmed: dailyTarget, dailyTarget, attemptCap, threshold,
             day, timeZone,
             confirmedCount: alreadyConfirmedToday, remaining: remainingTarget,
-            stopBeforeSubmit, e2eSafe, planningDrops: planningDrops || null,
+            stopBeforeSubmit, e2eSafe,
+            workdayAttemptTimeoutMs: o.workdayAttemptTimeoutMs != null ? Math.max(30000, Number(o.workdayAttemptTimeoutMs) || 0) : undefined,
+            planningDrops: planningDrops || null,
             coverage: coverageMode, coverageCount, channelCoverage, strategyCoverage,
             startedAt: plannedAt, updatedAt: plannedAt };
           const started = await wsAsk('startRankedApply', { master, force: !!o.force },
@@ -2557,7 +2715,7 @@ ${(description || '').slice(0, 6000)}`;
         res.writeHead(200, CORS);
         const previewLimit = Math.max(1, Math.min(500, Number(o.previewLimit) || 12));
         const report = dryRun ? writeApplyPlanningReport(planningDrops || null,
-          { status: 'dry_run_planned', jobs: queueJobs, coverage: coverageMode, coverageCount, channelCoverage, strategyCoverage }) : null;
+          { status: 'dry_run_planned', jobs: queueJobs, coverage: coverageMode, coverageCount, channelCoverage, strategyCoverage, storage: control }) : null;
         res.end(JSON.stringify({ success: true, dryRun, planned: queueJobs.length,
           runMode, applyAllAboveScore, targetConfirmed: remainingTarget, dailyTarget,
           alreadyConfirmedToday, remainingTarget,
@@ -2566,7 +2724,7 @@ ${(description || '').slice(0, 6000)}`;
           byStrategy, channelCoverage, strategyCoverage, coverage: coverageMode, coverageCount, corpusTotal: setResp.total,
           planningDrops: planningDrops || null, report,
           top: jobs.slice(0, previewLimit).map(j => ({ fit: j.fitScore, company: j.company, title: j.title,
-            ats: j.ats || j.strategy, channel: j.channel || 'external', matchEvidence: j.matchEvidence || [],
+            id: j.id, location: j.location || '', applyUrl: j.applyUrl || '', ats: j.ats || j.strategy, channel: j.channel || 'external', matchEvidence: j.matchEvidence || [],
             gaps: j.gaps || [], conflicts: j.conflicts || [], confidence: j.confidence || '' })) }));
       } catch (e) {
         console.error('[PJA] /apply-run error:', e.message);

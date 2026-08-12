@@ -3,7 +3,7 @@
 const path = require('path');
 const R = d => require(path.resolve(__dirname, '../../sourcing', d));
 const { makeJob, isRemote, cleanDescription } = R('normalize');
-const { isEligibleTitle, isEligibleLocation, isEligibleUSLocation, isItarExcluded, filterJobs, tnAdjustScore } = R('filter');
+const { isEligibleTitle, isEligibleLocation, isEligibleUSLocation, isEligibleTargetLocation, isWithinTargetRadius, isItarExcluded, filterJobs, tnAdjustScore } = R('filter');
 const { jobKey, appliedKeySet, appliedIdentity, dedupe, pjaMergeAppliedLog, pjaCollectAppliedRecords } = R('dedupe');
 const { routeJobs } = R('pipeline');
 const gh = R('adapters/greenhouse');
@@ -44,6 +44,11 @@ module.exports = (t) => {
   t.eq(isEligibleUSLocation('Hillsboro, Oregon'), true, 'relocation: semiconductor hub accepted');
   t.eq(isEligibleUSLocation('Toronto, Ontario, Canada'), false, 'relocation: international onsite excluded');
   t.eq(isEligibleUSLocation('Singapore'), false, 'relocation: ambiguous international excluded');
+  const bayTarget = { city: 'Santa Clara', state: 'CA', zip: '95051' };
+  t.eq(isWithinTargetRadius('San Jose, CA', bayTarget, 60), true, 'target loc: nearby city inside configured radius');
+  t.eq(isWithinTargetRadius('Irvine, CA', bayTarget, 60), false, 'target loc: far CA city outside configured radius');
+  t.eq(isEligibleTargetLocation('Remote - US', true, { targetLocation: bayTarget, targetRadiusMiles: 60, remotePolicy: 'us_or_ca_remote_allowed' }), true,
+    'target loc: US remote allowed by configured remote policy');
 
   // --- filter: ITAR ---
   t.eq(isItarExcluded('Process Engineer (US Person required, ITAR)'), true, 'itar: blocked');
@@ -66,6 +71,13 @@ module.exports = (t) => {
     makeJob({ id: 6, title: 'Quality Engineer', company: 'Cerebras Systems', location: 'Sunnyvale, CA' }),
   ];
   t.eq(filterJobs(raw).map(x => x.id), ['1', '4'], 'filterJobs: keeps eligible CA/remote eng, drops export-controlled company (6)');
+  const hardTargeted = filterJobs(raw.concat([
+    makeJob({ id: 7, title: 'Quality Engineer', company: 'E', location: 'Irvine, CA' }),
+  ]), { locationStrictness: 'hard', targetLocation: bayTarget, targetRadiusMiles: 60, remotePolicy: 'us_or_ca_remote_allowed' });
+  t.eq(hardTargeted.map(x => x.id), ['1', '4'], 'filterJobs: hard target radius drops outside-radius CA jobs even when relocation is yes elsewhere');
+  t.eq(isEligibleTargetLocation('United States - California - Temecula', false,
+    { locationStrictness: 'hard', targetLocation: bayTarget, targetRadiusMiles: 60, remotePolicy: 'us_or_ca_remote_allowed' }), false,
+    'hard target radius fails closed for unknown/out-of-radius California cities');
 
   // --- dedupe ---
   t.eq(jobKey({ company: 'Twist Bioscience', title: 'Equipment Engineer' }),
