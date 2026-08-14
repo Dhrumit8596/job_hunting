@@ -16,6 +16,9 @@ storage-backup.local.json
 storage-current.local.json
 test/.merged-profile.*.local.json
 
+# Generated local diagnostics / real-run reports
+reports/
+
 # Editor / OS / deps
 .DS_Store
 node_modules/

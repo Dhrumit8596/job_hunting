@@ -12,6 +12,7 @@
 (function (root) {
   const DB_NAME = 'pja_jobs_db';
   const SCHEMA_VERSION = 1;
+  const MAX_APPLY_DESCRIPTION_BATCH = 10;
 
   // ── canonical identity (inlined mirror of sourcing/jobid.js) ──
   function norm(s) { return String(s == null ? '' : s).toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim(); }
@@ -28,6 +29,11 @@
     let h = 2166136261;
     for (let i = 0; i < s.length; i++) { h ^= s.charCodeAt(i); h = Math.imul(h, 16777619); }
     return s.length + ':' + (h >>> 0).toString(36);
+  }
+
+  function descriptionReady(posting) {
+    return !!String(posting && posting.description || '').trim() &&
+      !/^(missing|stale|needs_description)$/i.test(String(posting && posting.descriptionStatus || ''));
   }
 
   function isAggregatorUrl(url) {
@@ -125,6 +131,51 @@
     };
     out.descriptionFingerprint = descriptionFingerprint(out.description);
     return out;
+  }
+
+  // Apply planning needs route, identity, score, and evidence metadata for every corpus row, but it
+  // does not need every 20KB job description at once. Keep this projection explicit so adding a
+  // description-rich field to the canonical posting cannot silently bloat the apply-set WS reply.
+  function applySourceRefProjection(ref) {
+    ref = ref || {};
+    return {
+      id: ref.id || '', jobId: ref.jobId || '', sourceJobId: ref.sourceJobId || '',
+      applyUrl: ref.applyUrl || '', listingUrl: ref.listingUrl || '',
+      channel: ref.channel || '', detectedAts: ref.detectedAts || '',
+      isEasyApply: !!ref.isEasyApply, indeedApply: !!ref.indeedApply,
+    };
+  }
+
+  function applyPostingProjection(posting) {
+    posting = posting || {};
+    return {
+      id: posting.id, title: posting.title, company: posting.company, location: posting.location,
+      remote: !!posting.remote, applyUrl: posting.applyUrl || '', listingUrl: posting.listingUrl || '',
+      ats: posting.ats || '', detectedAts: posting.detectedAts || '',
+      sourcePlatform: posting.sourcePlatform || '', sourceJobId: posting.sourceJobId || '',
+      channel: posting.channel || '', isEasyApply: !!posting.isEasyApply, indeedApply: !!posting.indeedApply,
+      discoveredAt: posting.discoveredAt || '',
+      descriptionStatus: posting.descriptionStatus || '',
+      descriptionReady: descriptionReady(posting),
+      descriptionLength: String(posting.description || '').length,
+      descriptionFingerprint: posting.descriptionFingerprint || descriptionFingerprint(posting.description),
+      sourceRefs: Array.isArray(posting.sourceRefs) ? posting.sourceRefs.map(applySourceRefProjection) : [],
+    };
+  }
+
+  function applyStateProjection(state) {
+    state = state || {};
+    return {
+      id: state.id, status: state.status || 'sourced', fitScore: state.fitScore == null ? null : state.fitScore,
+      attempts: state.attempts || 0, scoreKind: state.scoreKind || '',
+      descriptionFingerprint: state.descriptionFingerprint || '',
+      evidenceFingerprint: state.evidenceFingerprint || '',
+      candidateFingerprint: state.candidateFingerprint || '',
+      matchEvidence: Array.isArray(state.matchEvidence) ? state.matchEvidence : [],
+      gaps: Array.isArray(state.gaps) ? state.gaps : [],
+      conflicts: Array.isArray(state.conflicts) ? state.conflicts : [],
+      confidence: state.confidence || '',
+    };
   }
 
   function idb() {
@@ -307,6 +358,56 @@
     } finally { db.close(); }
   }
 
+  // Description-free corpus snapshot for apply selection and planning-drop diagnostics. Both
+  // stores are read in one transaction so posting/state metadata comes from the same IDB snapshot.
+  // Cursor values still arrive one record at a time under schema v1, but JD text is never retained
+  // in the returned corpus or serialized into the initial apply-set response.
+  async function getApplyPlanningCorpus() {
+    const db = await openDb();
+    try {
+      const index = {}, state = {};
+      const t = db.transaction(['index', 'state'], 'readonly');
+      // Native getAll avoids one extension event round-trip per record. We still immediately
+      // project away JD bodies, so the compact result and WS payload remain description-free.
+      const [postingRows, stateRows] = await Promise.all([
+        reqP(t.objectStore('index').getAll()),
+        reqP(t.objectStore('state').getAll()),
+      ]);
+      for (const row of postingRows) {
+        const projected = applyPostingProjection(row);
+        index[projected.id] = projected;
+      }
+      for (const row of stateRows) {
+        const projected = applyStateProjection(row);
+        state[projected.id] = projected;
+      }
+      return { index, state, total: Object.keys(index).length };
+    } finally { db.close(); }
+  }
+
+  // Targeted JD hydration for the scoring phase. A strict batch ceiling keeps a single extension
+  // reply below roughly 200KB because canonical descriptions are capped at 20KB on write.
+  async function getApplyDescriptions(ids) {
+    const unique = Array.from(new Set((Array.isArray(ids) ? ids : [])
+      .map(id => String(id || '').trim()).filter(Boolean)));
+    if (unique.length > MAX_APPLY_DESCRIPTION_BATCH) {
+      throw new Error('getApplyDescriptions supports at most ' + MAX_APPLY_DESCRIPTION_BATCH + ' ids');
+    }
+    if (!unique.length) return [];
+    const db = await openDb();
+    try {
+      const store = db.transaction('index', 'readonly').objectStore('index');
+      const postings = await Promise.all(unique.map(id => reqP(store.get(id))));
+      return postings.filter(Boolean).map(posting => ({
+        id: posting.id,
+        description: String(posting.description || '').slice(0, 20000),
+        descriptionStatus: posting.descriptionStatus || '',
+        descriptionReady: descriptionReady(posting),
+        descriptionFingerprint: posting.descriptionFingerprint || descriptionFingerprint(posting.description),
+      }));
+    } finally { db.close(); }
+  }
+
   // Merge a patch into one job's mutable state (per-record write; used for apply results + rescoring).
   async function updateState(id, patch) {
     const db = await openDb();
@@ -439,9 +540,12 @@
     finally { db.close(); }
   }
 
-  const API = { DB_NAME, SCHEMA_VERSION, canonicalId, roleKey, mirrorKey, descriptionFingerprint,
+  const API = { DB_NAME, SCHEMA_VERSION, MAX_APPLY_DESCRIPTION_BATCH,
+    canonicalId, roleKey, mirrorKey, descriptionFingerprint,
+    applyPostingProjection, applyStateProjection,
     openDb, upsertJobs, importNormalized,
-    migrateFromLegacy, count, getAll, updateState, getJob, setMeta, getMeta, excludeApplied, corpusSummary, gateReport, clearAll };
+    migrateFromLegacy, count, getAll, getApplyPlanningCorpus, getApplyDescriptions,
+    updateState, getJob, setMeta, getMeta, excludeApplied, corpusSummary, gateReport, clearAll };
 
   if (root) root.PJAIdb = API;                                   // service worker: self.PJAIdb
   if (typeof module !== 'undefined' && module.exports) module.exports = API; // node: require

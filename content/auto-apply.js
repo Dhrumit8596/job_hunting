@@ -58,10 +58,25 @@ function pjaModalHeading() {
   return m.root.querySelector('h3')?.textContent?.trim() || null;
 }
 
-// Robust button-ELEMENT collector. The Easy Apply footer (Next/Review/Submit) can render just
-// OUTSIDE the narrow modal root (a separate footer container), which made the old m.root-only
-// scan return [] even though the heading read fine → false 'unknown_buttons'. Widen to the full
-// [role=dialog] (header+content+footer) and, in shadow modals, the whole shadow root. Deduped.
+const PJA_EA_ACTION_LABEL_RE = /^(next|review|continue to next step|submit application)$/i;
+
+function pjaButtonLabel(b) {
+  return String((b && (b.textContent || b.getAttribute?.('aria-label') || '')) || '')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function pjaIsEaActionButton(b) {
+  const label = pjaButtonLabel(b);
+  if (!label || !PJA_EA_ACTION_LABEL_RE.test(label)) return false;
+  if (b.disabled || b.getAttribute('aria-disabled') === 'true') return false;
+  return true;
+}
+
+// Robust action-button collector. The Easy Apply body can contain unrelated buttons (for example
+// date-picker day buttons with labels like "26, 27, 28"), while the footer/actionbar contains the
+// real flow controls (Next/Review/Submit). Prefer footer/action scopes and always filter to known
+// Easy Apply flow actions so body widgets cannot drive the state machine.
 function pjaModalButtonEls() {
   const m = pjaGetCurrentModal();
   if (!m) return [];
@@ -72,24 +87,55 @@ function pjaModalButtonEls() {
   let dialog = (r.querySelector && r.querySelector('[role="dialog"]'))
     || (r.closest && r.closest('[role="dialog"]'))
     || (r.matches && r.matches('[role="dialog"]') ? r : null);
-  if (dialog) {
-    const b = Array.from(dialog.querySelectorAll('button'));
-    if (b.length) return b;
+  const seen = new Set(); const out = [];
+  const addActionButtons = (scope) => {
+    if (!scope || !scope.querySelectorAll) return;
+    for (const b of scope.querySelectorAll('button')) {
+      if (seen.has(b) || !pjaIsEaActionButton(b)) continue;
+      seen.add(b); out.push(b);
+    }
+  };
+
+  const footerSelectors = [
+    'footer',
+    '.artdeco-modal__actionbar',
+    '.artdeco-modal__footer',
+    '.jobs-easy-apply-modal__footer',
+    '.jobs-easy-apply-modal__actions',
+    '[data-test-modal-actionbar]',
+    '[data-test-modal-footer]',
+    '[class*="actionbar"]',
+    '[class*="footer"]'
+  ].join(',');
+
+  // First pass: footer/actionbar scopes. This is the normal LinkedIn layout and avoids body
+  // controls such as calendars and steppers.
+  const primary = [];
+  if (dialog) primary.push(dialog);
+  primary.push(r);
+  if (m.isShadow) { const o = document.getElementById('interop-outlet'); if (o && o.shadowRoot) primary.push(o.shadowRoot); }
+  for (const sc of primary) {
+    if (!sc?.querySelectorAll) continue;
+    for (const footer of sc.querySelectorAll(footerSelectors)) addActionButtons(footer);
   }
-  // Fallback (footer mounted outside the dialog, or no dialog): widen to root then shadow root.
+  if (out.length) return out;
+
+  // Fallback: scan the actual dialog/root, but still only return known flow-action labels.
+  if (dialog) {
+    addActionButtons(dialog);
+    if (out.length) return out;
+  }
+
+  // Last fallback (footer mounted outside the dialog, or no dialog): widen to root then shadow root.
   const scopes = [r];
   if (m.isShadow) { const o = document.getElementById('interop-outlet'); if (o && o.shadowRoot) scopes.push(o.shadowRoot); }
-  const seen = new Set(); const out = [];
-  for (const sc of scopes) {
-    if (!sc.querySelectorAll) continue;
-    for (const b of sc.querySelectorAll('button')) { if (!seen.has(b)) { seen.add(b); out.push(b); } }
-  }
+  for (const sc of scopes) addActionButtons(sc);
   return out;
 }
 function pjaModalBtns() {
   const seen = new Set(); const out = [];
   for (const b of pjaModalButtonEls()) {
-    const t = (b.textContent || '').trim();
+    const t = pjaButtonLabel(b);
     if (t && !seen.has(t)) { seen.add(t); out.push(t); }
   }
   return out;
@@ -144,6 +190,71 @@ async function pjaRecordSubmitUnclearDiagnostics(label) {
   } catch (_) {}
 }
 
+async function pjaRecordEasyApplyStepDiagnostics(label, heading, extra = {}) {
+  try {
+    const modal = pjaGetCurrentModal();
+    const root = modal?.root || document;
+    const safeText = (txt) => String(txt || '')
+      .replace(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/ig, '[email]')
+      .replace(/\+?\d[\d\s().-]{7,}\d/g, '[phone]')
+      .replace(/\s+/g, ' ')
+      .trim();
+    const fieldLabel = (el) => {
+      try {
+        return safeText(
+          (typeof window.pjaGetLabel === 'function' ? window.pjaGetLabel(el) : '') ||
+          (el.id ? document.querySelector(`label[for="${CSS.escape(el.id)}"]`)?.textContent : '') ||
+          el.getAttribute?.('aria-label') ||
+          el.closest?.('label, fieldset, [class*="field"], [class*="question"]')?.textContent ||
+          ''
+        ).slice(0, 180);
+      } catch (_) { return ''; }
+    };
+    const summarizeControl = (el) => ({
+      tag: (el.tagName || '').toLowerCase(),
+      type: el.getAttribute?.('type') || '',
+      role: el.getAttribute?.('role') || '',
+      required: !!(el.required || el.getAttribute?.('aria-required') === 'true'),
+      invalid: el.getAttribute?.('aria-invalid') || '',
+      label: fieldLabel(el),
+      options: el.tagName === 'SELECT'
+        ? Array.from(el.options || []).map(o => safeText(o.textContent).slice(0, 80)).filter(Boolean).slice(0, 12)
+        : [],
+      textLen: el.tagName === 'TEXTAREA' ? String(el.value || '').length : undefined,
+      hasValue: !!String(el.value || '').trim(),
+    });
+    const visibleErrors = Array.from(root.querySelectorAll('[role="alert"], .artdeco-inline-feedback--error, .fb-dash-form-element__error-field, [id*="error"], [class*="error"]'))
+      .map(el => safeText(el.textContent).slice(0, 220))
+      .filter(Boolean)
+      .slice(0, 12);
+    const collected = (typeof window.pjaCollectRequiredEmptyFields === 'function')
+      ? window.pjaCollectRequiredEmptyFields(root).map(f => ({ label: safeText(f.label).slice(0, 180), type: f.type, options: (f.options || []).slice(0, 12) }))
+      : [];
+    const controls = Array.from(root.querySelectorAll('input:not([type=hidden]), select, textarea, [role="combobox"], [aria-required="true"], [aria-invalid="true"]'))
+      .filter(el => {
+        const rr = el.getBoundingClientRect?.();
+        return !rr || rr.width > 0 || rr.height > 0 || el.offsetParent;
+      })
+      .map(summarizeControl)
+      .slice(0, 40);
+    const diag = {
+      ts: Date.now(),
+      label: label || '',
+      url: location.href,
+      heading: safeText(heading || pjaModalHeading() || ''),
+      buttons: pjaModalBtns(),
+      easyApplyState: modal ? pjaEasyApplyState(modal) : { open: false },
+      submitErrors: pjaLinkedInSubmitErrors(),
+      collectedRequiredEmpty: collected,
+      visibleErrors,
+      controls,
+      textTail: safeText(root.innerText || root.textContent || '').slice(-1800),
+      extra,
+    };
+    chrome.storage.local.set({ pja_ea_diag: diag });
+  } catch (_) {}
+}
+
 async function pjaWaitForEasyApplyConfirmation(timeoutMs = 20000) {
   const deadline = Date.now() + timeoutMs;
   do {
@@ -162,12 +273,28 @@ function pjaClickInModal(label) {
   const m = pjaGetCurrentModal();
   if (!m) return false;
   const btns = pjaModalButtonEls(); // robust scope (incl footer / shadow)
-  const btn = btns.find(b => b.textContent.trim() === label)
+  const btn = btns.find(b => pjaButtonLabel(b) === label)
     || btns.find(b => (b.getAttribute('aria-label') || '').trim() === label)
-    || btns.find(b => new RegExp('^' + label, 'i').test(b.textContent.trim()));
+    || btns.find(b => new RegExp('^' + label, 'i').test(pjaButtonLabel(b)));
   if (!btn) return false;
   btn.click();
   return true;
+}
+
+function pjaCloseOpenModalPopups() {
+  try {
+    const m = pjaGetCurrentModal();
+    const root = m?.root || document;
+    const active = document.activeElement;
+    if (active && root.contains(active)) active.blur?.();
+    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', code: 'Escape', keyCode: 27, which: 27, bubbles: true }));
+    document.dispatchEvent(new KeyboardEvent('keyup', { key: 'Escape', code: 'Escape', keyCode: 27, which: 27, bubbles: true }));
+    const escTargets = [root, document.body].filter(Boolean);
+    for (const t of escTargets) {
+      t.dispatchEvent?.(new KeyboardEvent('keydown', { key: 'Escape', code: 'Escape', keyCode: 27, which: 27, bubbles: true }));
+      t.dispatchEvent?.(new KeyboardEvent('keyup', { key: 'Escape', code: 'Escape', keyCode: 27, which: 27, bubbles: true }));
+    }
+  } catch (_) {}
 }
 
 // LinkedIn checks isTrusted on Easy Apply step-advance clicks — a synthetic click
@@ -178,12 +305,13 @@ function pjaTrustedClickInModal(label) {
   const m = pjaGetCurrentModal();
   if (!m) return Promise.resolve(false);
   const btns = pjaModalButtonEls(); // robust scope (incl footer / shadow), not just m.root
-  const btn = btns.find(b => b.textContent.trim() === label)
+  const btn = btns.find(b => pjaButtonLabel(b) === label)
     || btns.find(b => (b.getAttribute('aria-label') || '').trim() === label)
-    || btns.find(b => new RegExp('^' + label, 'i').test(b.textContent.trim()));
+    || btns.find(b => new RegExp('^' + label, 'i').test(pjaButtonLabel(b)));
   if (!btn) return Promise.resolve(false);
   // Compute the button's viewport-center coords HERE (content script sees shadow DOM);
   // the background just performs a trusted CDP mouse click at those coords.
+  pjaCloseOpenModalPopups();
   btn.scrollIntoView({ block: 'center', behavior: 'instant' });
   const r = btn.getBoundingClientRect();
   const x = r.left + r.width / 2, y = r.top + r.height / 2;
@@ -944,6 +1072,35 @@ function pjaTrace(msg) {
   } catch (_) {}
 }
 
+function pjaFindEasyApplyBtn() {
+  const visibleEnabled = el => !!(el && el.offsetParent !== null && !el.disabled &&
+    String(el.getAttribute && el.getAttribute('aria-disabled') || '').toLowerCase() !== 'true');
+  const inSearchCard = el => !!(el && el.closest && el.closest(
+    '[componentkey^="job-card-component-ref-"], [data-occludable-job-id], li.jobs-search-results__list-item'));
+  const clickable = el => el && el.closest ? el.closest('button, a, [role="button"]') : null;
+  const candidates = [];
+  const seen = new Set();
+  const add = (raw, rank) => {
+    const el = raw && raw.matches && raw.matches('button, a, [role="button"]') ? raw : clickable(raw);
+    if (!visibleEnabled(el) || inSearchCard(el) || seen.has(el)) return;
+    seen.add(el);
+    const label = String(el.getAttribute('aria-label') || el.textContent || '').trim();
+    if (!/^easy apply(?:\b| to)/i.test(label) &&
+        !/\/jobs\/view\/[^/?]+\/apply\//i.test(el.getAttribute('href') || '')) return;
+    candidates.push({ el, rank });
+  };
+
+  // Prefer contracts on the selected-job detail panel before generic text. The results list also
+  // contains “Easy Apply” badges, so generic candidates inside a job card are always excluded.
+  document.querySelectorAll('.jobs-apply-button').forEach(el => add(el, 100));
+  document.querySelectorAll('[data-view-name="job-apply-button"]').forEach(el => add(el, 95));
+  document.querySelectorAll('[aria-label^="Easy Apply to this job" i]').forEach(el => add(el, 90));
+  document.querySelectorAll('a[href*="/jobs/view/"][href*="/apply/"]').forEach(el => add(el, 85));
+  document.querySelectorAll('button, a, [role="button"]').forEach(el => add(el, 50));
+  candidates.sort((a, b) => b.rank - a.rank);
+  return candidates[0] ? candidates[0].el : null;
+}
+
 async function pjaApplyOnCurrentPage(job, profile, answers, onStatus) {
   // Per-job runs (queue path) never reset this; a stale true from a prior aborted run
   // would make every subsequent job return 'aborted'. Reset defensively.
@@ -958,62 +1115,11 @@ async function pjaApplyOnCurrentPage(job, profile, answers, onStatus) {
     return { success: false, reason: 'already_applied' };
   }
 
-  // FAST PATH: if the Easy Apply modal is already rendered (we navigated to the
-  // /jobs/view/{id}/apply/ URL), skip the click step entirely and drive the form.
-  // LinkedIn 2026: the Easy Apply control is an <a href=".../apply">, so clicking
-  // it (even a trusted CDP click) NAVIGATES rather than opening an in-page modal.
-  // Navigating straight to that URL renders the modal in regular DOM.
-  // Wait for the Easy Apply control. LinkedIn dropped .jobs-apply-button in 2026; the
-  // label "Easy Apply" lives in a <span>. Walk up to the clickable ancestor — PREFER a
-  // <button> over an <a>: the <button> opens the modal in regular DOM via a plain
-  // synthetic click (no navigation). The <a href=".../apply"> ancestor, if clicked,
-  // follows the link to a cold /apply/ page that LinkedIn redirects back to base.
-  // IMPORTANT: return ONLY a <button>. At ~2s after load the Easy Apply control is
-  // still an <a href=".../apply"> (the interactive <button> hydrates a few seconds
-  // later). Clicking the anchor follows the link → cold /apply/ → LinkedIn redirects
-  // to base → resumeApplyOnLoad re-fires → infinite reload loop. The <button>, once
-  // hydrated, opens the modal in regular DOM on a plain synthetic click.
-  // Returns the clickable Easy Apply control. Prefer a <button>, but also accept the
-  // <a href=".../apply"> ancestor WHEN it carries LinkedIn's SPA onclick handler — in a
-  // logged-in session that handler opens the modal in-place (verified). We only return
-  // such an anchor if hydrated (onclick present); a bare/unhydrated anchor would just
-  // follow the link to a cold /apply/ page and bounce (the old ISSUE-1 loop).
-  function findEasyApplyBtn() {
-    const byClass = document.querySelector('.jobs-apply-button');
-    if (byClass && byClass.tagName === 'BUTTON' && !byClass.disabled) return byClass;
-    const byTag = Array.from(document.querySelectorAll('button'))
-      .find(el => !el.disabled
-        && /^easy apply$/i.test((el.textContent || '').trim())
-        && el.offsetParent !== null);
-    if (byTag) return byTag;
-    // Walk up from the "Easy Apply" span to the nearest clickable ancestor.
-    // NOTE: we can't detect anchor "hydration" via el.onclick — the content script runs
-    // in an isolated world where the page's JS-assigned onclick is invisible. Instead we
-    // return the anchor and let the caller click it AFTER the page has settled; in a
-    // logged-in session the SPA handler opens the modal in-place (verified). The caller
-    // guards against the cold-/apply/-navigation loop with a per-job sessionStorage flag.
-    const eaSpan = Array.from(document.querySelectorAll('span'))
-      .find(el => /^easy apply$/i.test((el.textContent || '').trim()) && el.offsetParent !== null);
-    if (eaSpan) {
-      let el = eaSpan.parentElement, anchor = null;
-      while (el && el !== document.body) {
-        if (el.tagName === 'BUTTON' && !el.disabled) return el;
-        if (el.tagName === 'A' && !anchor) anchor = el;
-        el = el.parentElement;
-      }
-      if (anchor) return anchor;
-    }
-    return null;
-  }
-  // Returns true if an Easy Apply control exists at all (anchor or button) — used to
-  // distinguish "still hydrating" from "no Easy Apply on this job".
-  function easyApplyPresentAnyForm() {
-    return Array.from(document.querySelectorAll('span, button, a'))
-      .some(el => /^easy apply$/i.test((el.textContent || '').trim()) && el.offsetParent !== null);
-  }
+  // If the modal is already rendered (for example after a LinkedIn SPA apply route), the open
+  // step below is skipped. Otherwise the detail-panel finder handles both anchor and button UIs.
   // Detect "already applied" up front (regardless of open mode).
   if (!pjaGetCurrentModal()) {
-    const presentBtn = findEasyApplyBtn();
+    const presentBtn = pjaFindEasyApplyBtn();
     if (!presentBtn) {
       const anyApplyEl = document.querySelector('.jobs-apply-button')
         || Array.from(document.querySelectorAll('button, a, span')).find(el => /^easy apply$/i.test((el.textContent||'').trim()));
@@ -1033,7 +1139,7 @@ async function pjaApplyOnCurrentPage(job, profile, answers, onStatus) {
   if (!initModal && PJA_EA_AUTO_OPEN) {
     let applyBtn = null;
     for (let attempt = 0; attempt < 30 && !applyBtn; attempt++) {
-      applyBtn = findEasyApplyBtn();
+      applyBtn = pjaFindEasyApplyBtn();
       if (!applyBtn) await pjaAutoWait(600);
     }
     if (applyBtn) await pjaTrustedClickEl(applyBtn);
@@ -1058,7 +1164,7 @@ async function pjaApplyOnCurrentPage(job, profile, answers, onStatus) {
       if (PJA_EA_AUTO_OPEN) {
         initModal = pjaGetCurrentModal();
         if (initModal) break;
-        const btn = findEasyApplyBtn();
+        const btn = pjaFindEasyApplyBtn();
         btnSeen = !!btn;
         if (btn) { try { await pjaTrustedClickEl(btn); } catch (_) {} }
       }
@@ -1111,6 +1217,7 @@ async function pjaApplyOnCurrentPage(job, profile, answers, onStatus) {
       sameHeadingCount++;
       if (sameHeadingCount >= 2) {
         const emptyFields = pjaEmptyRequiredFields();
+        await pjaRecordEasyApplyStepDiagnostics('same-heading-stuck', heading, { sameHeadingCount });
         pjaDismissModal();
         return { success: false, reason: 'stuck', heading, fields: emptyFields };
       }
@@ -1345,3 +1452,4 @@ window.__pjaAutoCheckConsent           = pjaAutoCheckConsent;
 window.__pjaSelfIdPick                 = pjaSelfIdPick;
 window.__pjaEmptyRequiredFields        = pjaEmptyRequiredFields;
 window.__pjaEasyApplyState             = pjaEasyApplyState;
+window.__pjaFindEasyApplyBtn           = pjaFindEasyApplyBtn;

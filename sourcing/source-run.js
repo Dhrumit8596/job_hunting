@@ -11,12 +11,81 @@ const { filterJobs } = require('./filter');
 const { prescore } = require('./prescore');
 const { createStore, upsert, excludeApplied, gateReport, descriptionFingerprint } = require('./jobstore');
 const { normalizeBrowserJobs } = require('./browser-import');
+const { detectAts } = require('./detect-ats');
+
+const AUTONOMOUS_UNSUPPORTED_ATS = new Set(['eightfold', 'successfactors', 'jobicy', 'remotive']);
+const AUTONOMOUS_SUPPORTED_STRATEGIES = new Set([
+  'linkedin_ea', 'indeed', 'greenhouse', 'lever', 'ashby', 'workday', 'smartrecruiters',
+  'workable', 'breezy', 'bamboohr', 'paylocity', 'rippling', 'jobvite', 'generic',
+]);
 
 const DEFAULT_QUERIES = [
   'quality engineer', 'process engineer', 'manufacturing engineer',
   'metrology', 'wafer', 'test engineer', 'reliability engineer',
   'equipment engineer', 'process development', 'failure analysis',
+  'manufacturing quality engineer', 'supplier quality engineer',
+  'semiconductor process engineer', 'semiconductor quality engineer',
+  'medical device quality engineer', 'validation engineer',
+  'process integration engineer', 'wafer process engineer',
+  'thin film process engineer', 'yield engineer',
 ];
+
+function hydrationSummaryByChannel(jobs) {
+  const byChannel = {};
+  const overallStatuses = {};
+  for (const job of jobs || []) {
+    const channel = job.channel || 'external';
+    const bucket = byChannel[channel] || {
+      found: 0,
+      hydrated: 0,
+      missing: 0,
+      deferredFast: 0,
+      timeout: 0,
+      blockedAuth: 0,
+      unknown: 0,
+      statuses: {},
+      reasons: {},
+    };
+    bucket.found++;
+    const status = String(job.hydrationStatus || (job.description ? 'hydration_success' : 'hydration_missing_dom'));
+    bucket.statuses[status] = (bucket.statuses[status] || 0) + 1;
+    overallStatuses[status] = (overallStatuses[status] || 0) + 1;
+    const reason = String(job.hydrationReason || '').trim();
+    if (reason) bucket.reasons[reason] = (bucket.reasons[reason] || 0) + 1;
+    if (job.description && /^(full|partial)$/i.test(String(job.descriptionStatus || ''))) bucket.hydrated++;
+    else if (status === 'hydration_deferred_fast_scan') bucket.deferredFast++;
+    else if (status === 'hydration_timeout') bucket.timeout++;
+    else if (status === 'hydration_blocked_auth') bucket.blockedAuth++;
+    else if (/missing/.test(status) || /^(missing|stale)$/i.test(String(job.descriptionStatus || ''))) bucket.missing++;
+    else bucket.unknown++;
+    byChannel[channel] = bucket;
+  }
+  return { byChannel, overallStatuses };
+}
+
+function isAggregatorHost(url) {
+  try { return /(^|\.)(linkedin|indeed|glassdoor)\.com$/i.test(new URL(String(url || '')).hostname); }
+  catch (_) { return false; }
+}
+
+function autonomousApplyStrategy(job) {
+  const channel = String(job && job.channel || '').toLowerCase();
+  if (channel === 'linkedin_easy_apply' || job && job.isEasyApply === true) return 'linkedin_ea';
+  if (channel === 'indeed_apply' || job && job.indeedApply === true) return 'indeed';
+  const strategy = String(detectAts(job && job.applyUrl) || job && job.detectedAts || job && job.ats || '').toLowerCase();
+  if (isAggregatorHost(job && job.applyUrl) && !detectAts(job && job.applyUrl)) return '';
+  return strategy || 'generic';
+}
+
+function autonomousApplyFilter(jobs, enabled) {
+  if (!enabled) return jobs;
+  return (jobs || []).filter(job => {
+    const ats = String(job && job.ats || '').toLowerCase();
+    const strategy = autonomousApplyStrategy(job);
+    if (!strategy || AUTONOMOUS_UNSUPPORTED_ATS.has(ats) || AUTONOMOUS_UNSUPPORTED_ATS.has(strategy)) return false;
+    return AUTONOMOUS_SUPPORTED_STRATEGIES.has(strategy);
+  });
+}
 
 async function sourceAll(opts = {}) {
   const sources = opts.sources || require('./sources.json').sources;
@@ -32,7 +101,7 @@ async function sourceAll(opts = {}) {
   const filterOpts = { nationwideUS: opts.nationwideUS === true,
     targetLocation: opts.targetLocation, targetRadiusMiles: opts.targetRadiusMiles,
     locationStrictness: opts.locationStrictness, remotePolicy: opts.remotePolicy };
-  const aEligible = filterJobs(a.jobs, filterOpts);
+  const aEligible = autonomousApplyFilter(filterJobs(a.jobs, filterOpts), opts.autonomousApplyOnly === true);
   const aRes = upsert(store, aEligible, 'api-registry', stateFor);
   report.modalityA = { fetched: a.jobs.length, eligible: aEligible.length, added: aRes.added,
     dupById: aRes.dupById, dupByRole: aRes.dupByRole, enriched: aRes.enriched,
@@ -48,7 +117,7 @@ async function sourceAll(opts = {}) {
     const jobs = await discoveryAdapters[name].fetchJobs(null, { queries, timeoutMs: 15000,
       locationQuery, targetRadiusMiles: opts.targetRadiusMiles });
     bFetched += jobs.length;
-    const elig = filterJobs(jobs, filterOpts);
+    const elig = autonomousApplyFilter(filterJobs(jobs, filterOpts), opts.autonomousApplyOnly === true);
     bEligible += elig.length;
     const r = upsert(store, elig, 'discovery-' + name, stateFor);
     bAdded += r.added; bEnriched += r.enriched;
@@ -67,7 +136,8 @@ async function sourceAll(opts = {}) {
     return Number.isFinite(seen) && browserNow - seen <= browserMaxAge;
   })
     .filter(j => j.id && j.title && j.company && j.applyUrl);
-  const cEligible = filterJobs(captured, filterOpts);
+  const cEligible = autonomousApplyFilter(filterJobs(captured, filterOpts), opts.autonomousApplyOnly === true);
+  const hydrationSummary = hydrationSummaryByChannel(cEligible);
   const groups = {};
   for (const job of cEligible) (groups[job.modality] = groups[job.modality] || []).push(job);
   const cRes = { added: 0, dupById: 0, dupByRole: 0, enriched: 0 };
@@ -79,6 +149,8 @@ async function sourceAll(opts = {}) {
     eligible: cEligible.length,
     withDescription: cEligible.filter(j => j.description).length,
     needsDescription: cEligible.filter(j => !j.description || j.descriptionStatus === 'missing' || j.descriptionStatus === 'stale').length,
+    channelHydration: hydrationSummary.byChannel,
+    hydrationStatuses: hydrationSummary.overallStatuses,
     added: cRes.added, enriched: cRes.enriched, dupById: cRes.dupById, dupByRole: cRes.dupByRole };
 
   // --- exclude already-applied, then gate ---

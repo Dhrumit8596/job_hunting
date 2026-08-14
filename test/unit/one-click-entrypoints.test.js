@@ -117,6 +117,11 @@ module.exports = (t) => {
     dev.includes('diagnosticMatchesReportRow') &&
     dev.includes('## Failure/drop groups') &&
     dev.includes('## Highest reward fix clusters') &&
+    dev.includes('## Fix opportunity candidates from this run') &&
+    dev.includes('fix-opportunities.json') &&
+    dev.includes('updateFixOpportunities') &&
+    dev.includes('sourceHydration') &&
+    dev.includes('channelHydration') &&
     dev.includes('## Per-job failure diagnostics') &&
     dev.includes('buildRetestManifest') &&
     dev.includes('retestFile') &&

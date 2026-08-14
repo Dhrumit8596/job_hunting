@@ -3,7 +3,8 @@
 const path = require('path');
 require(path.resolve(__dirname, '../../sourcing/detect-ats'));
 const { buildApplySet, buildApplyPlan, resultToState, poolStatus, roleKey, greenhouseEmbedFallback, exceededBudget,
-  watchdogDecision, queueJobKey, unsupportedAutonomousApplyReason, applyCapabilityStatus } = require(path.resolve(__dirname, '../../sourcing/apply-select'));
+  watchdogDecision, queueJobKey, unsupportedAutonomousApplyReason, applyCapabilityStatus,
+  hasUsableDescription, applyUrlKey, linkedinJobId } = require(path.resolve(__dirname, '../../sourcing/apply-select'));
 
 function corpus(entries) {
   const index = {}, state = {};
@@ -17,6 +18,16 @@ function corpus(entries) {
 }
 
 module.exports = (t) => {
+  t.eq(linkedinJobId('https://www.linkedin.com/jobs/search-results/?currentJobId=4429434522&keywords=jobs&f_AL=true'),
+    '4429434522', 'LinkedIn identity: current search-result selection exposes the posting id');
+  t.eq(linkedinJobId('https://www.linkedin.com/jobs/view/integrated-circuit-packaging-architect-4429434522/'),
+    '4429434522', 'LinkedIn identity: slugged canonical view URL exposes the posting id');
+  t.eq(linkedinJobId('linkedin:4429434522'), '4429434522', 'LinkedIn identity: corpus id is supported');
+  t.eq(linkedinJobId('https://example.com/jobs/view/4429434522/'), '', 'LinkedIn identity: foreign hosts are rejected');
+  t.eq(applyUrlKey('https://www.linkedin.com/jobs/search-results/?currentJobId=4429434522&keywords=jobs&f_AL=true'),
+    applyUrlKey('https://www.linkedin.com/jobs/view/4429434522/'),
+    'LinkedIn identity: search-result and canonical view URLs de-duplicate to one key');
+
   const c = corpus([
     { id: 'greenhouse:1', company: 'Carbon', title: 'Process Engineer', applyUrl: 'https://boards.greenhouse.io/carbon/jobs/1', fit: 82 },
     { id: 'greenhouse:2', company: 'Beta', title: 'Quality Engineer', applyUrl: 'https://boards.greenhouse.io/beta/jobs/2', fit: 71 },
@@ -133,6 +144,35 @@ module.exports = (t) => {
   const evidenceSet = buildApplySet(evidenceCorpus, { threshold: 75, requireEvidence: true });
   t.eq(evidenceSet.map(j => j.id), ['e:1'], 'evidence gate requires 3 matches and rejects hard conflicts');
   t.eq(evidenceSet[0].matchEvidence.length, 3, 'selection carries audit evidence into queue');
+  t.eq(hasUsableDescription(evidenceCorpus.index['e:1']), true, 'full posting JD is usable evidence');
+
+  // A compact planning corpus carries JD readiness/fingerprint but never description text. Its
+  // selected IDs and planning-drop diagnostics must be identical to the full corpus representation.
+  evidenceCorpus.index['e:1'].descriptionFingerprint = 'fp-strong';
+  evidenceCorpus.index['e:2'].descriptionFingerprint = 'fp-conflict';
+  const projectedEvidenceCorpus = {
+    index: Object.fromEntries(Object.entries(evidenceCorpus.index).map(([id, p]) => [id, {
+      ...p, description: undefined, descriptionReady: true,
+    }])),
+    state: evidenceCorpus.state,
+  };
+  const fullEvidencePlan = buildApplyPlan(evidenceCorpus, { threshold: 75, requireEvidence: true });
+  const projectedEvidencePlan = buildApplyPlan(projectedEvidenceCorpus, { threshold: 75, requireEvidence: true });
+  t.eq(projectedEvidencePlan.jobs.map(j => j.id), fullEvidencePlan.jobs.map(j => j.id),
+    'compact planning corpus preserves evidence-gated selected IDs');
+  t.eq(projectedEvidencePlan.dropCounts, fullEvidencePlan.dropCounts,
+    'compact planning corpus preserves every planning-drop count');
+  t.eq(projectedEvidencePlan.jobs[0].description, '', 'compact selected job does not materialize JD text');
+  t.eq(projectedEvidencePlan.jobs[0].descriptionReady, true, 'compact selected job carries JD readiness');
+  t.eq(projectedEvidencePlan.jobs[0].postingDescriptionFingerprint, 'fp-strong',
+    'compact selected job carries posting JD fingerprint separately from score fingerprint');
+  projectedEvidenceCorpus.index['e:1'].descriptionReady = false;
+  const unavailablePlan = buildApplyPlan(projectedEvidenceCorpus, { threshold: 75, requireEvidence: true });
+  t.eq(unavailablePlan.dropCounts.missing_description_evidence, 1,
+    'compact readiness=false produces the existing missing-description diagnostic');
+  t.eq(hasUsableDescription(projectedEvidenceCorpus.index['e:1']), false,
+    'compact readiness=false is not usable evidence');
+
   evidenceCorpus.state['e:1'].gaps = ['Python', 'CAD', 'optical metrology'];
   t.eq(buildApplySet(evidenceCorpus, { threshold: 75, requireEvidence: true }).length, 0, 'evidence gate rejects more than two material gaps');
   evidenceCorpus.state['e:1'].gaps = [];

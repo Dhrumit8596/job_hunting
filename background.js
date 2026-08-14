@@ -13,6 +13,26 @@ try {
 const DEV_MODE = true;
 const DEV_SERVER = 'http://localhost:6174';
 
+function pjaSanitizeProfileForRuntimeQueue(profile) {
+  const src = profile && typeof profile === 'object' ? profile : {};
+  const out = {};
+  for (const [k, v] of Object.entries(src)) {
+    if (/^(resumeDataUrl|resumeText|resume|pja_resume_b64)$/i.test(k)) continue;
+    if (typeof v === 'string' && /^data:.*;base64,/i.test(v.slice(0, 80))) continue;
+    out[k] = v;
+  }
+  return out;
+}
+
+function pjaRuntimeProfileForQueue(profile, prefs) {
+  const out = pjaSanitizeProfileForRuntimeQueue(profile);
+  const p = prefs && typeof prefs === 'object' ? prefs : {};
+  if (!out.startDate && p.startDate) out.startDate = p.startDate;
+  if (!out.availability && p.availability) out.availability = p.availability;
+  if (!out.noticePeriod && p.noticePeriod) out.noticePeriod = p.noticePeriod;
+  return out;
+}
+
 // Expose DEV_MODE to content scripts via storage so they can show the right loading message
 chrome.storage.local.set({ pja_dev_mode: DEV_MODE });
 
@@ -40,9 +60,11 @@ async function pjaIngestCorpus(index, state, opts = {}) {
   if (!self.PJAIdb) return 0;
   const imported = await self.PJAIdb.importNormalized({ index: index || {}, state: state || {} },
     { replaceMissing: opts.replaceMissing === true });
-  const s = await self.PJAIdb.corpusSummary({ topN: 0 });
-  await new Promise(r => chrome.storage.local.set({ pja_job_corpus_count: s.count, pja_schema_version: 1 }, r));
-  return Object.assign({ count: s.count }, imported);
+  // Counting is a native IDB operation. A full corpusSummary here used to perform two more cursor
+  // scans after every import, making source→apply contend with its own 20MB diagnostic pass.
+  const count = await self.PJAIdb.count();
+  await new Promise(r => chrome.storage.local.set({ pja_job_corpus_count: count, pja_schema_version: 1 }, r));
+  return Object.assign({ count }, imported);
 }
 
 // Build the apply-set from the IndexedDB corpus (shared by the GET_APPLY_SET message + the WS
@@ -53,8 +75,12 @@ async function pjaBuildApplySet(opts) {
     p,
     new Promise((_, reject) => setTimeout(() => reject(new Error(label + ' timed out')), ms))
   ]);
-  const corpus = await bounded(self.PJAIdb.getAll(), 15000, 'PJAIdb.getAll');
-  const st = await bounded(new Promise(r => chrome.storage.local.get(['pja_applied_log', 'pja_jobs', 'pja_application_ledger'], d => r(d))), 5000, 'chrome.storage applied records');
+  // Planning must not materialize or serialize the description-rich corpus. The compact reader
+  // retains route/evidence metadata only; descriptions are fetched later in capped score batches.
+  const [corpus, st] = await Promise.all([
+    bounded(self.PJAIdb.getApplyPlanningCorpus(), 45000, 'PJAIdb.getApplyPlanningCorpus'),
+    bounded(new Promise(r => chrome.storage.local.get(['pja_applied_log', 'pja_jobs', 'pja_application_ledger'], d => r(d))), 5000, 'chrome.storage applied records'),
+  ]);
   const recs = [...(st.pja_applied_log || []).filter(x => !x || !x.status || /^(applied|submitted|submitting|success|confirmed)$/i.test(String(x.status))),
     ...(st.pja_jobs || []).filter(x => x && /^(applied|submitted|success|confirmed)$/i.test(String(x.status || x.result || '')))];
   const manualBlockerRe = /captcha|daily_limit|checkpoint|email_verification_required|workday_duplicate_record|workday_account_locked|workday_account_exists_wrong_password|workday_captcha|google_sso_only|ready_to_submit_review|chatbot_apply_manual|unsupported_|no_apply_path/i;
@@ -211,10 +237,11 @@ function pjaSafeSetStorageFromExternal(data, source) {
 
 function pjaLaunchEasyApplySingle(job, master) {
   return new Promise((resolve, reject) => {
-    chrome.storage.local.get(['pja_profile', 'pja_answers'], d => {
-      const queue = { status: 'applying', jobs: [job], currentIndex: 0,
-        results: { applied: [], skipped: [], errors: [] }, profile: d.pja_profile || {},
-        answers: d.pja_answers || {}, runId: master.runId, startedAt: Date.now() };
+    chrome.storage.local.get(['pja_profile', 'pja_answers', 'pja_prefs'], d => {
+      const queuedJob = Object.assign({}, job, { prefs: d.pja_prefs || {} });
+      const queue = { status: 'applying', jobs: [queuedJob], currentIndex: 0,
+        results: { applied: [], skipped: [], errors: [] }, profile: pjaRuntimeProfileForQueue(d.pja_profile, d.pja_prefs),
+        answers: d.pja_answers || {}, prefs: d.pja_prefs || {}, runId: master.runId, startedAt: Date.now() };
       const firstUrl = 'https://www.linkedin.com/jobs/search/?f_AL=true&currentJobId=' + encodeURIComponent(job.jobId || job.sourceJobId || '');
       chrome.tabs.create({ url: firstUrl, active: true }, tab => {
         if (chrome.runtime.lastError || !tab) return reject(new Error(chrome.runtime.lastError?.message || 'easy-apply tab create failed'));
@@ -233,9 +260,11 @@ function pjaLaunchEasyApplySingle(job, master) {
 }
 
 async function pjaLaunchIndeedSingle(job, master) {
-  const d = await new Promise(r => chrome.storage.local.get(['pja_profile', 'pja_answers'], r));
-  const queue = { status: 'applying', jobs: [job], currentIndex: 0,
-    results: { applied: [], skipped: [] }, profile: d.pja_profile || {}, answers: d.pja_answers || {},
+  const d = await new Promise(r => chrome.storage.local.get(['pja_profile', 'pja_answers', 'pja_prefs'], r));
+  const queuedJob = Object.assign({}, job, { prefs: d.pja_prefs || {} });
+  const queue = { status: 'applying', jobs: [queuedJob], currentIndex: 0,
+    results: { applied: [], skipped: [] }, profile: pjaRuntimeProfileForQueue(d.pja_profile, d.pja_prefs), answers: d.pja_answers || {},
+    prefs: d.pja_prefs || {},
     runId: master.runId, startedAt: Date.now() };
   await pjaSetLocal({ pja_indeed_queue: queue, pja_indeed_paused: null });
   return new Promise((resolve, reject) => chrome.tabs.create({
@@ -305,9 +334,11 @@ const PJA_RANKED_LAUNCHERS = {
 };
 
 async function pjaDispatchRankedJob(job, master) {
+  const plannedStrategy = job && (job.strategy || (job.channel === 'linkedin_easy_apply' ? 'linkedin_ea'
+    : job.channel === 'indeed_apply' ? 'indeed' : job.ats));
   const route = self.PJAApplyRouter && typeof self.PJAApplyRouter.resolveStrategy === 'function'
     ? self.PJAApplyRouter.resolveStrategy(job, job.applyUrl)
-    : { name: job.channel === 'linkedin_easy_apply' ? 'linkedin_ea' : job.channel === 'indeed_apply' ? 'indeed' : 'generic' };
+    : { name: plannedStrategy || 'generic', engine: 'external' };
   if (route.applyStrategyStatus === 'unsupported' || route.engine === 'unsupported') {
     throw new Error(route.unsupportedReason || ('unsupported_apply_strategy:' + route.name));
   }
@@ -490,6 +521,9 @@ async function pjaCloseRankedTab(tabId) {
 async function pjaCloseDuplicateRankedTabs(job, keepTabId) {
   if (!job || !job.applyUrl || keepTabId == null) return 0;
   const wanted = self.PJAApplySelect?.applyUrlKey(job.applyUrl) || String(job.applyUrl || '');
+  const wantedLinkedInId = self.PJAApplySelect?.linkedinJobId(job.applyUrl)
+    || self.PJAApplySelect?.linkedinJobId(job.jobId)
+    || self.PJAApplySelect?.linkedinJobId(job.sourceJobId);
   if (!wanted) return 0;
   let closed = 0;
   try {
@@ -497,7 +531,9 @@ async function pjaCloseDuplicateRankedTabs(job, keepTabId) {
     for (const tab of tabs) {
       if (tab.id === keepTabId) continue;
       const tabUrl = self.PJAApplySelect?.applyUrlKey(tab.url || '') || String(tab.url || '');
-      if (tabUrl && (tabUrl === wanted || tabUrl.startsWith(wanted) || wanted.startsWith(tabUrl))) {
+      const tabLinkedInId = self.PJAApplySelect?.linkedinJobId(tab.url || '');
+      const sameLinkedInJob = !!(wantedLinkedInId && tabLinkedInId && wantedLinkedInId === tabLinkedInId);
+      if (sameLinkedInJob || (tabUrl && (tabUrl === wanted || tabUrl.startsWith(wanted) || wanted.startsWith(tabUrl)))) {
         try { await chrome.tabs.remove(tab.id); closed++; } catch (_) {}
       }
     }
@@ -551,6 +587,11 @@ function pjaRankedTabMatchesJob(tab, job) {
     const tabUrl = new URL(tab.url);
     const applyUrl = new URL(job.applyUrl);
     if (tabUrl.hostname !== applyUrl.hostname) return false;
+    const tabLinkedInId = self.PJAApplySelect?.linkedinJobId(tab.url || '');
+    const jobLinkedInId = self.PJAApplySelect?.linkedinJobId(job.applyUrl || '')
+      || self.PJAApplySelect?.linkedinJobId(job.jobId)
+      || self.PJAApplySelect?.linkedinJobId(job.sourceJobId);
+    if (tabLinkedInId && jobLinkedInId) return tabLinkedInId === jobLinkedInId;
     // Workday rewrites `/job/...` to `/apply/.../applyManually` during the same application.
     // Same-host Workday tabs are valid; unrelated same-id tabs on other hosts are stale.
     if (/workday\.com|myworkdayjobs\.com/i.test(tabUrl.hostname)) return true;
@@ -1245,6 +1286,17 @@ if (DEV_MODE) {
                 try { data = await pjaBuildApplySet(msg); } catch (e) { data = { jobs: [], error: e.message }; }
                 _wsReloadSocket.send(JSON.stringify({ cmd: 'applySetReply', reqId: msg.reqId, data }));
               })();
+            } else if (msg.cmd === 'getApplyDescriptions') {
+              // Hydrate only one scoring batch. Keeping the cap in the service worker makes the
+              // memory/WS boundary enforceable even if a caller accidentally sends a huge list.
+              (async () => {
+                let data = { jobs: [] };
+                try {
+                  const ids = (Array.isArray(msg.ids) ? msg.ids : []).slice(0, 10);
+                  if (self.PJAIdb) data = { jobs: await self.PJAIdb.getApplyDescriptions(ids) };
+                } catch (e) { data = { jobs: [], error: e.message }; }
+                _wsReloadSocket.send(JSON.stringify({ cmd: 'applyDescriptionsReply', reqId: msg.reqId, data }));
+              })();
             } else if (msg.cmd === 'updateScores') {
               // Write LLM fit scores back into the corpus (from /apply-run rescore pass).
               (async () => {
@@ -1303,6 +1355,37 @@ if (DEV_MODE) {
                 } catch (e) { data = { ok: false, error: e.message }; }
                 try { _wsReloadSocket.send(JSON.stringify({ cmd: 'resumeRankedApplyReply', reqId: msg.reqId, data })); } catch (_) {}
               })();
+            } else if (msg.cmd === 'failCurrentRankedApply') {
+              (async () => {
+                let data;
+                try {
+                  const current = await new Promise(r => chrome.storage.local.get('pja_ranked_apply', r));
+                  let master = current.pja_ranked_apply || null;
+                  if (!master || master.status !== 'applying' || !Array.isArray(master.jobs)) {
+                    data = { ok: false, error: 'no active ranked apply run' };
+                  } else {
+                    const job = master.jobs[master.currentIndex];
+                    if (!job) {
+                      master = await pjaDispatchRankedCurrent(master);
+                      data = { ok: true, runId: master.runId, status: master.status, currentIndex: master.currentIndex };
+                    } else {
+                      const reason = String(msg.reason || 'operator_failed_current_job').slice(0, 100);
+                      await pjaCloseRankedTab(master.inFlightTabId);
+                      await pjaRestoreRankedFailureState(job, reason, master);
+                      const ledger = await pjaAppendApplicationEvent({ runId: master.runId,
+                        jobId: job.jobId || job.id, applyUrl: job.applyUrl, company: job.company, title: job.title,
+                        channel: job.channel || job.ats || 'external', status: 'failed', success: false, reason,
+                        applicationAt: job.applicationAt || master.inFlightAt || Date.now(), occurredAt: Date.now() });
+                      master = await pjaReconcileRankedLedger(master, ledger);
+                      master = await pjaDispatchRankedCurrent(master);
+                      data = { ok: true, runId: master.runId, status: master.status,
+                        currentIndex: master.currentIndex, confirmed: master.confirmedCount || 0,
+                        failed: master.results && master.results.failed && master.results.failed.length || 0 };
+                    }
+                  }
+                } catch (e) { data = { ok: false, error: e.message }; }
+                try { _wsReloadSocket.send(JSON.stringify({ cmd: 'failCurrentRankedApplyReply', reqId: msg.reqId, data })); } catch (_) {}
+              })();
             } else if (msg.cmd === 'startRankedApply') {
               // Installation is acknowledged and the service worker is the final atomic owner of
               // the active-run lock. The HTTP caller must not report "queued" until this succeeds.
@@ -1315,10 +1398,16 @@ if (DEV_MODE) {
                   if (!msg.force && active && active.status === 'applying' && active.runId !== msg.master.runId) {
                     data = { ok: false, conflict: true, runId: active.runId };
                   } else {
+                    // Acknowledge the durable run install before network/tab launch work. LinkedIn
+                    // reachability and trusted-tab setup can exceed the HTTP caller's round-trip
+                    // budget; the dispatcher owns that asynchronous continuation after persistence.
                     await pjaSetLocal({ pja_ranked_apply: msg.master });
-                    const started = await pjaDispatchRankedCurrent(msg.master);
-                    data = { ok: true, runId: started.runId, status: started.status,
-                      currentIndex: started.currentIndex, tabId: started.inFlightTabId };
+                    data = { ok: true, runId: msg.master.runId, status: msg.master.status,
+                      currentIndex: msg.master.currentIndex, tabId: null };
+                    setTimeout(() => {
+                      pjaDispatchRankedCurrent(msg.master).catch(e =>
+                        console.error('PJA: async ranked launch failed', e));
+                    }, 0);
                   }
                 } catch (e) { data = { ok: false, error: e.message }; }
                 try { _wsReloadSocket.send(JSON.stringify({ cmd: 'startRankedApplyReply', reqId: msg.reqId, data })); } catch (_) {}
@@ -1752,6 +1841,11 @@ function injectContentScriptsIntoExistingTabs() {
     'content/extractors/indeed.js',
     'content/extractors/glassdoor.js',
     'content/extractors/generic.js',
+    'sourcing/detect-ats.js',
+    'sourcing/apply-select.js',
+    'content/apply-router.js',
+    'content/apply-preflight.js',
+    'content/apply-account.js',
     'content/autofill.js',
     'content/workday-engine.js',
     'content/workday-auth.js',
@@ -3984,13 +4078,20 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
       );
 
       // Helper: persist AI-generated answers into pja_answers bank
-      function persistAnswers(answers) {
+      function persistAnswers(answers, questions) {
         if (!Array.isArray(answers) || answers.length === 0) return;
         chrome.storage.local.get('pja_answers', r => {
           const bank = r.pja_answers || {};
           const now = Date.now();
-          for (const { label, answer } of answers) {
+          const byLabel = new Map((Array.isArray(questions) ? questions : []).map(q => [
+            String(q.label || '').toLowerCase().replace(/\s+/g, ' ').trim(), q
+          ]));
+          for (const { label, answer, confidence } of answers) {
             if (!label || !answer) continue;
+            const q = byLabel.get(String(label || '').toLowerCase().replace(/\s+/g, ' ').trim()) || {};
+            if (String(confidence || '').toLowerCase() !== 'high') continue;
+            if (q.sensitive && !q.canonicalKey) continue;
+            if (Array.isArray(q.options) && q.options.length && !q.options.some(o => String(o).trim() === String(answer).trim())) continue;
             const norm = label
               .toLowerCase()
               .replace(/[?!.,;:'"()\[\]]/g, '')
@@ -3998,7 +4099,9 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
               .trim()
               .slice(0, 100);
             if (!bank[norm]) {
-              bank[norm] = { rawLabel: label, answer, savedAt: now, usedCount: 0, source: 'ai' };
+              bank[norm] = { rawLabel: label, answer, savedAt: now, usedCount: 0, source: 'ai',
+                confidence: confidence || 'high', canonicalKey: q.canonicalKey || null,
+                sensitive: !!q.sensitive, autoSaved: true };
             }
           }
           chrome.storage.local.set({ pja_answers: bank });
@@ -4023,7 +4126,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
             if (!resp.ok) throw new Error(`Dev server ${resp.status}`);
             const result = await resp.json();
             if (!result.success) throw new Error(result.error || 'answer-questions failed');
-            persistAnswers(result.answers);
+            persistAnswers(result.answers, msg.payload && msg.payload.questions);
             sendResponse({ success: true, answers: result.answers });
             return;
           } catch (devErr) {
@@ -4085,6 +4188,8 @@ ANSWERING RULES:
 
         const questionList = questions.map((q, i) => {
           const parts = [`Q${i + 1}: "${q.label}"`];
+          if (q.canonicalKey) parts.push(`  Canonical key: ${q.canonicalKey}`);
+          if (q.sensitive) parts.push('  Sensitive field: yes — use only supplied profile facts or configured fallback');
           if ((q.type === 'select' || q.type === 'radio') && q.options?.length) {
             parts.push(`  Type: ${q.type === 'radio' ? 'radio choice' : 'dropdown'}; options: ${q.options.slice(0, 12).join(' | ')}`);
             parts.push(`  IMPORTANT: your answer must be copied exactly from one of the options above`);
@@ -4100,7 +4205,7 @@ ANSWERING RULES:
 `Job: ${jobTitle} at ${jobCompany}
 
 Answer each question below for the application. Return a JSON array with one object per question:
-[{"label":"<exact question label>","answer":"<your answer>"},...]
+[{"label":"<exact question label>","answer":"<your answer>","confidence":"high|low"},...]
 
 Questions:
 ${questionList}`;
@@ -4133,7 +4238,7 @@ ${questionList}`;
         if (start === -1 || end === -1) throw new Error('No JSON array in API response');
         const answers = JSON.parse(raw.slice(start, end + 1));
 
-        persistAnswers(answers);
+        persistAnswers(answers, questions);
         sendResponse({ success: true, answers });
       } catch (e) {
         console.warn('PJA: ANSWER_QUESTIONS API fallback failed:', e.message);

@@ -4,14 +4,19 @@ const { spawn } = require('child_process');
 
 const SUPPORTED_ENGINES = new Set(['claude', 'codex']);
 
+function normalizeEnginePreference(value) {
+  const engine = String(value || '').trim().toLowerCase();
+  return SUPPORTED_ENGINES.has(engine) ? engine : '';
+}
+
 function parseEngine(argv = process.argv.slice(2), env = process.env) {
   let requested = env.PJA_AI_ENGINE || 'claude';
   for (let i = 0; i < argv.length; i++) {
     if (argv[i] === '--engine' && argv[i + 1]) requested = argv[++i];
     else if (argv[i].startsWith('--engine=')) requested = argv[i].slice('--engine='.length);
   }
-  const engine = String(requested).trim().toLowerCase();
-  if (!SUPPORTED_ENGINES.has(engine)) {
+  const engine = normalizeEnginePreference(requested);
+  if (!engine) {
     throw new Error(`Unsupported AI engine "${requested}" (expected claude or codex)`);
   }
   return engine;
@@ -92,4 +97,4 @@ function runAiCli({ engine, systemPrompt, userPrompt, timeoutMs = 90000, env = p
   });
 }
 
-module.exports = { SUPPORTED_ENGINES, parseEngine, commandFor, parseCodexJsonl, parseOutput, runAiCli };
+module.exports = { SUPPORTED_ENGINES, normalizeEnginePreference, parseEngine, commandFor, parseCodexJsonl, parseOutput, runAiCli };

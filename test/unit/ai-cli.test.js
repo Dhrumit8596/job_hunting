@@ -1,12 +1,14 @@
 'use strict';
 
 module.exports = t => {
-  const { parseEngine, commandFor, parseCodexJsonl, parseOutput } = require('../../ai-cli');
+  const { normalizeEnginePreference, parseEngine, commandFor, parseCodexJsonl, parseOutput } = require('../../ai-cli');
 
   t.eq(parseEngine([], {}), 'claude', 'AI CLI: Claude remains the default');
   t.eq(parseEngine([], { PJA_AI_ENGINE: 'codex' }), 'codex', 'AI CLI: environment selects Codex');
   t.eq(parseEngine(['--engine', 'codex'], { PJA_AI_ENGINE: 'claude' }), 'codex', 'AI CLI: flag overrides environment');
   t.eq(parseEngine(['--engine=CLAUDE'], {}), 'claude', 'AI CLI: equals flag is case-insensitive');
+  t.eq(normalizeEnginePreference(' Codex '), 'codex', 'AI CLI: profile/storage engine preference is normalized');
+  t.eq(normalizeEnginePreference('bad'), '', 'AI CLI: invalid profile/storage engine preference is ignored');
   let rejected = false;
   try { parseEngine(['--engine=nope'], {}); } catch (_) { rejected = true; }
   t.ok(rejected, 'AI CLI: invalid engine is rejected');

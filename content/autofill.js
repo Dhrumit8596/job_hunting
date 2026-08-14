@@ -44,6 +44,7 @@ const PJA_FIELD_RULES = [
   { key: 'educationEndYear',   patterns: ['end date year','end year'] },
   { key: 'educationStartMonth',patterns: ['start date month','start month'] },
   { key: 'educationStartYear', patterns: ['start date year','start year'] },
+  { key: 'startDate',          patterns: ['earliest start date','available start date','when can you start','when are you available to start','notice period','availability to start'] },
   { key: 'salaryExpectation',  patterns: ['salary','compensation','expected salary','desired salary','salary expectation','pay expectation','hourly pay','hourly rate','pay rate','expected pay','desired pay','expected compensation','w2 rate','bill rate'] },
   { key: 'workAuth',           patterns: ['authorized to work','work authorization','eligible to work','right to work','legally authorized','work in the us','work in us'] },
   { key: 'requireSponsorship', patterns: ['sponsorship','require sponsorship','visa sponsorship','need sponsorship','require visa sponsorship','require work authorization','immigration case','sponsor'] },
@@ -95,6 +96,9 @@ const PJA_DEFAULT_PROFILE = {
   educationEndMonth: '',
   educationStartYear: '',
   educationStartMonth: '',
+  startDate: '',
+  availability: '',
+  noticePeriod: '',
   salaryExpectation: '',
   workAuth: '',
   requireSponsorship: '',
@@ -699,6 +703,236 @@ function pjaFindBestAnswer(normalizedLabel, answers) {
     if (score > bestScore) { bestScore = score; best = entry.answer; }
   }
   return best;
+}
+
+// ── Canonical required-answer resolver ──────────────────────────────────────
+// User-specific data must live in pja_profile / pja_prefs / pja_answers. The
+// code below maps labels to generic canonical keys only, then reads the value
+// from storage-backed objects supplied by the caller.
+function pjaCanonicalForRequiredLabel(label) {
+  const L = String(label || '').toLowerCase().replace(/\s+/g, ' ').trim();
+  const rule = (canonicalKey, profileKeys, opts = {}) =>
+    ({ canonicalKey, profileKeys: Array.isArray(profileKeys) ? profileKeys : [profileKeys], ...opts });
+  if (/address line 1|street address|address 1\b/.test(L)) return rule('profile.address.line1', 'address');
+  if (/address line 2|\b(apt|apartment|suite|unit)\b|address 2\b/.test(L)) return rule('profile.address.line2', 'address2');
+  if (/\b(zip|postal) ?code\b/.test(L)) return rule('profile.address.zip', 'zip');
+  if (/\b(city|location city)\b/.test(L)) return rule('profile.address.city', ['city', 'currentLocation']);
+  if (/\b(state|province|administrative area)\b/.test(L)) return rule('profile.address.state', 'state');
+  if (/\bcountry(\/region)?\b/.test(L) && !/citizen|phone|code/.test(L)) return rule('profile.address.country', 'country');
+  if (/\bphone\b|mobile|telephone/.test(L)) return rule('profile.phone', 'phone');
+  if (/phone type|contact phone type/.test(L)) return rule('profile.phoneType', 'phoneType');
+  if (/linkedin/.test(L)) return rule('profile.linkedin', 'linkedin');
+  if (/(personal )?website|portfolio|\bblog\b/.test(L)) return rule('profile.website', 'website');
+  if (/highest (level of )?education|education (level|completed)|education you have/.test(L)) return rule('profile.education.highest', ['highestEducation', 'degree']);
+  if (/\bdegree\b/.test(L)) return rule('profile.education.degree', 'degree');
+  if (/school|university|college/.test(L)) return rule('profile.education.school', 'university');
+  if (/graduation month|expected.*month|actual.*month/.test(L)) return rule('profile.education.graduationMonth', ['graduationMonth', 'educationEndMonth']);
+  if (/graduation year|expected.*year|actual.*year/.test(L)) return rule('profile.education.graduationYear', ['graduationYear', 'educationEndYear']);
+  if (/\bgpa\b/.test(L)) return rule('profile.education.gpa', ['gpa', 'undergraduateGpa']);
+  if (/authorized|authorised|eligible to work|employment eligibility|right to work|legally (authorized|entitled|able)/.test(L)) return rule('workAuth.authorized', 'workAuth');
+  if (/sponsor|sponsorship|h-?1b|immigration support/.test(L)) return rule('workAuth.sponsorship', ['requireSponsorship', 'needsSponsorship']);
+  if (/visa (type|status)|immigration status/.test(L)) return rule('workAuth.visaStatus', 'visaStatus');
+  if (/u\.?s\.? person|protected individual|citizen|permanent resident|green card|export control|itar|ear/.test(L)) {
+    if (/country of citizenship|citizenship country|hold citizenship/.test(L)) return rule('workAuth.citizenship', ['countryOfCitizenship', 'citizenship'], { sensitive: true });
+    return rule('workAuth.usPerson', ['usPersonForExportControl', 'usCitizenOrPermanentResident', 'usCitizen'], { sensitive: true });
+  }
+  if (/gender|sex\b/.test(L)) return rule('eeo.gender', 'gender', { sensitive: true });
+  if (/race/.test(L)) return rule('eeo.race', ['race', 'eeoFallback'], { sensitive: true });
+  if (/ethnic|hispanic|latino/.test(L)) return rule('eeo.ethnicity', ['ethnicity', 'hispanicOrLatino', 'eeoFallback'], { sensitive: true });
+  if (/veteran/.test(L)) return rule('eeo.veteran', 'veteran', { sensitive: true });
+  if (/disab/.test(L)) return rule('eeo.disability', 'disability', { sensitive: true });
+  if (/bay area|commute|commutable|onsite|on-site|in.?office|in person|relocat|preferred.*location|office location/.test(L)) {
+    return rule('preferences.location', ['locationPreference', 'preferredLocation', 'willingOnsite', 'willingToRelocate']);
+  }
+  if (/salary|compensation|base pay|base salary/.test(L)) return rule('preferences.compensation', ['salaryExpectation', 'compensation']);
+  if (/start date|available to start|earliest.*available|notice period/.test(L)) return rule('preferences.startDate', ['startDate', 'availability', 'noticePeriod']);
+  if (/how did you (hear|learn|find)|referral source|source of.*application|referred by/.test(L)) return rule('preferences.referralSource', 'referralSource');
+  if (/privacy|gdpr|data processing|background check|reference check|drug (test|screen)|certify|acknowledge|i agree|terms|consent/.test(L)) {
+    return rule('policy.consent', ['consentPrivacy', 'consentBackgroundCheck', 'acknowledgePolicies']);
+  }
+  if (/sms|text message/.test(L)) return rule('policy.sms', 'consentSms');
+  if (/email notifications|job alerts?/.test(L)) return rule('policy.email', 'consentEmail');
+  if (/non-compete|restrictive agreement/.test(L)) return rule('compliance.restrictiveAgreement', 'restrictiveAgreement');
+  if (/current or former.*employee|previously.*employed|active employee/.test(L)) return rule('compliance.currentEmployee', 'currentEmployeeAtTarget');
+  if (/friends or relatives|family members|relatives|employee referral|inform you about this position/.test(L)) return rule('compliance.relationships', 'knowsEmployeesAtTargetCompany');
+  if (/federal government|military|political appointee|department of defense|department of health/.test(L)) return rule('compliance.federal', 'hasFederalWorkOrRelatives');
+  if (/years of experience|relevant years/.test(L)) return rule('experience.totalYears', 'yearsExperience');
+  if (/silicon|pcba/.test(L) && /experience|test/.test(L)) return rule('experience.siliconPcbaTestYears', 'siliconTestExperienceYears');
+  if (/pcie|cxl|ddr|ethernet|serdes|high-speed interface/.test(L)) return rule('experience.highSpeedInterfaceYears', 'highSpeedInterfaceExperienceYears');
+  if (/solidworks/.test(L)) return rule('experience.solidworks', 'solidworksExperience');
+  if (/\bcatia\b/.test(L)) return rule('experience.catia', 'catiaExperience');
+  if (/\bgxp\b|iq\/oq\/pq|gamp/.test(L)) return rule('experience.gxpValidation', 'gxpValidationExperience');
+  return null;
+}
+
+function pjaIsStartDateQuestion(label) {
+  const L = String(label || '').toLowerCase().replace(/\s+/g, ' ');
+  return /start date|available start date|earliest[\s\S]{0,40}(available|start)|when (?:can|could|will|would|are) you[\s\S]{0,35}(start|available)|notice period/.test(L);
+}
+
+function pjaWantsConcreteDate(label, field) {
+  const L = String(label || '').toLowerCase().replace(/\s+/g, ' ');
+  const el = field && field.el || null;
+  const attrText = [
+    el?.getAttribute?.('placeholder') || '',
+    el?.getAttribute?.('aria-label') || '',
+    el?.getAttribute?.('autocomplete') || '',
+    el?.id || '',
+    el?.name || '',
+  ].join(' ').toLowerCase();
+  return /start date|available start date|earliest start|date\??/.test(L) ||
+    el?.type === 'date' ||
+    /date|datepicker|calendar/.test(attrText);
+}
+
+function pjaFormatDateMMDDYYYY(d) {
+  const mm = String(d.getMonth() + 1).padStart(2, '0');
+  const dd = String(d.getDate()).padStart(2, '0');
+  return `${mm}/${dd}/${d.getFullYear()}`;
+}
+
+function pjaDateFromAvailabilityText(text) {
+  const raw = String(text || '').trim();
+  if (!raw) return null;
+  const now = new Date();
+  const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  const direct = raw.match(/\b(\d{4})-(\d{1,2})-(\d{1,2})\b/) || raw.match(/\b(\d{1,2})[/-](\d{1,2})[/-](\d{2,4})\b/);
+  if (direct) {
+    let y, m, d;
+    if (direct[1].length === 4) { y = Number(direct[1]); m = Number(direct[2]); d = Number(direct[3]); }
+    else { m = Number(direct[1]); d = Number(direct[2]); y = Number(direct[3]); if (y < 100) y += 2000; }
+    const parsed = new Date(y, m - 1, d);
+    if (!Number.isNaN(parsed.getTime()) && parsed >= today) return parsed;
+  }
+  const weeks = raw.match(/(\d+)\s*(?:\+?\s*)?weeks?/i);
+  if (weeks) {
+    const d = new Date(today);
+    d.setDate(d.getDate() + Number(weeks[1]) * 7);
+    return d;
+  }
+  const days = raw.match(/(\d+)\s*(?:business\s*)?days?/i);
+  if (days) {
+    const d = new Date(today);
+    d.setDate(d.getDate() + Number(days[1]));
+    return d;
+  }
+  if (/immediate|asap|right away|now/i.test(raw)) return today;
+  return null;
+}
+
+function pjaResolvedStartDateAnswer(label, field, profile, prefs) {
+  if (!pjaIsStartDateQuestion(label)) return null;
+  const raw = String(
+    profile?.startDate || prefs?.startDate ||
+    profile?.availability || prefs?.availability ||
+    profile?.noticePeriod || prefs?.noticePeriod || ''
+  ).trim();
+  if (!raw) return null;
+  if (!pjaWantsConcreteDate(label, field)) return raw;
+  const date = pjaDateFromAvailabilityText(raw);
+  return date ? pjaFormatDateMMDDYYYY(date) : raw;
+}
+
+function pjaResolveRequiredAnswer(field, context = {}) {
+  const label = String(field && field.label || field || '');
+  const normalizedLabel = pjaNormalizeLabel(label);
+  const answers = context.answers || {};
+  const profile = context.profile || {};
+  const prefs = context.prefs || {};
+  const options = Array.isArray(field && field.options) ? field.options : [];
+  const startDateAnswer = pjaResolvedStartDateAnswer(label, field, profile, prefs);
+  if (startDateAnswer) {
+    return { answer: startDateAnswer, source: 'profile', canonicalKey: 'preferences.startDate',
+      confidence: 'high', sensitive: false, persistable: true };
+  }
+  const bankEntry = answers[normalizedLabel];
+  if (bankEntry && bankEntry.answer != null && String(bankEntry.answer).trim()) {
+    return { answer: String(bankEntry.answer).trim(), source: 'answer_bank', canonicalKey: bankEntry.canonicalKey || null,
+      confidence: bankEntry.confidence || 'high', sensitive: !!bankEntry.sensitive, persistable: true };
+  }
+  const canon = pjaCanonicalForRequiredLabel(label);
+  const read = key => {
+    if (!key) return '';
+    if (Object.prototype.hasOwnProperty.call(profile, key) && profile[key] != null) return profile[key];
+    if (Object.prototype.hasOwnProperty.call(prefs, key) && prefs[key] != null) return prefs[key];
+    const factual = prefs.factual || {};
+    if (Object.prototype.hasOwnProperty.call(factual, key) && factual[key] != null) return factual[key];
+    return '';
+  };
+  if (canon) {
+    for (const key of canon.profileKeys || []) {
+      let val = read(key);
+      if (typeof val === 'boolean') val = val ? 'Yes' : 'No';
+      if (key === 'currentLocation' && !val && (profile.city || profile.state)) val = [profile.city, profile.state].filter(Boolean).join(', ');
+      if (String(val || '').trim()) {
+        return { answer: String(val).trim(), source: /^policy\./.test(canon.canonicalKey) ? 'default_policy' : 'profile',
+          canonicalKey: canon.canonicalKey, confidence: 'high', sensitive: !!canon.sensitive, persistable: true };
+      }
+    }
+  }
+  let best = null, bestScore = 0.45;
+  for (const [key, entry] of Object.entries(answers || {})) {
+    if (!entry || entry.answer == null || !String(entry.answer).trim()) continue;
+    const score = pjaFuzzyScore(normalizedLabel, key);
+    if (score > bestScore) { bestScore = score; best = entry; }
+  }
+  if (best) return { answer: String(best.answer).trim(), source: 'answer_bank', canonicalKey: best.canonicalKey || (canon && canon.canonicalKey) || null,
+    confidence: best.confidence || 'medium', sensitive: !!(best.sensitive || canon && canon.sensitive), persistable: true };
+  return { answer: null, source: 'unresolved', canonicalKey: canon && canon.canonicalKey || null,
+    confidence: 'low', sensitive: !!(canon && canon.sensitive), persistable: false, options };
+}
+
+function pjaCoerceRequiredOption(answer, options) {
+  const opts = (options || []).map(o => {
+    if (typeof o === 'string') return { value: o, text: o };
+    return { value: String(o && o.value || ''), text: String(o && o.text || o && o.label || o && o.value || '') };
+  }).filter(o => o.text || o.value);
+  if (!opts.length) return null;
+  const norm = s => String(s || '').toLowerCase().replace(/[^a-z0-9 ]+/g, ' ').replace(/\s+/g, ' ').trim();
+  const ans = norm(answer);
+  if (!ans) return null;
+  let hit = opts.find(o => norm(o.text) === ans || norm(o.value) === ans);
+  if (hit) return hit;
+  const lead = ans.match(/^(yes|no)\b/);
+  if (lead) {
+    hit = opts.find(o => norm(o.text) === lead[1] || norm(o.value) === lead[1] || norm(o.text).startsWith(lead[1] + ' '));
+    if (hit) return hit;
+  }
+  for (const o of [...opts].sort((a, b) => norm(b.text).length - norm(a.text).length)) {
+    const txt = norm(o.text);
+    const val = norm(o.value);
+    if ((txt && ans.includes(txt)) || (txt && txt.includes(ans)) || (val && ans.includes(val)) || (val && val.includes(ans))) return o;
+  }
+  return null;
+}
+
+function pjaApplyResolvedRequiredAnswer(field, target, context = {}) {
+  if (typeof pjaResolveRequiredAnswer !== 'function') return false;
+  const resolved = pjaResolveRequiredAnswer(field, context);
+  const answer = String(resolved && resolved.answer || '').trim();
+  if (!answer) return false;
+  if (target && target._radioGroup) {
+    const radios = target._radioGroup;
+    const options = radios.map(r => ({
+      value: r.value || '',
+      text: (typeof pjaGetLabel === 'function' ? pjaGetLabel(r) : r.getAttribute('aria-label') || '') || r.value || ''
+    }));
+    const pick = pjaCoerceRequiredOption(answer, options);
+    const chosen = pick
+      ? radios.find(r => String(r.value || '') === pick.value ||
+          ((typeof pjaGetLabel === 'function' ? pjaGetLabel(r) : r.getAttribute('aria-label') || '') === pick.text))
+      : null;
+    if (chosen) return pjaClickRadio(chosen);
+    return false;
+  }
+  if (!target || !target.tagName) return false;
+  if (target.tagName === 'SELECT') {
+    if (pjaFillSelect(target, answer, resolved.canonicalKey || '')) return true;
+    const pick = pjaCoerceRequiredOption(answer, Array.from(target.options).map(o => ({ value: o.value, text: o.text })));
+    return !!(pick && pjaCommitSelect(target, pick.value));
+  }
+  pjaSetNative(target, answer);
+  return true;
 }
 
 // ── Garbage label detection ────────────────────────────────────────────────
@@ -1375,7 +1609,22 @@ async function pjaFillSmartRecruitersCustomFields(profile) {
     await sleep(150);
     await cdpTypeAt(target, answer);
     await sleep(500);
-    await cdpEnter();
+    let clickedOption = false;
+    try {
+      const cityPart = String(answer || '').split(',')[0].trim().toLowerCase();
+      const answerText = String(answer || '').trim().toLowerCase();
+      const opts = splOptions(host);
+      const match = opts.find(o => {
+        const txt = (o.textContent || '').trim().replace(/\s+/g, ' ').toLowerCase();
+        return txt && (txt.includes(answerText) || (cityPart && txt.includes(cityPart)));
+      }) || null;
+      if (match) {
+        await pjaCdpClickEl(match);
+        clickedOption = true;
+        await sleep(500);
+      }
+    } catch (_) {}
+    if (!clickedOption) await cdpEnter();
     await sleep(400);
     try {
       const setter = target instanceof HTMLInputElement
@@ -1393,9 +1642,27 @@ async function pjaFillSmartRecruitersCustomFields(profile) {
       host.dispatchEvent(new CustomEvent('selectionChange', { bubbles: true, composed: true, detail: { value: answer, label: answer } }));
       host.dispatchEvent(new Event('change', { bubbles: true, composed: true }));
     } catch (_) {}
-    dbg('screening ' + name + '="' + answer + '" invalid=' + (target.getAttribute?.('aria-invalid') || ''));
-    return true;
+    const invalid = target.getAttribute?.('aria-invalid') || host.getAttribute?.('aria-invalid') || '';
+    dbg('screening ' + name + '="' + answer + '" clickedOption=' + clickedOption + ' invalid=' + invalid);
+    return clickedOption || invalid === 'false' || !!String(target.value || host.value || host.getAttribute?.('data-pja-value') || '').trim();
   };
+  const locationAutocompleteHosts = allRequiredAutocompletes
+    .filter(el => !countryAutocompleteHosts.includes(el))
+    .filter(el => {
+      const label = [
+        typeof pjaGetLabel === 'function' ? pjaGetLabel(el) : '',
+        labelText(el),
+        el.textContent || '',
+        el.id || '',
+      ].join(' ').replace(/\s+/g, ' ');
+      if (/country|region|phone|dial|gender|race|ethnic|education|degree|school|graduation|gpa|citizenship|authorization|sponsor/i.test(label)) return false;
+      return /city|location|address/i.test(label) || /^spl-form-element_/i.test(el.id || '');
+    });
+  for (const host of locationAutocompleteHosts.slice(0, 2)) {
+    const current = String(host.value || host.getAttribute?.('data-pja-value') || '').trim();
+    if (current && /false/i.test(host.getAttribute?.('aria-invalid') || '')) continue;
+    if (await fillSrAutocompleteHost(host, locValue || city, 'city/location')) filled++;
+  }
   const screeningHosts = pjaQueryAll('spl-autocomplete, input[required][role="combobox"], input[aria-required="true"][role="combobox"]')
     .filter(el => {
       const r = el.getBoundingClientRect();
@@ -2981,6 +3248,9 @@ function pjaFillForm(profile, answers) {
       }
       // React tel/phone validation rejects formatted "(873) 688-2634"; use digits-only
       if ((el.type === 'tel' || key === 'phone') && profileVal) profileVal = profileVal.replace(/\D/g, '');
+      if (key === 'startDate') {
+        profileVal = pjaResolvedStartDateAnswer(rawLabel, { el }, profile, {}) || profileVal;
+      }
       if (profileVal) {
         // Don't fill textareas with bare numeric profile values (e.g. yearsExperience="6")
         // — those fields expect a sentence. Use banked sentence answer if available, else let AI handle.
@@ -3143,6 +3413,13 @@ function pjaFillUnknownTextFields(profile, answers, jobContext, onFilled) {
     if (!rawLabel || rawLabel.length < 4) { console.log('PJA autofill skip: short/empty label', rawLabel?.slice(0,40), el.name?.slice(0,30)); continue; }
     if (pjaIsGarbageLabel(rawLabel)) { console.log('PJA autofill skip: garbage label', rawLabel.slice(0,40)); continue; }
 
+    const maxLength = parseInt(el.getAttribute('maxlength') || el.getAttribute('maxLength') || '0', 10) || 0;
+    const type = el.tagName === 'TEXTAREA' ? 'textarea' : 'text';
+    if (pjaApplyResolvedRequiredAnswer({ label: rawLabel, type, maxLength: maxLength || null }, el, { profile, answers })) {
+      console.log('PJA autofill: filled required field from resolver', rawLabel.slice(0,40));
+      continue;
+    }
+
     // Skip start/end date month and year component fields — these are multi-part date
     // pickers, not free-text questions. Banked answers are stale and cause validation errors.
     if (DATE_COMPONENT_RE.test(rawLabel)) { continue; }
@@ -3170,12 +3447,6 @@ function pjaFillUnknownTextFields(profile, answers, jobContext, onFilled) {
       continue;
     }
 
-    // Read char limit from the DOM
-    const maxLength = parseInt(el.getAttribute('maxlength') || el.getAttribute('maxLength') || '0', 10) || 0;
-
-    // Determine field type
-    const type = el.tagName === 'TEXTAREA' ? 'textarea' : 'text';
-
     questions.push({ label: rawLabel, type, maxLength: maxLength || null });
     elMap.push(el);
   }
@@ -3195,12 +3466,16 @@ function pjaFillUnknownTextFields(profile, answers, jobContext, onFilled) {
     const rawLabel = pjaGetLabel(sel);
     if (!rawLabel || rawLabel.length < 4) continue;
     if (pjaIsGarbageLabel(rawLabel)) continue;
-    if (pjaClassify(rawLabel)) continue;
     const norm = pjaNormalizeLabel(rawLabel);
-    if (pjaFindBestAnswer(norm, answers)) continue;
     const opts = Array.from(sel.options)
       .map(o => o.text.trim())
       .filter(t => t && !['select', 'please select', 'choose', '--'].includes(t.toLowerCase()));
+    if (pjaApplyResolvedRequiredAnswer({ label: rawLabel, type: 'select', maxLength: null, options: opts }, sel, { profile, answers })) {
+      console.log('PJA autofill: filled required select from resolver', rawLabel.slice(0,40));
+      continue;
+    }
+    if (pjaClassify(rawLabel)) continue;
+    if (pjaFindBestAnswer(norm, answers)) continue;
     questions.push({ label: rawLabel, type: 'select', maxLength: null, options: opts });
     elMap.push(sel);
   }
@@ -3237,6 +3512,10 @@ function pjaFillUnknownTextFields(profile, answers, jobContext, onFilled) {
       return lbl || rb.value;
     }).filter(Boolean);
     if (!opts.length) continue;
+    if (pjaApplyResolvedRequiredAnswer({ label: legendText, type: 'radio', maxLength: null, options: opts }, { _radioGroup: groupRadios }, { profile, answers })) {
+      console.log('PJA autofill: filled required radio from resolver', legendText.slice(0,40));
+      continue;
+    }
 
     questions.push({ label: legendText, type: 'radio', maxLength: null, options: opts });
     elMap.push({ _radioGroup: groupRadios }); // sentinel object, not a DOM element
@@ -3313,6 +3592,9 @@ window.pjaCommitSelect = pjaCommitSelect;
 window.pjaNormalizeLabel = pjaNormalizeLabel;
 window.pjaFuzzyScore = pjaFuzzyScore;
 window.pjaFindBestAnswer = pjaFindBestAnswer;
+window.pjaCanonicalForRequiredLabel = pjaCanonicalForRequiredLabel;
+window.pjaResolveRequiredAnswer = pjaResolveRequiredAnswer;
+window.pjaApplyResolvedRequiredAnswer = pjaApplyResolvedRequiredAnswer;
 window.pjaIsGarbageLabel = pjaIsGarbageLabel;
 window.pjaIsApplicationPage = pjaIsApplicationPage;
 window.pjaStartLearning = pjaStartLearning;

@@ -305,6 +305,48 @@ body {
   color: #1e40af;
   margin-bottom: 2px;
 }
+.mq-group {
+  margin: 14px 0 18px;
+}
+.mq-group h3 {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0 0 8px;
+  font-size: 13px;
+  color: #374151;
+}
+.mq-group h3 span {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 18px;
+  height: 18px;
+  border-radius: 999px;
+  background: #e5e7eb;
+  color: #4b5563;
+  font-size: 11px;
+}
+.mq-badges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  margin: 6px 0 4px;
+}
+.mq-badge-pill {
+  display: inline-block;
+  border: 1px solid #dbeafe;
+  border-radius: 999px;
+  background: #eff6ff;
+  color: #1e40af;
+  font-size: 10.5px;
+  padding: 2px 7px;
+}
+.mq-badge-sensitive {
+  border-color: #fecaca;
+  background: #fef2f2;
+  color: #b91c1c;
+}
 .mq-input {
   width: 100%;
   border: 1.5px solid #d1d5db;

@@ -7,7 +7,8 @@
  * Usage:
  *   node dev-server.js
  *
- * Engine: `node dev-server.js --engine codex` or PJA_AI_ENGINE=codex (default: claude).
+ * Engine default: `node dev-server.js --engine codex` or PJA_AI_ENGINE=codex.
+ * Connected extension storage may override this via pja_profile.aiEngine / pja_prefs.aiEngine.
  *
  * Hot-reload:
  *   curl -X POST http://localhost:6174/reload
@@ -17,15 +18,17 @@
 const http  = require('http');
 const fs    = require('fs');
 const path  = require('path');
+const os    = require('os');
 const crypto = require('crypto');
 const { WebSocketServer } = require('ws');
-const { exec } = require('child_process');
+const { exec, spawnSync } = require('child_process');
 const { buildRestartPlan } = require('./chrome-restart');
-const { parseEngine, runAiCli } = require('./ai-cli');
+const { normalizeEnginePreference, parseEngine, runAiCli } = require('./ai-cli');
 
 const PORT = Number(process.env.PJA_DEV_PORT || 6174);
 if (!Number.isInteger(PORT) || PORT < 1 || PORT > 65535) throw new Error('PJA_DEV_PORT must be a valid TCP port');
-const AI_ENGINE = parseEngine();
+const PROCESS_AI_ENGINE = parseEngine();
+let effectiveAiEngineCache = { engine: PROCESS_AI_ENGINE, source: 'process_default', checkedAt: 0 };
 
 // Connected extension background workers (WebSocket clients)
 const wsClients = new Set();
@@ -36,7 +39,7 @@ let applyRunPlanning = false;
 
 const DEFAULT_COVERAGE_CHANNELS = ['linkedin_easy_apply', 'indeed_apply'];
 const DEFAULT_COVERAGE_STRATEGIES = ['greenhouse', 'workday', 'ashby', 'lever', 'smartrecruiters'];
-const REPORT_ONLY_COVERAGE_STRATEGIES = ['eightfold', 'successfactors', 'jobicy'];
+const REPORT_ONLY_COVERAGE_STRATEGIES = ['eightfold', 'successfactors', 'jobicy', 'remotive'];
 
 // Candidate-specific analyzer prompt is loaded from candidate.local.txt (gitignored) so no
 // personal profile data ships in the repo. Falls back to a generic prompt if absent.
@@ -62,22 +65,77 @@ const CANDIDATE_FINGERPRINT = HAS_CANDIDATE_PROFILE
 let runtimeCandidatePrompt = SYSTEM_PROMPT;
 let runtimeCandidateFingerprint = CANDIDATE_FINGERPRINT;
 let runtimeHasCandidateProfile = HAS_CANDIDATE_PROFILE;
+const OPERATIONAL_PROFILE_KEYS = new Set([
+  'aiEngine', 'ai_engine', 'preferredAiEngine',
+  'savedAt', 'updatedAt', 'lastUpdated',
+]);
+
+function extractResumeTextFromDataUrl(dataUrl, filename = '') {
+  const raw = String(dataUrl || '');
+  const match = raw.match(/^data:([^;,]+)?(?:;[^,]*)?;base64,(.+)$/i);
+  if (!match) return '';
+  const mime = String(match[1] || '').toLowerCase();
+  const ext = path.extname(String(filename || '')).toLowerCase();
+  if (!/pdf/.test(mime) && ext !== '.pdf') return '';
+  let buf;
+  try { buf = Buffer.from(match[2], 'base64'); } catch (_) { return ''; }
+  if (!buf.length || buf.length > 12 * 1024 * 1024) return '';
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pja-resume-'));
+  const pdfPath = path.join(dir, 'resume.pdf');
+  try {
+    fs.writeFileSync(pdfPath, buf);
+    const py = [
+      'import sys, re',
+      'from pypdf import PdfReader',
+      'path=sys.argv[1]',
+      'parts=[]',
+      'reader=PdfReader(path)',
+      'for page in reader.pages[:6]:',
+      '    try:',
+      '        parts.append(page.extract_text() or "")',
+      '    except Exception:',
+      '        pass',
+      'text=re.sub(r"\\s+", " ", "\\n".join(parts)).strip()',
+      'sys.stdout.write(text[:20000])',
+    ].join('\n');
+    const out = spawnSync('python3', ['-c', py, pdfPath], { encoding: 'utf8', timeout: 15000, maxBuffer: 1024 * 1024 });
+    return out.status === 0 ? String(out.stdout || '').trim() : '';
+  } catch (_) {
+    return '';
+  } finally {
+    try { fs.rmSync(dir, { recursive: true, force: true }); } catch (_) {}
+  }
+}
 
 // Build a private, per-user scoring profile from extension storage. This keeps new users from
 // needing a gitignored candidate.local.txt while ensuring an empty/new profile still fails closed.
 async function refreshRuntimeCandidateProfile() {
   let st = {};
   for (let attempt = 0; attempt < 3; attempt += 1) {
-    st = await getStorageFromExtension(['pja_profile', 'pja_profile_backup', 'pja_resume_filename'], attempt === 0 ? 5000 : 10000);
+    st = await getStorageFromExtension(['pja_profile', 'pja_profile_backup', 'pja_resume_filename', 'pja_resume_b64'], attempt === 0 ? 5000 : 10000);
     if (st && (Object.prototype.hasOwnProperty.call(st, 'pja_profile') ||
         Object.prototype.hasOwnProperty.call(st, 'pja_resume_filename'))) break;
     if (wsClients.size && attempt < 2) await new Promise(r => setTimeout(r, 500));
   }
+  // A reconnecting MV3 worker can briefly time out storage reads even though the profile and
+  // resume remain intact. Do not downgrade a previously verified in-process candidate profile on
+  // an empty transport response; callers retry/preflight again once the extension is stable.
+  const storageReadObserved = st && (Object.prototype.hasOwnProperty.call(st, 'pja_profile') ||
+    Object.prototype.hasOwnProperty.call(st, 'pja_profile_backup') ||
+    Object.prototype.hasOwnProperty.call(st, 'pja_resume_filename') ||
+    Object.prototype.hasOwnProperty.call(st, 'pja_resume_b64'));
+  if (!storageReadObserved && runtimeHasCandidateProfile) {
+    return { configured: true, resume: true, fields: null, transientStorageRead: true };
+  }
   const profile = st && st.pja_profile && typeof st.pja_profile === 'object' ? st.pja_profile : {};
   const backup = st && st.pja_profile_backup && typeof st.pja_profile_backup === 'object' ? st.pja_profile_backup : {};
   const resume = String(st && st.pja_resume_filename || '').trim();
-  const meaningful = Object.entries(profile).filter(([k, v]) => v != null && String(v).trim() && !/^savedAt$/i.test(k));
-  const backupMeaningful = Object.entries(backup).filter(([k, v]) => v != null && String(v).trim() && !/^savedAt$/i.test(k));
+  const factAllowed = ([k, v]) => v != null && String(v).trim() &&
+    !OPERATIONAL_PROFILE_KEYS.has(k) &&
+    !/^(resumeDataUrl|resume|resumeText|pja_resume_b64)$/i.test(k) &&
+    !/^data:.*;base64,/i.test(String(v).slice(0, 80));
+  const meaningful = Object.entries(profile).filter(factAllowed);
+  const backupMeaningful = Object.entries(backup).filter(factAllowed);
   if (meaningful.length < 3 && backupMeaningful.length >= 3 && wsClients.size) {
     setStorageToExtension({ pja_profile: backup, pja_profile_restored_from_backup: {
       ts: Date.now(), reason: 'preflight_empty_profile', restoredFieldCount: backupMeaningful.length,
@@ -92,7 +150,8 @@ async function refreshRuntimeCandidateProfile() {
     return { configured: runtimeHasCandidateProfile, resume: !!resume, fields: meaningful.length };
   }
   const facts = meaningful.map(([k, v]) => `${k}: ${String(v).slice(0, 500)}`).join('\n');
-  runtimeCandidatePrompt = `${GENERIC_SYSTEM_PROMPT}\n\nVERIFIED USER PROFILE (from local extension storage):\n${facts}\nResume uploaded locally: ${resume}. Treat the profile as authoritative; do not invent resume facts not represented here.`;
+  const resumeText = extractResumeTextFromDataUrl(st && st.pja_resume_b64, resume);
+  runtimeCandidatePrompt = `${GENERIC_SYSTEM_PROMPT}\n\nVERIFIED USER PROFILE (from local extension storage):\n${facts}\nResume uploaded locally: ${resume}.${resumeText ? `\n\nVERIFIED RESUME TEXT (extracted locally; do not quote in reports):\n${resumeText.slice(0, 12000)}` : ''}\nTreat the profile/resume facts as authoritative; do not invent resume facts not represented here.`;
   runtimeCandidateFingerprint = crypto.createHash('sha256').update(runtimeCandidatePrompt).digest('hex').slice(0, 24);
   runtimeHasCandidateProfile = true;
   return { configured: true, resume: true, fields: meaningful.length };
@@ -113,8 +172,51 @@ const JSON_SCHEMA = JSON.stringify({
   }
 });
 
-function runClaudeWithSystemPrompt(systemPrompt, userPrompt, timeoutMs = 90000) {
-  return runAiCli({ engine: AI_ENGINE, systemPrompt, userPrompt, timeoutMs });
+function pickConfiguredAiEngine(storage = {}) {
+  const profile = storage.pja_profile && typeof storage.pja_profile === 'object' ? storage.pja_profile : {};
+  const prefs = storage.pja_prefs && typeof storage.pja_prefs === 'object' ? storage.pja_prefs : {};
+  const pairs = [
+    ['profile', profile.aiEngine],
+    ['profile', profile.ai_engine],
+    ['profile', profile.preferredAiEngine],
+    ['prefs', prefs.aiEngine],
+    ['prefs', prefs.ai_engine],
+    ['prefs', prefs.preferredAiEngine],
+  ];
+  for (const [source, value] of pairs) {
+    const engine = normalizeEnginePreference(value);
+    if (engine) return { engine, source };
+  }
+  return { engine: PROCESS_AI_ENGINE, source: 'process_default' };
+}
+
+async function resolveEffectiveAiEngine(options = {}) {
+  const now = Date.now();
+  if (!options.force && now - effectiveAiEngineCache.checkedAt < 10000) return effectiveAiEngineCache;
+  let next = { engine: PROCESS_AI_ENGINE, source: 'process_default' };
+  try {
+    if (wsClients.size) {
+      const st = await getStorageFromExtension(['pja_profile', 'pja_prefs'], 2500);
+      const observed = st && (Object.prototype.hasOwnProperty.call(st, 'pja_profile') ||
+        Object.prototype.hasOwnProperty.call(st, 'pja_prefs'));
+      // During extension reload/MV3 reconnect, the WS can be alive while storage temporarily
+      // returns an empty/timeout-shaped object. Do not downgrade a profile-selected engine to the
+      // process default in that reconnect window; keep the last confirmed engine until storage is
+      // readable again.
+      if (!observed && effectiveAiEngineCache.source !== 'process_default') {
+        effectiveAiEngineCache = { ...effectiveAiEngineCache, checkedAt: now, transientStorageRead: true };
+        return effectiveAiEngineCache;
+      }
+      if (observed) next = pickConfiguredAiEngine(st);
+    }
+  } catch (_) {}
+  effectiveAiEngineCache = { ...next, checkedAt: now };
+  return effectiveAiEngineCache;
+}
+
+async function runClaudeWithSystemPrompt(systemPrompt, userPrompt, timeoutMs = 90000) {
+  const selected = await resolveEffectiveAiEngine();
+  return runAiCli({ engine: selected.engine, systemPrompt, userPrompt, timeoutMs });
 }
 
 function runClaude(userPrompt) {
@@ -381,6 +483,10 @@ function compactReportJob(job, fallbackStatus) {
     reason: safeReportText(row.reason || row.skipReason || row.error || ''),
     fitScore: row.fitScore == null || row.fitScore === '' ? '' : safeReportText(row.fitScore),
     url: safeReportText(row.applyUrl || row.url || row.listingUrl || ''),
+    descriptionStatus: safeReportText(row.descriptionStatus || ''),
+    hydrationStatus: safeReportText(row.hydrationStatus || ''),
+    hydrationMethod: safeReportText(row.hydrationMethod || ''),
+    hydrationReason: safeReportText(row.hydrationReason || ''),
     diagnostic: row.diagnostic && typeof row.diagnostic === 'object' ? compactReportDiagnostic(row.diagnostic) : null,
   };
 }
@@ -605,6 +711,145 @@ function buildRetestManifest(runId, clusters) {
   };
 }
 
+function fixOpportunityCategory(item = {}) {
+  const text = [item.id, item.reason, item.title, item.category].map(x => String(x || '').toLowerCase()).join(' ');
+  if (/hydration|description|rescore_missing_description|missing_description/.test(text)) return 'hydration';
+  if (/ashby|required|commit|radio|missing_required|selectinput|form-fill|form fill/.test(text)) return 'form_commit';
+  if (/unsupported|unknown_apply_strategy|missing_apply_url|routing|handler/.test(text)) return 'unsupported_handler';
+  if (/auth|login|password|account|verification/.test(text)) return 'auth_blocker';
+  if (/captcha|checkpoint|anti.?bot|daily_limit/.test(text)) return 'anti_bot';
+  if (/score|threshold|weak_match|confidence|evidence|unscored/.test(text)) return 'scoring';
+  return 'routing';
+}
+
+function fixOpportunityScore(item = {}) {
+  const affected = Number(item.affectedJobCount || item.count || 0) || 0;
+  const repeated = Array.isArray(item.runs) ? item.runs.length : Number(item.repeatedRuns || 1) || 1;
+  const maxFit = Number(item.maxFitScore || 0) || 0;
+  const category = fixOpportunityCategory(item);
+  const boost = category === 'hydration' ? 18
+    : category === 'form_commit' ? 16
+      : category === 'unsupported_handler' ? 12
+        : category === 'scoring' ? 8 : 0;
+  const penalty = /auth_blocker|anti_bot/.test(category) ? 18 : 0;
+  return Math.round(affected * 10 + repeated * 6 + maxFit / 5 + boost - penalty);
+}
+
+function buildFixOpportunities(runId, fixClusters, planningDropRows) {
+  const out = [];
+  for (const cluster of fixClusters || []) {
+    const rows = Array.isArray(cluster.rows) ? cluster.rows : [];
+    out.push({
+      id: cluster.id,
+      title: cluster.title,
+      category: fixOpportunityCategory(cluster),
+      reason: cluster.id,
+      affectedJobCount: cluster.count || rows.length,
+      maxFitScore: Math.max(0, ...rows.map(r => Number(r.fitScore) || 0)),
+      recommendation: cluster.recommendation,
+      examples: rows.slice(0, 6).map(r => ({
+        jobId: r.jobId || '',
+        company: r.company || '',
+        title: r.title || '',
+        channel: r.channel || '',
+        ats: r.ats || r.strategy || '',
+        applyUrl: r.url || '',
+        reason: r.reason || r.status || '',
+      })),
+      evidence: cluster.evidence || [],
+      runs: [runId],
+    });
+  }
+  const planningGroups = new Map();
+  for (const row of planningDropRows || []) {
+    const reason = safeReportText(row.reason || row.status || 'planning_drop') || 'planning_drop';
+    const rows = planningGroups.get(reason) || [];
+    rows.push(row);
+    planningGroups.set(reason, rows);
+  }
+  for (const [reason, rows] of planningGroups.entries()) {
+    if (!/rescore_missing_description|missing_description_evidence|unknown_apply_strategy|unsupported_|missing_apply_url|aggregator_without_apply_destination|rescore_weak_match_evidence|unscored/i.test(reason)) continue;
+    out.push({
+      id: 'planning_' + reason.replace(/[^a-z0-9]+/gi, '_').replace(/^_+|_+$/g, '').toLowerCase(),
+      title: `Planning drop: ${reason}`,
+      category: fixOpportunityCategory({ reason }),
+      reason,
+      affectedJobCount: rows.length,
+      maxFitScore: Math.max(0, ...rows.map(r => Number(r.fitScore) || 0)),
+      recommendation: developerRecommendation({ reason }),
+      examples: rows.slice(0, 8).map(r => ({
+        jobId: r.jobId || '',
+        company: r.company || '',
+        title: r.title || '',
+        channel: r.channel || '',
+        ats: r.ats || r.strategy || '',
+        applyUrl: r.url || '',
+        reason: r.reason || '',
+        descriptionStatus: r.descriptionStatus || '',
+        hydrationStatus: r.hydrationStatus || '',
+        hydrationReason: r.hydrationReason || '',
+      })),
+      evidence: rows.slice(0, 4).map(r => [r.channel, r.descriptionStatus, r.hydrationStatus, r.hydrationReason].filter(Boolean).join(' / ')).filter(Boolean),
+      runs: [runId],
+    });
+  }
+  return out.map(item => ({ ...item, valueScore: fixOpportunityScore(item) }))
+    .sort((a, b) => b.valueScore - a.valueScore || b.affectedJobCount - a.affectedJobCount || a.id.localeCompare(b.id));
+}
+
+function updateFixOpportunities(runId, opportunities) {
+  const reportsDir = path.join(__dirname, 'reports');
+  fs.mkdirSync(reportsDir, { recursive: true });
+  const file = path.join(reportsDir, 'fix-opportunities.json');
+  const now = new Date().toISOString();
+  let existing = { schemaVersion: 1, opportunities: [] };
+  try {
+    if (fs.existsSync(file)) existing = JSON.parse(fs.readFileSync(file, 'utf8'));
+  } catch (_) {
+    existing = { schemaVersion: 1, opportunities: [] };
+  }
+  const map = new Map((Array.isArray(existing.opportunities) ? existing.opportunities : [])
+    .map(item => [item.id, item]));
+  for (const next of opportunities || []) {
+    if (!next || !next.id) continue;
+    const prev = map.get(next.id) || {};
+    const runs = Array.from(new Set([...(Array.isArray(prev.runs) ? prev.runs : []), runId, ...(Array.isArray(next.runs) ? next.runs : [])].filter(Boolean))).slice(-20);
+    const examples = [...(Array.isArray(next.examples) ? next.examples : []), ...(Array.isArray(prev.examples) ? prev.examples : [])];
+    const seenExamples = new Set();
+    const uniqueExamples = [];
+    for (const ex of examples) {
+      const key = [ex.applyUrl || '', ex.jobId || '', ex.company || '', ex.title || ''].join('|');
+      if (seenExamples.has(key)) continue;
+      seenExamples.add(key);
+      uniqueExamples.push(ex);
+      if (uniqueExamples.length >= 12) break;
+    }
+    const merged = {
+      ...prev,
+      ...next,
+      firstSeen: prev.firstSeen || now,
+      lastSeen: now,
+      runs,
+      repeatedRuns: runs.length,
+      affectedJobCount: Math.max(Number(prev.affectedJobCount || 0), Number(next.affectedJobCount || 0)),
+      totalObservedJobCount: (Number(prev.totalObservedJobCount || 0) + Number(next.affectedJobCount || 0)) || Number(next.affectedJobCount || 0),
+      examples: uniqueExamples,
+      category: fixOpportunityCategory(next),
+    };
+    merged.valueScore = fixOpportunityScore(merged);
+    map.set(next.id, merged);
+  }
+  const body = {
+    schemaVersion: 1,
+    updatedAt: now,
+    opportunities: Array.from(map.values())
+      .sort((a, b) => b.valueScore - a.valueScore || b.totalObservedJobCount - a.totalObservedJobCount || a.id.localeCompare(b.id))
+      .slice(0, 80),
+  };
+  fs.writeFileSync(file, JSON.stringify(body, null, 2) + '\n', 'utf8');
+  return file;
+}
+
 function normalizeCoverageMap(map) {
   const out = {};
   if (!map || typeof map !== 'object') return out;
@@ -813,6 +1058,7 @@ function renderApplyRunReport(storage, options = {}) {
   const problemRows = allRows.filter(row => /^(failed|skipped|unverified)$/i.test(row.status));
   const diagnostics = collectReportDiagnostics(storage, ranked, allRows, runId);
   const fixClusters = buildFixClusters(problemRows, diagnostics);
+  const fixOpportunities = buildFixOpportunities(runId, fixClusters, planningDropRows);
   const coverageMatrix = buildStrategyCoverageMatrix(ranked);
   const lines = [];
   lines.push(`# Apply run report — ${runId}`);
@@ -944,6 +1190,19 @@ function renderApplyRunReport(storage, options = {}) {
     }
     lines.push('');
   }
+  if (fixOpportunities.length) {
+    lines.push('## Fix opportunity candidates from this run');
+    lines.push('');
+    lines.push('These are persisted into `reports/fix-opportunities.json` across runs so repeated high-value patterns stay visible.');
+    lines.push('');
+    lines.push('| Value | Category | Affected | Opportunity | Retest example |');
+    lines.push('| ---: | --- | ---: | --- | --- |');
+    for (const item of fixOpportunities.slice(0, 12)) {
+      const ex = item.examples && item.examples[0] || {};
+      lines.push(`| ${item.valueScore} | ${safeReportText(item.category)} | ${item.affectedJobCount} | ${safeReportText(item.title)} | ${safeReportText([ex.company, ex.title, ex.jobId].filter(Boolean).join(' — '))} |`);
+    }
+    lines.push('');
+  }
   if (ranked && ranked.planningDrops) {
     lines.push('## Planning drops before launch');
     lines.push('');
@@ -1039,7 +1298,7 @@ function renderApplyRunReport(storage, options = {}) {
     for (const row of debugTail) lines.push(`- ${row}`);
     lines.push('');
   }
-  return { runId, markdown: lines.join('\n'), retestManifest: buildRetestManifest(runId, fixClusters) };
+  return { runId, markdown: lines.join('\n'), retestManifest: buildRetestManifest(runId, fixClusters), fixOpportunities };
 }
 
 function writeApplyRunReport(storage, options = {}) {
@@ -1052,8 +1311,10 @@ function writeApplyRunReport(storage, options = {}) {
   const retestFilename = `retest-${report.runId}.json`;
   const retestFile = path.join(reportsDir, retestFilename);
   fs.writeFileSync(retestFile, JSON.stringify(report.retestManifest || buildRetestManifest(report.runId, []), null, 2) + '\n', 'utf8');
+  const fixOpportunitiesFile = updateFixOpportunities(report.runId, report.fixOpportunities || []);
   return { runId: report.runId, file: filePath, bytes: Buffer.byteLength(report.markdown),
-    retestFile, retestBytes: fs.statSync(retestFile).size };
+    retestFile, retestBytes: fs.statSync(retestFile).size,
+    fixOpportunitiesFile };
 }
 
 function writeApplyPlanningReport(planningDrops, options = {}) {
@@ -1095,6 +1356,9 @@ function appendPlanningDrop(planningDrops, job, reason, dropLimit = 200) {
       reason: safeReportText(reason),
       applyUrl: safeReportText(job && job.applyUrl || ''),
       descriptionStatus: safeReportText(job && job.descriptionStatus || ''),
+      hydrationStatus: safeReportText(job && job.hydrationStatus || ''),
+      hydrationMethod: safeReportText(job && job.hydrationMethod || ''),
+      hydrationReason: safeReportText(job && job.hydrationReason || ''),
     });
   }
   return planningDrops;
@@ -1187,6 +1451,16 @@ function maybeAutoExportApplyReport(storage = {}) {
   return writeApplyRunReport(storage, { runId: ranked.runId });
 }
 
+function minEvidenceForFitScore(score) {
+  const n = Number(score);
+  return Number.isFinite(n) && n >= 75 ? 3 : 2;
+}
+
+function hasEnoughMatchEvidence(job) {
+  const evidence = Array.isArray(job && job.matchEvidence) ? job.matchEvidence.filter(Boolean) : [];
+  return evidence.length >= minEvidenceForFitScore(job && job.fitScore);
+}
+
 // Score one chunk (<=10) of jobs via the same prompt /batch-score uses.
 const SCORE_PROMPT_SUFFIX = `
 
@@ -1215,11 +1489,30 @@ async function scoreJobChunk(batch) {
   try { return JSON.parse(raw.slice(s, e + 1)); } catch (_) { return []; }
 }
 
+async function scoreJobChunkWithRetry(batch, chunkIndex, maxAttempts = 3) {
+  let lastError = null;
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    try {
+      const scores = await scoreJobChunk(batch);
+      const got = new Set((scores || []).map(s => String(s && s.id)));
+      if (got.size === batch.length) return scores;
+      if (got.size > 0 && attempt === maxAttempts) return scores;
+      lastError = new Error(`partial score result ${got.size}/${batch.length}`);
+    } catch (e) {
+      lastError = e;
+    }
+    const waitMs = 750 * attempt + Math.floor(Math.random() * 250);
+    console.log(`[PJA] chunk ${chunkIndex + 1} score attempt ${attempt}/${maxAttempts} failed: ${lastError && lastError.message}; retrying in ${waitMs}ms`);
+    await new Promise(r => setTimeout(r, waitMs));
+  }
+  throw lastError || new Error('score chunk failed');
+}
+
 // Score all jobs in chunks of 10, with bounded concurrency. Resilient: a chunk that errors
 // or times out leaves its jobs unscored (→ shortlist) instead of stalling the whole run.
 // Codex calls are independent; bounded parallelism keeps full-corpus scoring practical while
 // avoiding an unbounded process/connection fan-out.
-async function scoreAll(jobs, concurrency = 12) {
+async function scoreAll(jobs, concurrency = 3) {
   // Deterministic safety boundary: prompt instructions are not the enforcement layer. Without a
   // verified local resume, no job can obtain an autonomous-apply score.
   await refreshRuntimeCandidateProfile();
@@ -1234,7 +1527,7 @@ async function scoreAll(jobs, concurrency = 12) {
     while (next < chunks.length) {
       const idx = next++;
       let scores = [];
-      try { scores = await scoreJobChunk(chunks[idx]); }
+      try { scores = await scoreJobChunkWithRetry(chunks[idx], idx); }
       catch (e) { console.log(`[PJA] chunk ${idx + 1} failed: ${e.message}`); }
       for (const s of scores) if (s && s.id != null) byId[String(s.id)] = s;
       console.log(`[PJA] scored chunk ${++done}/${chunks.length}`);
@@ -1244,13 +1537,13 @@ async function scoreAll(jobs, concurrency = 12) {
   const { tnAdjustScore, medicalWaferBoost } = require('./sourcing/filter');
   return jobs.map(j => {
     const result = byId[String(j.id)] || null;
-    if (!result) return { ...j, fitScore: null, matchEvidence: [], gaps: [], conflicts: [], confidence: 'low' };
+    if (!result) return { ...j, fitScore: null, scoreError: 'llm_score_failed', matchEvidence: [], gaps: [], conflicts: [], confidence: 'low' };
     const matchEvidence = Array.isArray(result.matchEvidence) ? result.matchEvidence.filter(Boolean).slice(0, 8) : [];
     const gaps = Array.isArray(result.gaps) ? result.gaps.filter(Boolean).slice(0, 8) : [];
     const conflicts = Array.isArray(result.conflicts) ? result.conflicts.filter(Boolean).slice(0, 8) : [];
     const confidence = ['high', 'medium', 'low'].includes(String(result.confidence || '').toLowerCase()) ? String(result.confidence).toLowerCase() : 'low';
     let fitScore = medicalWaferBoost(j.title, j.company, j.description, tnAdjustScore(j.title, Number(result.score)));
-    if (matchEvidence.length < 3 || conflicts.length || confidence === 'low') fitScore = Math.min(fitScore, 74);
+    if (matchEvidence.length < minEvidenceForFitScore(fitScore) || conflicts.length || confidence === 'low') fitScore = Math.min(fitScore, 74);
     return { ...j, fitScore, matchEvidence, gaps, conflicts, confidence };
   });
 }
@@ -1347,8 +1640,15 @@ async function handleRequest(req, res) {
   }
 
   if (req.method === 'GET' && req.url === '/health') {
+    const effective = await resolveEffectiveAiEngine({ force: true });
     res.writeHead(200, CORS);
-    res.end(JSON.stringify({ ok: true, engine: `${AI_ENGINE}-cli`, clients: wsClients.size }));
+    res.end(JSON.stringify({
+      ok: true,
+      engine: `${effective.engine}-cli`,
+      engineSource: effective.source,
+      processEngine: `${PROCESS_AI_ENGINE}-cli`,
+      clients: wsClients.size
+    }));
     return;
   }
 
@@ -1513,6 +1813,26 @@ async function handleRequest(req, res) {
         res.end(JSON.stringify({ ok: false, error: e.message }));
       }
     })();
+    return;
+  }
+
+  // Mark the current ranked job failed and continue via the normal dispatcher. This is a scoped
+  // operator recovery for stuck jobs; it logs a ledger event instead of mutating counters by hand.
+  if (req.method === 'POST' && req.url === '/fail-current-apply-job') {
+    let body = '';
+    req.on('data', d => body += d);
+    req.on('end', async () => {
+      try {
+        const o = body ? JSON.parse(body) : {};
+        const data = await wsAsk('failCurrentRankedApply',
+          { reason: o.reason || 'operator_failed_current_job' }, 'failCurrentRankedApplyReply', 30000);
+        res.writeHead(data && data.ok ? 200 : 409, CORS);
+        res.end(JSON.stringify(data || { ok: false, error: 'empty response' }));
+      } catch (e) {
+        res.writeHead(500, CORS);
+        res.end(JSON.stringify({ ok: false, error: e.message }));
+      }
+    });
     return;
   }
 
@@ -1966,20 +2286,21 @@ async function handleRequest(req, res) {
 Job Title: ${title || 'Unknown'}
 Company: ${company || 'Unknown'}
 
-Job Description:
+        Job Description:
 ${(description || '').slice(0, 6000)}`;
 
+        const effective = await resolveEffectiveAiEngine();
         const raw = await runClaude(userPrompt);
         // Extract the JSON object robustly — Haiku sometimes adds text after the closing }
         const start = raw.indexOf('{');
         const end   = raw.lastIndexOf('}');
         if (start === -1 || end === -1) throw new Error('No JSON object in response: ' + raw.slice(0, 120));
         const data = JSON.parse(raw.slice(start, end + 1));
-        data.engine = `${AI_ENGINE}-dev`;
+        data.engine = `${effective.engine}-dev`;
 
         console.log(`done (${Date.now() - t0}ms) score=${data.fitScore}`);
         res.writeHead(200, CORS);
-        res.end(JSON.stringify({ success: true, data, engine: `${AI_ENGINE}-dev` }));
+        res.end(JSON.stringify({ success: true, data, engine: `${effective.engine}-dev`, engineSource: effective.source }));
       } catch (e) {
         console.error(`\n[PJA] Error: ${e.message}`);
         res.writeHead(500, CORS);
@@ -2165,10 +2486,11 @@ ${(description || '').slice(0, 6000)}`;
             : coverageMode ? Math.max(1, coverageAttemptCount) : 20);
         const sourceTarget = o.sourceTarget != null ? Math.max(1, Number(o.sourceTarget) || 1)
           : coverageMode ? Math.max(300, coverageBucketCount * 80)
-          : (applyAllAboveScore ? 300 : Math.max(120, targetConfirmed * 8));
+          : (applyAllAboveScore ? 500 : Math.max(400, targetConfirmed * 20));
         const sourceBody = {
           target: sourceTarget,
           write: o.sourceWrite !== false,
+          autonomousApplyOnly: o.autonomousApplyOnly !== false,
         };
         if (o.targetLocation && typeof o.targetLocation === 'object') sourceBody.targetLocation = o.targetLocation;
         if (o.targetRadiusMiles != null) sourceBody.targetRadiusMiles = Number(o.targetRadiusMiles);
@@ -2207,6 +2529,7 @@ ${(description || '').slice(0, 6000)}`;
         delete applyBody.source;
         delete applyBody.sourceTarget;
         delete applyBody.sourceWrite;
+        delete applyBody.autonomousApplyOnly;
         delete applyBody.maxBrowserAgeMs;
         delete applyBody.queries;
 
@@ -2235,6 +2558,8 @@ ${(description || '').slice(0, 6000)}`;
         res.writeHead(applyResp.status || (applyResp.ok ? 200 : 502), CORS);
         res.end(JSON.stringify({ success: !!(applyResp.ok && (!applyResp.data || applyResp.data.success !== false)),
           sourceOptions: sourceBody, applyOptions: applyBody,
+          sourceHydration: sourceResp.data && sourceResp.data.report && sourceResp.data.report.modalityC
+            ? sourceResp.data.report.modalityC.channelHydration || null : null,
           source: sourceResp.data, apply: applyResp.data }));
         console.log(`[PJA] /apply-all: source=${o.source === false ? 'skipped' : 'done'} applyStatus=${applyResp.status}`);
       } catch (e) {
@@ -2263,6 +2588,16 @@ ${(description || '').slice(0, 6000)}`;
         const applied = appliedIdentity(pjaCollectAppliedRecords(st));
 
         const { sourceAll } = require('./sourcing/source-run');
+        const sourceList = o.autonomousApplyOnly === true
+          ? (require('./sourcing/sources.json').sources || []).filter(src =>
+            !REPORT_ONLY_COVERAGE_STRATEGIES.includes(String(src && src.ats || '').toLowerCase()))
+          : undefined;
+        let discoveryAdapters = null;
+        if (o.autonomousApplyOnly === true) {
+          const allDiscovery = require('./sourcing/adapters').DISCOVERY;
+          discoveryAdapters = Object.fromEntries(Object.entries(allDiscovery)
+            .filter(([name]) => !REPORT_ONLY_COVERAGE_STRATEGIES.includes(String(name).toLowerCase())));
+        }
         const willing = /^(yes|true|1)$/i.test(String((st.pja_profile || {}).willingToRelocate || ''));
         const { prefs, targetLocation, targetRadiusMiles, locationStrictness, remotePolicy } = deriveTargetLocationOptions(o, st);
         const prefQueries = Array.isArray(prefs.searchTitles) ? prefs.searchTitles
@@ -2282,7 +2617,8 @@ ${(description || '').slice(0, 6000)}`;
             maxAgeMs: o.maxBrowserAgeMs != null ? Number(o.maxBrowserAgeMs) : 48 * 60 * 60 * 1000,
           }) : null;
         const browserJobs = await getBrowserShortlistFromExtension(30000);
-        const { store, report } = await sourceAll({ appliedIdentity: applied, target: o.target || 200,
+        const { store, report } = await sourceAll({ sources: sourceList, appliedIdentity: applied, target: o.target || 200,
+          autonomousApplyOnly: o.autonomousApplyOnly === true,
           nationwideUS: willing && !/^hard$/i.test(String(locationStrictness || '')),
           queries: queries && queries.length ? queries : undefined,
           targetLocation,
@@ -2290,6 +2626,7 @@ ${(description || '').slice(0, 6000)}`;
           locationStrictness,
           remotePolicy,
           browserJobs,
+          discoveryAdapters,
           maxBrowserAgeMs: o.maxBrowserAgeMs != null ? Number(o.maxBrowserAgeMs) : 48 * 60 * 60 * 1000 });
         if (browserScan) report.browserScan = browserScan;
 
@@ -2298,7 +2635,8 @@ ${(description || '').slice(0, 6000)}`;
           const imported = await wsAsk('importCorpus', { index: store.index, state: store.state,
             // Only retire records absent from this run when the fresh corpus itself passed its
             // supply/quality gate; a transient partial run must not wipe healthy prior coverage.
-            replaceMissing: report.gate.pass }, 'importCorpusReply', 120000);
+            replaceMissing: report.gate.pass || (o.autonomousApplyOnly === true &&
+              report.gate.atLeastTarget && report.gate.atLeast2Modalities && report.gate.hasDirectSource) }, 'importCorpusReply', 120000);
           if (!imported || imported.error || imported.ok === false) throw new Error('corpus import failed: ' + ((imported && imported.error) || 'no acknowledgement'));
           wrote = imported.imported != null ? imported.imported : Object.keys(store.index).length;
         }
@@ -2336,6 +2674,9 @@ ${(description || '').slice(0, 6000)}`;
         // confirmed target is reached, so reserves replace failures without causing over-submit.
         const attemptCap = o.attemptCap != null ? Math.max(0, Number(o.attemptCap) || 0)
           : (applyAllAboveScore ? 0 : (e2eSafe ? Math.max(25, dailyTarget * 2) : 0));
+        const scoreCandidateLimit = o.scoreCandidateLimit != null ? Math.max(0, Number(o.scoreCandidateLimit) || 0)
+          : applyAllAboveScore ? 0
+            : Math.max(150, Math.min(300, Math.max(dailyTarget || 0, attemptCap || 0) * 3));
         // Evidence-grounded resume/JD rescoring is the safe default. Callers may explicitly set
         // rescore:false for diagnostics, but autonomous apply planning should never trust title-only
         // heuristic scores.
@@ -2407,7 +2748,7 @@ ${(description || '').slice(0, 6000)}`;
           applyRunPlanning = true;
           ownsPlanningLock = true;
         }
-        const control = await getStorageFromExtension(['pja_ranked_apply', 'pja_application_ledger', 'pja_applied_log', 'pja_profile', 'pja_prefs']);
+        const control = await getStorageFromExtension(['pja_ranked_apply', 'pja_application_ledger', 'pja_applied_log', 'pja_profile', 'pja_prefs', 'pja_resume_filename']);
         const targetFilter = deriveTargetLocationOptions(o, control);
         if (!dryRun && !o.force) {
           const run = control.pja_ranked_apply;
@@ -2435,7 +2776,7 @@ ${(description || '').slice(0, 6000)}`;
           retryDeferred: e2eSafe ? false : undefined,
           maxAttempts: e2eSafe ? 1 : undefined,
           candidateFingerprint: !rescore ? runtimeCandidateFingerprint : undefined,
-          explainDrops: true, dropLimit: o.dropLimit != null ? o.dropLimit : 200 }, 'applySetReply', 20000);
+          explainDrops: true, dropLimit: o.dropLimit != null ? o.dropLimit : 200 }, 'applySetReply', 60000);
         let jobs = (setResp && setResp.jobs) || [];
         let planningDrops = setResp.planningDrops ? JSON.parse(JSON.stringify(setResp.planningDrops)) : null;
         const planningDropLimit = o.dropLimit != null ? Math.max(0, Number(o.dropLimit) || 0) : 200;
@@ -2485,35 +2826,73 @@ ${(description || '').slice(0, 6000)}`;
           strategyCoverage[strategy] = { discovered: candidates.length, hydrated: 0, scored: 0, eligible: 0, qualified: 0, reserved: 0 };
         }
 
-        // 2. Score every candidate whose evidence is not already valid for this exact JD. Reuse
-        // prior LLM evidence only when the description fingerprint still matches.
+        // 2. Score every candidate whose evidence is not already valid for this exact JD. Apply-set
+        // rows are compact: hydrate descriptions only for the jobs that actually need scoring, in
+        // batches of ten, so a large real-job corpus never crosses the WS/storage boundary at once.
         if (rescore && jobs.length) {
           const { descriptionFingerprint } = require('./sourcing/jobstore');
           for (const channel of requiredChannels) channelCoverage[channel].hydrated = jobs.filter(j =>
-            (j.channel || 'external') === channel && j.description &&
+            (j.channel || 'external') === channel && (j.descriptionReady || j.description) &&
             !/^(missing|stale|needs_description)$/i.test(String(j.descriptionStatus || ''))).length;
           for (const strategy of requiredStrategies) strategyCoverage[strategy].hydrated = jobs.filter(j =>
-            strategyKey(j) === strategy && j.description &&
+            strategyKey(j) === strategy && (j.descriptionReady || j.description) &&
             !/^(missing|stale|needs_description)$/i.test(String(j.descriptionStatus || ''))).length;
           jobs = jobs.filter(j => {
-            const hydrated = j.description && !/^(missing|stale|needs_description)$/i.test(String(j.descriptionStatus || ''));
+            const hydrated = (j.descriptionReady || j.description) &&
+              !/^(missing|stale|needs_description)$/i.test(String(j.descriptionStatus || ''));
             if (!hydrated) planningDrops = appendPlanningDrop(planningDrops, j, 'rescore_missing_description', planningDropLimit);
             return hydrated;
           });
+          jobs.sort((a, b) => (Number(b.fitScore) || 0) - (Number(a.fitScore) || 0));
+          if (scoreCandidateLimit > 0 && jobs.length > scoreCandidateLimit) {
+            for (const j of jobs.slice(scoreCandidateLimit)) {
+              planningDrops = appendPlanningDrop(planningDrops, j, 'rescore_candidate_limit', planningDropLimit);
+            }
+            jobs = jobs.slice(0, scoreCandidateLimit);
+          }
           const reusable = [], needsScore = [];
           for (const j of jobs) {
-            const fp = descriptionFingerprint(j.description);
-            if (j.scoreKind === 'llm' && j.fitScore != null && j.descriptionFingerprint === fp &&
+            const fp = j.postingDescriptionFingerprint || j.descriptionFingerprint || '';
+            if (j.scoreKind === 'llm' && j.fitScore != null && fp && j.descriptionFingerprint === fp &&
                 j.candidateFingerprint === runtimeCandidateFingerprint) reusable.push(j);
             else needsScore.push(j);
           }
-          const scored = needsScore.length ? await scoreAll(needsScore) : [];
-          if (scored.length) await wsAsk('updateScores', { scores: scored.map(j => ({ id: j.id, fitScore: j.fitScore,
-            descriptionFingerprint: descriptionFingerprint(j.description),
-            candidateFingerprint: runtimeCandidateFingerprint,
-            evidenceFingerprint: `${descriptionFingerprint(j.description)}:${runtimeCandidateFingerprint}`,
-            matchEvidence: j.matchEvidence,
-            gaps: j.gaps, conflicts: j.conflicts, confidence: j.confidence })) }, 'updateScoresReply', 120000);
+          const scored = [];
+          for (let offset = 0; offset < needsScore.length; offset += 10) {
+            const stubs = needsScore.slice(offset, offset + 10);
+            const detailResp = await wsAsk('getApplyDescriptions', { ids: stubs.map(j => j.id) },
+              'applyDescriptionsReply', 30000);
+            if (detailResp.error) {
+              for (const j of stubs) planningDrops = appendPlanningDrop(planningDrops, j,
+                'rescore_description_unavailable', planningDropLimit);
+              continue;
+            }
+            const details = new Map((detailResp.jobs || []).map(row => [String(row && row.id || ''), row]));
+            const hydrated = [];
+            for (const stub of stubs) {
+              const detail = details.get(String(stub.id));
+              if (!detail || !detail.description || !detail.descriptionReady ||
+                  /^(missing|stale|needs_description)$/i.test(String(detail.descriptionStatus || ''))) {
+                planningDrops = appendPlanningDrop(planningDrops, stub, 'rescore_description_unavailable', planningDropLimit);
+                continue;
+              }
+              hydrated.push({ ...stub, description: detail.description,
+                descriptionStatus: detail.descriptionStatus || stub.descriptionStatus,
+                postingDescriptionFingerprint: detail.descriptionFingerprint || stub.postingDescriptionFingerprint });
+            }
+            const batchScored = hydrated.length ? await scoreAll(hydrated, 1) : [];
+            if (batchScored.length) {
+              await wsAsk('updateScores', { scores: batchScored.map(j => {
+                const fp = j.postingDescriptionFingerprint || descriptionFingerprint(j.description);
+                return { id: j.id, fitScore: j.fitScore, descriptionFingerprint: fp,
+                  candidateFingerprint: runtimeCandidateFingerprint,
+                  evidenceFingerprint: `${fp}:${runtimeCandidateFingerprint}`,
+                  matchEvidence: j.matchEvidence, gaps: j.gaps, conflicts: j.conflicts, confidence: j.confidence };
+              }) }, 'updateScoresReply', 120000);
+              // Do not retain description text beyond this scoring batch.
+              scored.push(...batchScored.map(j => { const out = { ...j }; delete out.description; return out; }));
+            }
+          }
           const scoredPool = reusable.concat(scored);
           for (const channel of requiredChannels) channelCoverage[channel].scored = scoredPool.filter(j =>
             (j.channel || 'external') === channel && j.fitScore != null).length;
@@ -2524,7 +2903,7 @@ ${(description || '').slice(0, 6000)}`;
               let reason = '';
               if (j.fitScore == null) reason = 'rescore_missing_fit_score';
               else if (j.fitScore < threshold) reason = 'rescore_below_threshold';
-              else if (requireEvidence && (j.matchEvidence || []).length < 3) reason = 'rescore_weak_match_evidence';
+              else if (requireEvidence && !hasEnoughMatchEvidence(j)) reason = 'rescore_weak_match_evidence';
               else if (requireEvidence && (j.gaps || []).length > maxGaps) reason = 'rescore_too_many_match_gaps';
               else if (requireEvidence && (j.conflicts || []).length) reason = 'rescore_hard_match_conflict';
               else if (requireEvidence && !['high', 'medium'].includes(String(j.confidence || '').toLowerCase())) reason = 'rescore_low_score_confidence';
@@ -2619,7 +2998,7 @@ ${(description || '').slice(0, 6000)}`;
           jobs = selected;
           for (const channel of requiredChannels) {
             channelCoverage[channel].hydrated = ranked.filter(j => (j.channel || 'external') === channel &&
-              j.description && !/^(missing|stale|needs_description)$/i.test(String(j.descriptionStatus || ''))).length;
+              (j.descriptionReady || j.description) && !/^(missing|stale|needs_description)$/i.test(String(j.descriptionStatus || ''))).length;
             channelCoverage[channel].scored = ranked.filter(j => (j.channel || 'external') === channel && j.fitScore != null).length;
             channelCoverage[channel].eligible = ranked.filter(j => (j.channel || 'external') === channel).length;
             channelCoverage[channel].reserved = jobs.filter(j => (j.channel || 'external') === channel).length;
@@ -2627,7 +3006,7 @@ ${(description || '').slice(0, 6000)}`;
           }
           for (const strategy of requiredStrategies) {
             strategyCoverage[strategy].hydrated = ranked.filter(j => strategyKey(j) === strategy &&
-              j.description && !/^(missing|stale|needs_description)$/i.test(String(j.descriptionStatus || ''))).length;
+              (j.descriptionReady || j.description) && !/^(missing|stale|needs_description)$/i.test(String(j.descriptionStatus || ''))).length;
             strategyCoverage[strategy].scored = ranked.filter(j => strategyKey(j) === strategy && j.fitScore != null).length;
             strategyCoverage[strategy].eligible = ranked.filter(j => strategyKey(j) === strategy).length;
             strategyCoverage[strategy].reserved = jobs.filter(j => strategyKey(j) === strategy).length;
@@ -3001,6 +3380,31 @@ Rules:
         const locationLine  = [p.city, p.state, p.country].filter(Boolean).join(', ') || 'not provided';
         const visaLine      = p.visaStatus || p.visa || p.workAuth || 'not provided';
         const skillsLine    = p.skills || p.summary || 'not provided';
+        const canonicalFacts = [
+          ['Address', [p.address, p.address2, p.city, p.state, p.zip, p.country].filter(Boolean).join(', ')],
+          ['Preferred location', p.preferredLocation || p.locationPreference || p.currentLocation],
+          ['US person/export-control', p.usPersonForExportControl],
+          ['Citizenship', p.countryOfCitizenship || p.citizenship],
+          ['GPA', p.gpa || p.undergraduateGpa],
+          ['Gender', p.gender],
+          ['Race', p.race],
+          ['Ethnicity', p.ethnicity],
+          ['EEO fallback', p.eeoFallback],
+          ['Veteran', p.veteran],
+          ['Disability', p.disability],
+          ['Restrictive agreement', p.restrictiveAgreement],
+          ['Federal work/relatives', p.hasFederalWorkOrRelatives],
+          ['Knows employees at target company', p.knowsEmployeesAtTargetCompany],
+          ['Can contact current employer', p.mayContactCurrentEmployer],
+          ['Consent privacy/background/SMS/email', [p.consentPrivacy, p.consentBackgroundCheck, p.consentSms, p.consentEmail].filter(Boolean).join(' / ')],
+          ['Silicon/PCBA test years', p.siliconTestExperienceYears],
+          ['High-speed interface years', p.highSpeedInterfaceExperienceYears],
+          ['Manufacturing tools years', p.manufacturingToolsExperienceYears],
+          ['SolidWorks', p.solidworksExperience],
+          ['CATIA', p.catiaExperience],
+          ['GxP validation', p.gxpValidationExperience],
+        ].filter(([, v]) => v != null && String(v).trim())
+          .map(([k, v]) => `- ${k}: ${String(v).slice(0, 240)}`).join('\n') || '- No additional structured facts supplied';
 
         const ANSWER_SYSTEM_PROMPT =
 `You are filling out a job application for ${fullName}.
@@ -3013,6 +3417,9 @@ PROFILE:
 - Known gaps: ${fa.honestGaps || 'not provided'}
 - Visa: ${visaLine}
 - Location: ${locationLine}
+
+STRUCTURED FACTS (storage-backed; never override these with guesses):
+${canonicalFacts}
 
 PREFERENCES (use these for preference/logistics questions):
 - Compensation: ${pf.compensation || "answer 'competitive'/'negotiable'; do not give a low rate"}
@@ -3050,6 +3457,8 @@ ANSWERING RULES:
 
         const questionList = questions.map((q, i) => {
           const parts = [`Q${i + 1}: "${q.label}"`];
+          if (q.canonicalKey) parts.push(`  Canonical key: ${q.canonicalKey}`);
+          if (q.sensitive) parts.push('  Sensitive field: yes — use only supplied structured facts or configured fallback');
           if ((q.type === 'select' || q.type === 'radio') && q.options?.length) {
             parts.push(`  Type: ${q.type === 'radio' ? 'radio choice' : 'dropdown'}; options: ${q.options.slice(0, 12).join(' | ')}`);
             parts.push(`  IMPORTANT: your answer must be copied exactly from one of the options above`);
@@ -3119,7 +3528,7 @@ wss.on('connection', ws => {
 
 server.listen(PORT, '127.0.0.1', () => {
   console.log(`\n🔬 PJA dev server  →  http://localhost:${PORT}`);
-  console.log(`   Engine            : ${AI_ENGINE} CLI`);
+  console.log(`   Engine default    : ${PROCESS_AI_ENGINE} CLI (profile/prefs may override)`);
   console.log(`   Hot-reload        : curl -X POST http://localhost:${PORT}/reload`);
   console.log(`   Stop              : Ctrl+C\n`);
 });

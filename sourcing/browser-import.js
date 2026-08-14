@@ -11,6 +11,14 @@ const { detectAts } = require('./detect-ats');
 const PLATFORMS = new Set(['linkedin', 'indeed', 'glassdoor']);
 const CHANNELS = new Set(['linkedin_easy_apply', 'indeed_apply', 'external']);
 const DESCRIPTION_STATUSES = new Set(['full', 'partial', 'missing', 'stale']);
+const HYDRATION_STATUSES = new Set([
+  'hydration_success',
+  'hydration_deferred_fast_scan',
+  'hydration_missing_dom',
+  'hydration_timeout',
+  'hydration_blocked_auth',
+  'hydration_not_attempted',
+]);
 
 function lower(value) {
   return String(value || '').trim().toLowerCase();
@@ -191,6 +199,28 @@ function normalizeDescription(raw) {
   return { description, descriptionStatus: status };
 }
 
+function normalizeHydration(raw, desc, platform) {
+  const stated = lower(raw && raw.hydrationStatus);
+  const hydrationStatus = HYDRATION_STATUSES.has(stated) ? stated
+    : desc.description ? 'hydration_success'
+      : 'hydration_missing_dom';
+  const method = clean(raw && raw.hydrationMethod || (
+    desc.description
+      ? platform === 'linkedin' ? 'linkedin_detail_panel'
+        : platform === 'indeed' ? 'indeed_detail_panel'
+          : 'browser_detail_panel'
+      : ''
+  ));
+  const reason = clean(raw && raw.hydrationReason || (
+    desc.description ? ''
+      : hydrationStatus === 'hydration_deferred_fast_scan' ? 'fast_scan_skipped_detail'
+        : 'missing_description'
+  ));
+  const hydratedAt = raw && raw.hydratedAt != null ? raw.hydratedAt
+    : desc.description ? discoveryTime(raw || {}, {}) : null;
+  return { hydrationStatus, hydrationMethod: method, hydrationReason: reason, hydratedAt };
+}
+
 function discoveryTime(raw, opts) {
   const value = raw.discoveredAt != null ? raw.discoveredAt
     : raw.scrapedAt != null ? raw.scrapedAt
@@ -211,6 +241,7 @@ function normalizeBrowserJob(raw, opts = {}) {
   const externalUrl = externalCandidate(raw, sourcePlatform);
   const applyUrl = channel === 'external' ? (externalUrl || listingUrl) : listingUrl;
   const desc = normalizeDescription(raw);
+  const hydration = normalizeHydration(raw, desc, sourcePlatform);
   const base = makeJob({
     id: sourceJobId,
     title: raw.title,
@@ -238,6 +269,10 @@ function normalizeBrowserJob(raw, opts = {}) {
     query,
     discoveredAt,
     descriptionStatus: desc.descriptionStatus,
+    hydrationStatus: hydration.hydrationStatus,
+    hydrationMethod: hydration.hydrationMethod,
+    hydrationReason: hydration.hydrationReason,
+    hydratedAt: hydration.hydratedAt,
   };
 
   return Object.assign(base, {
@@ -252,6 +287,10 @@ function normalizeBrowserJob(raw, opts = {}) {
     isEasyApply: channel === 'linkedin_easy_apply',
     indeedApply: channel === 'indeed_apply',
     descriptionStatus: desc.descriptionStatus,
+    hydrationStatus: hydration.hydrationStatus,
+    hydrationMethod: hydration.hydrationMethod,
+    hydrationReason: hydration.hydrationReason,
+    hydratedAt: hydration.hydratedAt,
     // Discovery and scoring are deliberately separate. A card-only capture is a useful lead,
     // but it cannot enter evidence-backed ranking until a portal-specific hydrator obtains its JD.
     pipelineStatus: /^(full|partial)$/i.test(desc.descriptionStatus) ? 'score_pending' : 'needs_hydration',
@@ -259,6 +298,9 @@ function normalizeBrowserJob(raw, opts = {}) {
     discoveredAt,
     provenance: {
       kind: 'browser', modality, sourcePlatform, query, discoveredAt,
+      hydrationStatus: hydration.hydrationStatus,
+      hydrationMethod: hydration.hydrationMethod,
+      hydrationReason: hydration.hydrationReason,
     },
     sourceRefs: [sourceRef],
   });

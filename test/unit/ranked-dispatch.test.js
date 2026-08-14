@@ -6,6 +6,7 @@ const ROOT = path.resolve(__dirname, '../..');
 
 module.exports = async (t) => {
   const source = fs.readFileSync(path.join(ROOT, 'background.js'), 'utf8');
+  const dev = fs.readFileSync(path.join(ROOT, 'dev-server.js'), 'utf8');
   t.ok(source.includes("'content/apply-router.js'") &&
     source.includes('const PJA_RANKED_LAUNCHERS = {') &&
     source.includes('async function pjaDispatchRankedJob(job, master)') &&
@@ -24,6 +25,8 @@ module.exports = async (t) => {
   'ranked dispatch: known manual blockers and Workday blocked tenants from the ledger are suppressed from future one-click apply sets by default');
   t.ok(source.includes('function pjaRankedTabMatchesJob(tab, job)') &&
     source.includes('tabUrl.hostname !== applyUrl.hostname') &&
+    source.includes('const tabLinkedInId = self.PJAApplySelect?.linkedinJobId(tab.url') &&
+    source.includes('return tabLinkedInId === jobLinkedInId') &&
     source.includes('Same-host Workday tabs are valid') &&
     source.includes('async function pjaRankedTabExists(tabId, job)') &&
     source.includes('chrome.tabs.get(tabId') &&
@@ -104,9 +107,24 @@ module.exports = async (t) => {
     source.includes('pjaSafeSetStorageFromExternal(msg.data'),
   'profile storage: background guards external/full-profile writes with merge, backup, audit, and empty-overwrite rejection');
 
-  t.ok(source.includes("PJAIdb.getAll(), 15000, 'PJAIdb.getAll'") &&
+  t.ok(source.includes("PJAIdb.getApplyPlanningCorpus(), 45000, 'PJAIdb.getApplyPlanningCorpus'") &&
     source.includes("chrome.storage applied records"),
-  'ranked dispatch: apply-set corpus read is bounded so IDB stalls do not wedge /apply-run');
+  'ranked dispatch: apply-set uses a bounded compact corpus read so description-rich IDB data cannot wedge /apply-run');
+
+  t.ok(source.includes("msg.cmd === 'getApplyDescriptions'") &&
+    source.includes(".slice(0, 10)") && source.includes("getApplyDescriptions(ids)"),
+  'ranked dispatch: description hydration is enforced as capped ten-job batches');
+
+  t.ok(source.includes('const count = await self.PJAIdb.count()') &&
+    !source.includes('const s = await self.PJAIdb.corpusSummary({ topN: 0 })'),
+  'corpus import: post-import bookkeeping uses a native count instead of another full diagnostic scan');
+
+  t.ok(dev.includes('transientStorageRead: true') && dev.includes('if (!storageReadObserved && runtimeHasCandidateProfile)'),
+  'candidate preflight: a transient extension reconnect timeout cannot erase a previously verified runtime profile');
+
+  t.ok(source.includes('Acknowledge the durable run install before network/tab launch work') &&
+    source.includes('setTimeout(() => {') && source.includes('pjaDispatchRankedCurrent(msg.master).catch'),
+  'ranked dispatch: start acknowledgement is not held hostage by slow reachability/tab-launch work');
 
   t.ok(source.includes("msg.type === 'REQUEST_APPLY_HELP'") &&
     source.includes('chrome.tabs.captureVisibleTab') &&
@@ -222,6 +240,7 @@ module.exports = async (t) => {
   'ranked dispatch: explicit resume command reconciles and dispatches active ranked runs');
 
   t.ok(source.includes('async function pjaCloseDuplicateRankedTabs(job, keepTabId)') &&
+    source.includes('const sameLinkedInJob = !!(wantedLinkedInId && tabLinkedInId && wantedLinkedInId === tabLinkedInId)') &&
     source.includes('await pjaCloseDuplicateRankedTabs(job, tabId)') &&
     source.includes("msg.cmd === 'closeDuplicateActiveApplyTabs'"),
   'ranked dispatch: duplicate tabs for the active job are closed while keeping the owned in-flight tab');

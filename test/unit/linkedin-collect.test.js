@@ -38,6 +38,20 @@ function makeCard(w, { id, title, company, location, easy }) {
   if (easy) { const e = w.document.createElement('span'); e.textContent = 'Easy Apply'; li.appendChild(e); }
   return li;
 }
+
+// LinkedIn's 2026 React search card: generated classes, no posting link/data-job-id, and the
+// stable posting identity carried by componentkey.
+function makeReactCard(w, { id, title, company, location, easy }) {
+  const card = w.document.createElement('div');
+  card.setAttribute('role', 'button');
+  card.setAttribute('componentkey', `job-card-component-ref-${id}`);
+  const titleP = w.document.createElement('p'); titleP.textContent = `${title} ${title}`; card.appendChild(titleP);
+  const companyP = w.document.createElement('p'); companyP.textContent = company; card.appendChild(companyP);
+  const locationP = w.document.createElement('p'); locationP.textContent = location; card.appendChild(locationP);
+  const dismiss = w.document.createElement('button'); dismiss.setAttribute('aria-label', `Dismiss ${title} job`); card.appendChild(dismiss);
+  if (easy) { const e = w.document.createElement('p'); e.textContent = 'Easy Apply'; card.appendChild(e); }
+  return card;
+}
 // Replace the rendered card window (simulates virtualisation as the user scrolls).
 function render(w, cards) {
   const container = w.document.querySelector('.scaffold-layout__list-container');
@@ -70,6 +84,19 @@ module.exports = (t) => {
   t.eq(sample.applyUrl, 'https://www.linkedin.com/jobs/view/1002/', 'collect: builds apply URL from jobId');
   t.eq(sample.isEasyApply, true, 'collect: flags Easy Apply card');
   t.eq(map.get('1001').isEasyApply, false, 'collect: non-Easy-Apply card flagged false');
+
+  // Current LinkedIn React cards must not silently collapse sourcing to zero when class names
+  // rotate and legacy data-occludable-job-id hooks disappear.
+  render(w, [makeReactCard(w, { id: 4451913133, title: 'Metrology Engineer',
+    company: 'Headway Technologies', location: 'Milpitas, CA (On-site)', easy: true })]);
+  const reactMap = new Map();
+  w.pjaAccumulateRenderedCards(reactMap);
+  const reactCard = reactMap.get('4451913133');
+  t.ok(!!reactCard, 'collect: 2026 componentkey React card is discovered');
+  t.eq(reactCard.title, 'Metrology Engineer', 'collect: React card title comes from stable dismiss label');
+  t.eq(reactCard.company, 'Headway Technologies', 'collect: React card company captured');
+  t.eq(reactCard.location, 'Milpitas, CA (On-site)', 'collect: React card location captured');
+  t.eq(reactCard.isEasyApply, true, 'collect: React card Easy Apply channel captured');
 
   // re-accumulating the same window adds nothing (idempotent / deduped by jobId)
   const before = map.size;

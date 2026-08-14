@@ -250,6 +250,10 @@
         }
         pending.push({ id: meta.jobId, ...meta, description: description.slice(0, 20000),
           descriptionStatus: description ? (description.length > 20000 ? 'partial' : 'full') : 'missing',
+          hydrationStatus: description ? 'hydration_success' : 'hydration_missing_dom',
+          hydrationMethod: 'indeed_detail_panel',
+          hydrationReason: description ? '' : 'indeed_detail_description_missing_or_timeout',
+          hydratedAt: description ? Date.now() : null,
           query: scan.q, discoveredAt: Date.now(), scrapedAt: Date.now(),
           pipelineStatus: description ? 'score_pending' : 'needs_hydration',
           status: description ? 'score_pending' : 'needs_hydration' });

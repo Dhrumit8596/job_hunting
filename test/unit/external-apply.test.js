@@ -264,6 +264,12 @@ module.exports = (t) => {
     externalSource.includes('explicitMissingErrors') &&
     externalSource.includes('if (captchaWidgetVisible && !explicitMissingErrors)'),
   'external-apply: explicit post-submit required-field errors win over generic captcha text');
+  t.ok(externalSource.includes('async function repairAshbyRequiredFields') &&
+    externalSource.includes('[ashby-repair] phase=') &&
+    externalSource.includes("repairAshbyRequiredFields('pre-submit')") &&
+    externalSource.includes("repairAshbyRequiredFields('post-submit:") &&
+    externalSource.includes("explicitRequiredError ? 'missing_required' : 'submit_unclear'"),
+  'external-apply: Ashby required radio/field commit is repaired before submit and retried after explicit required-field errors');
   t.ok(externalSource.includes("authResult === 'needs_navigation'") &&
     externalSource.includes('auth requested navigation; waiting for reloaded apply page'),
   'external-apply: Workday auth direct-navigation recovery waits for reload instead of recording auth failure');
@@ -280,8 +286,9 @@ module.exports = (t) => {
     wdFinalSubmitBlock.indexOf('stopBeforeFinalSubmit') < wdFinalSubmitBlock.indexOf("pja_wd_submitclick_"),
   'external-apply: Workday final Submit inside the step loop honors stop-before-submit before clicking');
   t.ok(externalSource.includes('const isWorkdayHost = /workday\\.com|myworkdayjobs\\.com/i.test(location.hostname)') &&
-    externalSource.includes("const terminalHelpReason = reactSelectError && isWorkdayHost ? 'wd_selectinput_blocked' : 'submit_unclear'"),
-  'external-apply: non-Workday React-select submit errors are not mislabeled wd_selectinput_blocked');
+    externalSource.includes("reactSelectError && isWorkdayHost ? 'wd_selectinput_blocked'") &&
+    externalSource.includes("explicitRequiredError ? 'missing_required' : 'submit_unclear'"),
+  'external-apply: non-Workday React-select submit errors are not mislabeled wd_selectinput_blocked and explicit required errors are classified missing_required');
   t.ok(externalSource.includes('before auth starts') &&
     externalSource.includes('pja_wd_pending_apply') &&
     externalSource.includes('stale') &&

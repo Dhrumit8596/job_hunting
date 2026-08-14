@@ -33,6 +33,7 @@ const PROFILE_DEFAULTS = {
   currentTitle: '', currentCompany: '', yearsExperience: '', university: '', degree: '', major: '', graduationYear: '',
   salaryExpectation: '', workAuth: '', requireSponsorship: '',
   visaStatus: '', willingToRelocate: '', referralSource: '',
+  aiEngine: 'codex',
   gender: '', ethnicity: '', veteran: '', disability: ''
 };
 
@@ -41,7 +42,7 @@ const PROFILE_FIELDS = [
   'address','address2','city','state','zip','country',
   'currentTitle','currentCompany','yearsExperience','salaryExpectation',
   'university','degree','major','graduationYear','educationStartMonth','educationStartYear','educationEndMonth','educationEndYear',
-  'workAuth','requireSponsorship','visaStatus','willingToRelocate','referralSource'
+  'workAuth','requireSponsorship','visaStatus','willingToRelocate','referralSource','aiEngine'
 ];
 
 function meaningfulProfileCount(profile) {
@@ -68,10 +69,10 @@ function mergeProfileForSave(previous, incoming) {
   return { ok: true, profile: merged, reason: 'merged_profile_write' };
 }
 
-function auditProfileSave(previous, attempted, accepted, reason) {
+function auditProfileSave(previous, attempted, accepted, reason, source = 'settings:save-profile') {
   chrome.storage.local.get('pja_profile_write_audit', r => {
     const audit = Array.isArray(r.pja_profile_write_audit) ? r.pja_profile_write_audit.slice(-39) : [];
-    audit.push({ ts: Date.now(), source: 'settings:save-profile',
+    audit.push({ ts: Date.now(), source,
       previousKeyCount: meaningfulProfileCount(previous), nextKeyCount: meaningfulProfileCount(attempted),
       accepted: !!accepted, reason });
     chrome.storage.local.set({ pja_profile_write_audit: audit });
@@ -161,10 +162,17 @@ const DEFAULT_SEARCH_TITLES = [
   'metrology engineer',
   'process engineer',
   'supplier quality engineer',
+  'semiconductor quality engineer',
+  'semiconductor process engineer',
+  'medical device quality engineer',
   'validation engineer',
   'test engineer',
   'equipment engineer',
   'failure analysis engineer',
+  'process integration engineer',
+  'wafer process engineer',
+  'thin film process engineer',
+  'yield engineer',
 ];
 
 function normalizedSearchTitles(value) {
@@ -697,6 +705,80 @@ function esc(s) { return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').re
 function escAttr(s) { return String(s).replace(/"/g, '&quot;'); }
 
 // ── Missing Questions (from External Apply) ───────────────────────────────────
+function missingQuestionCategory(q) {
+  const key = String(q.canonicalKey || '').toLowerCase();
+  const label = String(q.rawLabel || q.question || '').toLowerCase();
+  if (key.startsWith('profile.address') || /address|city|state|zip|postal|country/.test(label)) return 'Profile / Contact';
+  if (key.startsWith('profile.phone') || /phone|mobile|telephone/.test(label)) return 'Profile / Contact';
+  if (key.startsWith('profile.education') || /education|school|university|college|degree|gpa/.test(label)) return 'Education';
+  if (key.startsWith('workauth') || /work auth|authorized|sponsor|visa|citizen|u\.?s\.? person|export control|itar|ear/.test(label)) return 'Work Authorization';
+  if (key.startsWith('eeo') || /gender|race|ethnic|veteran|disab/.test(label)) return 'EEO / Self-ID';
+  if (key.startsWith('compliance') || /non-compete|restrictive|federal|relative|employee/.test(label)) return 'Compliance';
+  if (key.startsWith('experience') || /experience|solidworks|catia|gxp|pcba|silicon|pcie|cxl|ddr|ethernet/.test(label)) return 'Experience Details';
+  if (key.startsWith('preferences') || /salary|compensation|location|relocat|start|availability|referral/.test(label)) return 'Preferences';
+  if (key.startsWith('policy') || /consent|agree|acknowledge|certify|privacy|sms|email/.test(label)) return 'Consent / Policy';
+  return 'Other Required Fields';
+}
+
+function profileKeyForCanonical(canonicalKey) {
+  const map = {
+    'profile.address.line1': 'address',
+    'profile.address.line2': 'address2',
+    'profile.address.city': 'city',
+    'profile.address.state': 'state',
+    'profile.address.zip': 'zip',
+    'profile.address.country': 'country',
+    'profile.phone': 'phone',
+    'profile.phoneType': 'phoneType',
+    'profile.linkedin': 'linkedin',
+    'profile.website': 'website',
+    'profile.education.highest': 'highestEducation',
+    'profile.education.degree': 'degree',
+    'profile.education.school': 'university',
+    'profile.education.graduationMonth': 'graduationMonth',
+    'profile.education.graduationYear': 'graduationYear',
+    'profile.education.gpa': 'gpa',
+    'workAuth.authorized': 'workAuth',
+    'workAuth.sponsorship': 'requireSponsorship',
+    'workAuth.visaStatus': 'visaStatus',
+    'workAuth.usPerson': 'usPersonForExportControl',
+    'workAuth.citizenship': 'countryOfCitizenship',
+    'eeo.gender': 'gender',
+    'eeo.race': 'race',
+    'eeo.ethnicity': 'ethnicity',
+    'eeo.veteran': 'veteran',
+    'eeo.disability': 'disability',
+    'preferences.location': 'locationPreference',
+    'preferences.compensation': 'salaryExpectation',
+    'preferences.startDate': 'startDate',
+    'preferences.referralSource': 'referralSource',
+    'policy.consent': 'acknowledgePolicies',
+    'policy.sms': 'consentSms',
+    'policy.email': 'consentEmail',
+    'compliance.restrictiveAgreement': 'restrictiveAgreement',
+    'compliance.currentEmployee': 'currentEmployeeAtTarget',
+    'compliance.relationships': 'knowsEmployeesAtTargetCompany',
+    'compliance.federal': 'hasFederalWorkOrRelatives',
+    'experience.totalYears': 'yearsExperience',
+    'experience.siliconPcbaTestYears': 'siliconTestExperienceYears',
+    'experience.highSpeedInterfaceYears': 'highSpeedInterfaceExperienceYears',
+    'experience.solidworks': 'solidworksExperience',
+    'experience.catia': 'catiaExperience',
+    'experience.gxpValidation': 'gxpValidationExperience',
+  };
+  return map[canonicalKey] || '';
+}
+
+function missingQuestionBadges(q) {
+  const badges = [];
+  if (q.canonicalKey) badges.push(`<span class="mq-badge-pill">${esc(q.canonicalKey)}</span>`);
+  if (q.source) badges.push(`<span class="mq-badge-pill">${esc(q.source)}</span>`);
+  if (q.confidence) badges.push(`<span class="mq-badge-pill">confidence: ${esc(q.confidence)}</span>`);
+  if (q.sensitive) badges.push('<span class="mq-badge-pill mq-badge-sensitive">sensitive</span>');
+  if (q.status) badges.push(`<span class="mq-badge-pill">status: ${esc(q.status)}</span>`);
+  return badges.join(' ');
+}
+
 function loadMissingQuestions() {
   const listEl  = document.getElementById('mq-list');
   const emptyEl = document.getElementById('mq-empty');
@@ -719,10 +801,14 @@ function loadMissingQuestions() {
     }
 
     emptyEl.style.display = 'none';
-    // Only show questions that still need an answer — hide already-answered ones
-    const unansweredEntries = entries.filter(([,v]) => !v.answer);
+    // Show questions still needing approval/answers. Approved historical entries remain in storage
+    // for diagnostics, but do not clutter the working queue.
+    const unresolvedStatuses = new Set(['needs_user', 'proposed', 'needs_review']);
+    const unansweredEntries = entries.filter(([,v]) =>
+      !v.answer || unresolvedStatuses.has(String(v.status || '').toLowerCase())
+    );
     const unanswered = unansweredEntries.length;
-    badge.textContent = unanswered ? `${unanswered} unanswered` : 'all answered';
+    badge.textContent = unanswered ? `${unanswered} pending` : 'all answered';
     badge.style.background = unanswered ? '#f59e0b' : '#10b981';
     badge.style.display = 'inline';
     saveBtn.style.display = unanswered ? 'inline-block' : 'none';
@@ -734,36 +820,59 @@ function loadMissingQuestions() {
       return;
     }
 
-    unansweredEntries.forEach(([key, q]) => {
-      const card = document.createElement('div');
-      card.className = 'answer-card';
-      card.dataset.key = key;
+    const groups = new Map();
+    unansweredEntries.forEach(entry => {
+      const category = missingQuestionCategory(entry[1] || {});
+      if (!groups.has(category)) groups.set(category, []);
+      groups.get(category).push(entry);
+    });
 
-      const contexts = (q.contexts || []).slice(0, 2).map(c => `${c.company} — ${c.title}`).join('; ');
+    for (const [category, groupEntries] of groups.entries()) {
+      const groupEl = document.createElement('div');
+      groupEl.className = 'mq-group';
+      groupEl.innerHTML = `<h3>${esc(category)} <span>${groupEntries.length}</span></h3>`;
+      listEl.appendChild(groupEl);
+
+      groupEntries.forEach(([key, q]) => {
+        const card = document.createElement('div');
+        card.className = 'answer-card';
+        card.dataset.key = key;
+        const profileKey = profileKeyForCanonical(q.canonicalKey || '');
+        if (profileKey) card.dataset.profileKey = profileKey;
+
+        const contexts = (q.contexts || q.examples || []).slice(0, 2).map(c => `${c.company || 'Unknown company'} — ${c.title || 'Unknown role'}`).join('; ');
+        const diagnostics = (q.diagnostics || []).slice(-1)[0];
+        const diagnosticText = diagnostics
+          ? `Last failure: ${diagnostics.phase || 'unknown phase'}${diagnostics.attemptedAnswer ? ` · tried "${diagnostics.attemptedAnswer}"` : ''}`
+          : '';
+        const value = q.answer || q.proposedAnswer || '';
       let inputHtml = '';
       if (q.type === 'select' && q.options?.length) {
         inputHtml = `<select class="mq-input" data-key="${escAttr(key)}">
           <option value="">— select —</option>
-          ${q.options.map(o => `<option value="${escAttr(o)}"${q.answer === o ? ' selected' : ''}>${esc(o)}</option>`).join('')}
+          ${q.options.map(o => `<option value="${escAttr(o)}"${value === o ? ' selected' : ''}>${esc(o)}</option>`).join('')}
         </select>`;
       } else if (q.type === 'radio' && q.options?.length) {
         inputHtml = `<select class="mq-input" data-key="${escAttr(key)}">
           <option value="">— select —</option>
-          ${q.options.map(o => `<option value="${escAttr(o)}"${q.answer === o ? ' selected' : ''}>${esc(o)}</option>`).join('')}
+          ${q.options.map(o => `<option value="${escAttr(o)}"${value === o ? ' selected' : ''}>${esc(o)}</option>`).join('')}
         </select>`;
       } else if (q.type === 'textarea') {
-        inputHtml = `<textarea class="mq-input" data-key="${escAttr(key)}" rows="2" placeholder="Your answer…">${esc(q.answer || '')}</textarea>`;
+        inputHtml = `<textarea class="mq-input" data-key="${escAttr(key)}" rows="2" placeholder="Your answer…">${esc(value)}</textarea>`;
       } else {
-        inputHtml = `<input class="mq-input" data-key="${escAttr(key)}" type="text" placeholder="Your answer…" value="${escAttr(q.answer || '')}">`;
+        inputHtml = `<input class="mq-input" data-key="${escAttr(key)}" type="text" placeholder="Your answer…" value="${escAttr(value)}">`;
       }
 
       card.innerHTML = `
-        <div class="answer-label">${esc(q.question)}</div>
-        <div class="answer-meta">Seen ${q.seenCount || 1}× · ${esc(contexts)}</div>
+        <div class="answer-label">${esc(q.rawLabel || q.question || key)}</div>
+        <div class="answer-meta">Seen ${q.seenCount || 1}×${contexts ? ` · ${esc(contexts)}` : ''}${profileKey ? ` · saves to profile.${esc(profileKey)} if empty` : ''}</div>
+        <div class="mq-badges">${missingQuestionBadges(q)}</div>
+        ${diagnosticText ? `<div class="answer-meta">${esc(diagnosticText)}</div>` : ''}
         ${inputHtml}
       `;
-      listEl.appendChild(card);
-    });
+        groupEl.appendChild(card);
+      });
+    }
 
     // Scroll to #missing anchor if present
     if (location.hash === '#missing') {
@@ -774,22 +883,67 @@ function loadMissingQuestions() {
 loadMissingQuestions();
 
 document.getElementById('btn-save-mq')?.addEventListener('click', () => {
-  chrome.storage.local.get(['pja_missing_questions', 'pja_answers'], r => {
+  chrome.storage.local.get(['pja_missing_questions', 'pja_answers', 'pja_profile'], r => {
     const mq = r.pja_missing_questions || {};
     const bank = r.pja_answers || {};
+    const profile = r.pja_profile || {};
+    const profilePatch = {};
     const now = Date.now();
+    let savedCount = 0;
 
     document.querySelectorAll('.mq-input').forEach(el => {
       const key = el.dataset.key;
       const val = el.value.trim();
       if (!key || !val) return;
-      // Write into mq (for record) and into pja_answers (so auto-apply uses it)
-      if (mq[key]) mq[key].answer = val;
-      bank[key] = { answer: val, savedAt: now, usedCount: 0 };
+      const q = mq[key] || {};
+      // Write into mq (for diagnostics/review) and into pja_answers (so auto-apply uses it).
+      mq[key] = {
+        ...q,
+        answer: val,
+        status: 'approved',
+        approvedAt: now,
+        updatedAt: now,
+      };
+      bank[key] = {
+        rawLabel: q.rawLabel || q.question || key,
+        answer: val,
+        savedAt: now,
+        usedCount: 0,
+        source: 'missing_info_ui',
+        confidence: 'high',
+        canonicalKey: q.canonicalKey || null,
+        sensitive: !!q.sensitive,
+      };
+      const profileKey = profileKeyForCanonical(q.canonicalKey || '');
+      if (profileKey && (profile[profileKey] == null || String(profile[profileKey]).trim() === '')) {
+        profilePatch[profileKey] = val;
+        mq[key].savedToProfileKey = profileKey;
+      }
+      savedCount++;
     });
 
-    chrome.storage.local.set({ pja_missing_questions: mq, pja_answers: bank }, () => {
-      showStatus(document.getElementById('mq-status'), '✓ Saved to answer bank', 'success');
+    const storageUpdate = { pja_missing_questions: mq, pja_answers: bank };
+    let blockedReason = '';
+    if (meaningfulProfileCount(profilePatch)) {
+      const decision = mergeProfileForSave(profile, profilePatch);
+      auditProfileSave(profile, profilePatch, decision.ok, decision.reason, 'settings:missing-info');
+      if (decision.ok) {
+        storageUpdate.pja_profile = decision.profile;
+        storageUpdate.pja_profile_backup = decision.profile;
+        storageUpdate.pja_profile_last_good_at = now;
+      } else {
+        blockedReason = decision.reason;
+        storageUpdate.pja_profile_write_rejected = { ts: now, source: 'settings:missing-info', reason: decision.reason };
+      }
+    }
+
+    chrome.storage.local.set(storageUpdate, () => {
+      if (blockedReason) {
+        showStatus(document.getElementById('mq-status'), `Saved ${savedCount} answer${savedCount === 1 ? '' : 's'}; profile update blocked: ${blockedReason}`, 'error');
+        loadMissingQuestions();
+        return;
+      }
+      showStatus(document.getElementById('mq-status'), `✓ Saved ${savedCount} answer${savedCount === 1 ? '' : 's'}`, 'success');
       loadMissingQuestions();
     });
   });

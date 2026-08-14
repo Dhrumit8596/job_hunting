@@ -39,10 +39,17 @@ const DEFAULT_SEARCH_TITLES = [
   'metrology engineer',
   'process engineer',
   'supplier quality engineer',
+  'semiconductor quality engineer',
+  'semiconductor process engineer',
+  'medical device quality engineer',
   'validation engineer',
   'test engineer',
   'equipment engineer',
   'failure analysis engineer',
+  'process integration engineer',
+  'wafer process engineer',
+  'thin film process engineer',
+  'yield engineer',
 ];
 
 // ── State ─────────────────────────────────────────────────────────────────────

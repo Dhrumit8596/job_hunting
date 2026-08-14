@@ -14,6 +14,13 @@ module.exports = (t) => {
       contentSource.includes('myworkdayjobs\\.com') &&
       contentSource.includes('function maybeAutoOpenSidebar()') &&
       contentSource.includes('else closeSidebar()') &&
+      contentSource.includes('function isLinkedInApplyRoute(value)') &&
+      contentSource.includes('jobs\\/(?:search|search-results)') &&
+      contentSource.includes("u.searchParams.get('currentJobId')") &&
+      contentSource.includes('resumeApplyOnLoad();') &&
+      contentSource.includes('activeEasyApplyResumeKey === resumeKey') &&
+      contentSource.includes('if (isLinkedInApplyRoute(location.href)) resumeApplyOnLoad();') &&
+      contentSource.includes('if (!s) return;') &&
       contentSource.includes('#pja-sidebar') &&
       contentSource.includes('pointer-events: auto'),
     'content UI: external ATS pages keep the sidebar closed/click-through unless manually opened',

@@ -67,6 +67,32 @@ module.exports = async (t) => {
   t.ok(j7 && j7.company === 'Co7', 'idb: getJob posting');
   t.ok(j7 && j7.state && j7.state.fitScore === 60, 'idb: getJob state carries fitScore');
 
+  // The initial apply-planning read must stay compact even when the corpus contains thousands of
+  // description-rich postings. JD text is retrieved later in strict scoring-sized batches.
+  const planning = await idb.getApplyPlanningCorpus();
+  t.eq(planning.total, 2508, 'idb apply planning: reports full corpus total');
+  const projected7 = planning.index['greenhouse:7'];
+  t.ok(projected7 && !Object.prototype.hasOwnProperty.call(projected7, 'description'),
+    'idb apply planning: posting projection never carries JD text');
+  t.eq(projected7.descriptionReady, true, 'idb apply planning: projection carries JD readiness');
+  t.eq(projected7.descriptionLength > 0, true, 'idb apply planning: projection carries JD length metadata');
+  t.eq(projected7.descriptionFingerprint, (await idb.getJob('greenhouse:7')).descriptionFingerprint,
+    'idb apply planning: projection carries posting JD fingerprint');
+  t.eq(planning.state['greenhouse:7'].fitScore, 60, 'idb apply planning: projection carries mutable score state');
+  t.eq(JSON.stringify(planning).includes('Process control, SPC, metrology, and root-cause requirements.'), false,
+    'idb apply planning: serialized projection does not leak repeated JD bodies');
+
+  const descriptions = await idb.getApplyDescriptions(['greenhouse:7', 'greenhouse:8', 'greenhouse:7', 'missing:id']);
+  t.eq(descriptions.map(row => row.id), ['greenhouse:7', 'greenhouse:8'],
+    'idb apply descriptions: dedupes IDs, preserves request order, and omits missing postings');
+  t.eq(descriptions.every(row => row.description && row.descriptionReady && row.descriptionFingerprint), true,
+    'idb apply descriptions: returns complete targeted JD hydration metadata');
+  let batchError = '';
+  try { await idb.getApplyDescriptions(Array.from({ length: 11 }, (_, i) => 'greenhouse:' + i)); }
+  catch (e) { batchError = e.message; }
+  t.eq(batchError, 'getApplyDescriptions supports at most 10 ids',
+    'idb apply descriptions: rejects batches above the hard ten-record ceiling');
+
   // applied-state correctness: exclude a known applied role
   const removed = await idb.excludeApplied([roleKey({ company: 'Co1', title: 'Process Engineer 1' })]);
   t.eq(removed, 1, 'idb: excludeApplied removes the applied role');

@@ -42,6 +42,17 @@ if (!window.__pjaMsgListenerAdded) {
   let shadow = null;
   let learningActive = false;
   let learnCallbacks = null; // persisted so navigation can re-attach
+  let activeEasyApplyResumeKey = '';
+
+  function isLinkedInApplyRoute(value) {
+    try {
+      const u = new URL(String(value || location.href));
+      if (!/(^|\.)linkedin\.com$/i.test(u.hostname)) return false;
+      if (/^\/jobs\/view\//i.test(u.pathname)) return true;
+      return /^\/jobs\/(?:search|search-results)\/?$/i.test(u.pathname) &&
+        !!u.searchParams.get('currentJobId');
+    } catch (_) { return false; }
+  }
 
   // ── LinkedIn profile page: contact-save widget ───────────────────────────
   function isLinkedInProfile() {
@@ -216,6 +227,11 @@ select.pcw-input{cursor:pointer}
       return;
     }
 
+    // The ranked queue must not depend on a sidebar extractor recognizing LinkedIn's latest DOM.
+    // Start it directly from the durable session queue; injectUI/SPA navigation may call the same
+    // function again, but the per-run/job key makes those calls idempotent.
+    if (isLinkedInApplyRoute(location.href)) resumeApplyOnLoad();
+
     waitForJob().then(jobData => {
       if (!jobData) {
         // Check if this domain was previously manually triggered → auto-open
@@ -286,6 +302,10 @@ select.pcw-input{cursor:pointer}
     maybeAutoOpenSidebar();
     resetSidebar(jobData);
     initAppTools();
+    // LinkedIn can canonicalize `/jobs/search/` to `/jobs/search-results/` through an SPA
+    // transition after the content script first initializes. Re-check the durable page queue on
+    // every route change; resumeApplyOnLoad owns an idempotency key for the active run/job.
+    resumeApplyOnLoad();
 
     // Restore learning after sidebar reset — the document listener survived, just update UI
     if (learningActive && learnCallbacks) updateLearnUI();
@@ -768,12 +788,9 @@ select.pcw-input{cursor:pointer}
       try { chrome.storage.local.set({ pja_ea_paused: { reason: 'checkpoint', url: location.href, ts: Date.now() } }); } catch (_) {}
       return;
     }
-    // Queue navigates to /jobs/view/{id}/ — modal opens in interop-outlet shadow root.
-    // Also handles /jobs/search/?currentJobId= for legacy/fallback paths.
-    const onSearchWithJob = location.href.includes('linkedin.com/jobs/search/') &&
-      new URLSearchParams(location.search).get('currentJobId');
-    const onJobView = location.href.includes('linkedin.com/jobs/view/');
-    if (!onSearchWithJob && !onJobView) return;
+    // Queue navigates to a canonical job view or a search route with currentJobId. LinkedIn's
+    // current UI rewrites `/jobs/search/` to `/jobs/search-results/`; both are the same target.
+    if (!isLinkedInApplyRoute(location.href)) return;
     const raw = sessionStorage.getItem('pja_apply_queue');
     if (!raw) return;
     let queue;
@@ -782,6 +799,9 @@ select.pcw-input{cursor:pointer}
 
     const job = queue.jobs[queue.currentIndex];
     if (!job) { sessionStorage.removeItem('pja_apply_queue'); return; }
+    const resumeKey = [queue.runId || '', queue.currentIndex || 0, job.jobId || job.id || ''].join(':');
+    if (activeEasyApplyResumeKey === resumeKey) return;
+    activeEasyApplyResumeKey = resumeKey;
     const s = shadow;
     hide(s, '#pja-auto-idle');
     hide(s, '#pja-auto-done');
@@ -929,6 +949,16 @@ select.pcw-input{cursor:pointer}
         queue.profile = profResp?.profile || {};
         chrome.runtime.sendMessage({ type: 'GET_ANSWERS' }, ansResp => {
           queue.answers = ansResp?.answers || {};
+          try {
+            chrome.storage.local.get('pja_prefs', prefResp => {
+              queue.prefs = prefResp?.pja_prefs || queue.prefs || {};
+              if (queue.prefs && queue.jobs && queue.jobs[queue.currentIndex]) {
+                queue.jobs[queue.currentIndex].prefs = queue.jobs[queue.currentIndex].prefs || queue.prefs;
+              }
+              resolve();
+            });
+            return;
+          } catch (_) {}
           resolve();
         });
       });
@@ -1691,10 +1721,12 @@ select.pcw-input{cursor:pointer}
 
   // ── Helpers ───────────────────────────────────────────────────────────────
   function show(s, id) {
+    if (!s) return;
     const el = s.querySelector(id);
     if (el) el.style.display = '';
   }
   function hide(s, id) {
+    if (!s) return;
     const el = s.querySelector(id);
     if (el) el.style.display = 'none';
   }

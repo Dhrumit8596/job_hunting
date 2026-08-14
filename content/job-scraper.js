@@ -39,6 +39,14 @@
     const byDataAttr = Array.from(document.querySelectorAll('li[data-occludable-job-id], div[data-occludable-job-id]'));
     if (byDataAttr.length > 0) return byDataAttr;
 
+    // LinkedIn's 2026 React search UI replaced the legacy list-item attributes with a
+    // role=button card whose componentkey carries the posting id. Generated CSS classes are not
+    // stable enough to use as a contract.
+    const byComponentKey = Array.from(document.querySelectorAll(
+      '[role="button"][componentkey^="job-card-component-ref-"]'
+    ));
+    if (byComponentKey.length > 0) return byComponentKey;
+
     // Fallback: role="listitem" inside the search results scaffold
     const scaffold = document.querySelector(
       '[class*="jobs-search-results-list"], [class*="scaffold-layout__list-container"]'
@@ -62,6 +70,7 @@
            card.dataset.jobId ||
            card.querySelector('[data-occludable-job-id]')?.dataset.occludableJobId ||
            card.querySelector('[data-job-id]')?.dataset.jobId ||
+           String(card.getAttribute('componentkey') || '').match(/^job-card-component-ref-(\d+)$/)?.[1] ||
            null;
   }
 
@@ -69,28 +78,46 @@
     // Try aria-label on the primary link first (most stable), then class-based
     const link = card.querySelector('a[href*="/jobs/view/"]');
     if (link?.getAttribute('aria-label')) return link.getAttribute('aria-label').trim();
-    return (card.querySelector([
+    const legacy = (card.querySelector([
       '.job-card-list__title--link',   // current LinkedIn class
       '.job-card-list__title',          // older variant
       '.base-search-card__title',       // public job search pages
       'a.job-card-container__link'
     ].join(','))?.textContent || '').trim();
+    if (legacy) return legacy;
+    const dismiss = card.querySelector('button[aria-label^="Dismiss "][aria-label$=" job"]')
+      ?.getAttribute('aria-label') || '';
+    return dismiss.replace(/^Dismiss\s+/i, '').replace(/\s+job$/i, '').trim();
   }
 
   function getJobCompanyFromCard(card) {
-    return (card.querySelector([
+    const legacy = (card.querySelector([
       '.artdeco-entity-lockup__subtitle',   // current LinkedIn card subtitle
       '.job-card-container__primary-description',
       '.base-search-card__subtitle'
     ].join(','))?.textContent || '').trim();
+    if (legacy) return legacy;
+    if (/^job-card-component-ref-\d+$/.test(card.getAttribute('componentkey') || '')) {
+      const paragraphs = Array.from(card.querySelectorAll('p'))
+        .map(p => (p.textContent || '').replace(/\s+/g, ' ').trim()).filter(Boolean);
+      return paragraphs[1] || '';
+    }
+    return '';
   }
 
   function getJobLocationFromCard(card) {
-    return (card.querySelector([
+    const legacy = (card.querySelector([
       '.artdeco-entity-lockup__caption',    // current LinkedIn card caption
       '.job-card-container__metadata-item',
       '.base-search-card__metadata'
     ].join(','))?.textContent || '').trim();
+    if (legacy) return legacy;
+    if (/^job-card-component-ref-\d+$/.test(card.getAttribute('componentkey') || '')) {
+      const paragraphs = Array.from(card.querySelectorAll('p'))
+        .map(p => (p.textContent || '').replace(/\s+/g, ' ').trim()).filter(Boolean);
+      return paragraphs[2] || '';
+    }
+    return '';
   }
 
   // LinkedIn marks Easy Apply in the card footer ("Easy Apply" + the LinkedIn glyph).
@@ -140,6 +167,7 @@
   const DETAIL_POLL_TIMEOUT  = 5000;  // ms before giving up
 
   const DESCRIPTION_SELECTORS = [
+    '[id^="JobDetails_AboutTheJob_"]',       // 2026 React search UI
     '#job-details',                             // most stable — id attribute
     '.jobs-description__content',
     '.jobs-description-content__text',
@@ -196,18 +224,25 @@
   }
 
   function getDetailPanelTitle() {
-    return (document.querySelector([
+    const legacy = (document.querySelector([
       'h1.job-details-jobs-unified-top-card__job-title',  // current (2024–2025)
       '.jobs-unified-top-card__job-title',
       '.job-details-jobs-unified-top-card__job-title'
     ].join(','))?.textContent || '').trim();
+    if (legacy) return legacy;
+    const visibleId = String(location.href).match(/(?:currentJobId=|\/jobs\/view\/)(\d+)(?:[/?&#]|$)/i)?.[1] || '';
+    const link = Array.from(document.querySelectorAll('a[href*="/jobs/view/"]')).find(a =>
+      !visibleId || String(a.getAttribute('href') || '').includes(`/jobs/view/${visibleId}/`));
+    return (link?.textContent || '').trim();
   }
 
   function getDetailPanelCompany() {
-    return (document.querySelector([
+    const legacy = (document.querySelector([
       '.job-details-jobs-unified-top-card__company-name',  // current (2024–2025)
       '.jobs-unified-top-card__company-name'
     ].join(','))?.textContent || '').trim();
+    if (legacy) return legacy;
+    return (document.querySelector('[aria-label^="Company,"]')?.textContent || '').trim();
   }
 
   // Decode LinkedIn's offsite "Apply" wrapper (linkedin.com/safety/go/?url=<encoded ATS url>)
@@ -236,7 +271,31 @@
   async function pjaResolveVoyagerBatch(jobIds) {
     const csrf = (document.cookie.match(/JSESSIONID="?([^";]+)"?/) || [])[1] || '';
     const results = {};
+    const descriptions = {};
+    const findDescriptionText = value => {
+      const seen = new Set();
+      const walk = node => {
+        if (!node || seen.has(node)) return '';
+        if (typeof node === 'string') {
+          const text = node.replace(/\s+/g, ' ').trim();
+          return text.length > 120 && /responsibilities|requirements|qualifications|about|experience|engineer|quality|process/i.test(text) ? text : '';
+        }
+        if (typeof node !== 'object') return '';
+        seen.add(node);
+        for (const key of ['descriptionText', 'description', 'jobDescription', 'formattedDescription', 'text']) {
+          const got = walk(node[key]);
+          if (got) return got;
+        }
+        for (const value of Object.values(node)) {
+          const got = walk(value);
+          if (got) return got;
+        }
+        return '';
+      };
+      return walk(value);
+    };
     let resolved = 0;
+    let hydrated = 0;
     for (const jid of jobIds || []) {
       try {
         const url = `https://www.linkedin.com/voyager/api/jobs/jobPostings/${jid}?decorationId=com.linkedin.voyager.deco.jobs.web.shared.WebFullJobPosting-65`;
@@ -250,19 +309,35 @@
           const dec = companyUrl ? (pjaDecodeApplyUrl(companyUrl) || companyUrl) : null;
           results[String(jid)] = dec;
           if (dec) resolved++;
+          const desc = findDescriptionText(j);
+          if (desc) { descriptions[String(jid)] = desc; hydrated++; }
         } else { results[String(jid)] = null; }
       } catch (_) { results[String(jid)] = null; }
-      chrome.storage.local.set({ pja_voyager_resolved: { ts: Date.now(), resolved, done: Object.keys(results).length, total: (jobIds || []).length } });
+      chrome.storage.local.set({ pja_voyager_resolved: { ts: Date.now(), resolved, hydrated, done: Object.keys(results).length, total: (jobIds || []).length } });
       await delay(250 + Math.random() * 250);
     }
     await new Promise(res => chrome.storage.local.get('pja_shortlist', r => {
       const list = (r.pja_shortlist || []).map(jb => {
         const u = results[String(jb.id || jb.jobId)];
-        return u ? { ...jb, externalApplyUrl: u, applyUrl: u, needsAtsResolution: false } : jb;
+        const desc = descriptions[String(jb.id || jb.jobId)];
+        if (!u && !desc) return jb;
+        const next = u ? { ...jb, externalApplyUrl: u, applyUrl: u, needsAtsResolution: false } : { ...jb };
+        if (desc) Object.assign(next, {
+          description: desc.slice(0, 20000),
+          descriptionStatus: desc.length > 20000 ? 'partial' : 'full',
+          hydrationStatus: 'hydration_success',
+          hydrationMethod: 'linkedin_voyager_job_posting',
+          hydrationReason: '',
+          hydratedAt: Date.now(),
+          pipelineStatus: 'score_pending',
+          status: 'score_pending',
+          fitScore: null,
+        });
+        return next;
       });
       chrome.storage.local.set({ pja_shortlist: list }, res);
     }));
-    return results;
+    return { applyUrls: results, descriptions };
   }
 
   // ── Inject floating scanner widget ────────────────────────────────────────
@@ -375,7 +450,7 @@
 
   function findListContainer() {
     return document.querySelector(
-      '[class*="jobs-search-results-list"], [class*="scaffold-layout__list-container"]'
+      '[componentkey="SearchResultsMainContent"], [class*="jobs-search-results-list"], [class*="scaffold-layout__list-container"]'
     ) || document.querySelector('.jobs-search-results__list') || null;
   }
 
@@ -401,7 +476,7 @@
   // Returns true if it advanced. Prefer the explicit next button, else a numbered page button.
   async function goToNextPage() {
     let next = document.querySelector(
-      '.jobs-search-pagination__button--next, button[aria-label="View next page"]'
+      '.jobs-search-pagination__button--next, button[aria-label="View next page"], button[data-testid="pagination-controls-next-button-visible"]'
     );
     if (!next) {
       next = Array.from(document.querySelectorAll('button[aria-label]'))
@@ -460,6 +535,7 @@
             const previousDescription = getDetailPanelDescription();
             const link = card.querySelector('a[href*="/jobs/view/"]') || card.querySelector('a');
             if (link) link.click();
+            else card.click();
             description = await waitForDetailPanelDescription({ jobId: meta.jobId, title: meta.title,
               previousUrl, previousDescription });
             // Free pre-filter: need at least one keyword in title/company/desc.
@@ -484,6 +560,10 @@
             needsAtsResolution: FAST && !meta.isEasyApply, // external job whose ATS URL isn't decoded yet
             description: description.slice(0, 20000),
             descriptionStatus: description ? (description.length > 20000 ? 'partial' : 'full') : 'missing',
+            hydrationStatus: description ? 'hydration_success' : (FAST ? 'hydration_deferred_fast_scan' : 'hydration_missing_dom'),
+            hydrationMethod: description ? 'linkedin_detail_panel' : (FAST ? 'linkedin_fast_card_scan' : 'linkedin_detail_panel'),
+            hydrationReason: description ? '' : (FAST ? 'fast_scan_skipped_detail' : 'detail_panel_description_missing'),
+            hydratedAt: description ? Date.now() : null,
             query: new URLSearchParams(location.search).get('keywords') || '',
             discoveredAt: Date.now(), scrapedAt: Date.now(),
             // FAST collection intentionally has no detail panel. Preserve that truth so the

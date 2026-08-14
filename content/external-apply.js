@@ -19,6 +19,30 @@
   // review mode by setting pja_ext_stop_before_submit / stopBeforeSubmit explicitly.
   const PJA_EXT_STOP_BEFORE_SUBMIT_DEFAULT = false;
 
+  let pjaRuntimeProfile = {};
+  let pjaRuntimeAnswers = {};
+
+  function pjaSanitizeRuntimeProfile(p) {
+    const src = p && typeof p === 'object' ? p : {};
+    const out = {};
+    for (const [k, v] of Object.entries(src)) {
+      if (/^(resumeDataUrl|resumeText|resume|pja_resume_b64)$/i.test(k)) continue;
+      if (typeof v === 'string' && /^data:.*;base64,/i.test(v.slice(0, 80))) continue;
+      out[k] = v;
+    }
+    return out;
+  }
+
+  async function pjaAddExtDbg(msg) {
+    try {
+      await new Promise(r => chrome.storage.local.get('pja_dbg', d => {
+        const a = (d.pja_dbg || []).slice(-40);
+        a.push(String(msg || '').slice(0, 500));
+        chrome.storage.local.set({ pja_dbg: a }, r);
+      }));
+    } catch (_) {}
+  }
+
   // Catch any unhandled promise rejections so they appear in console
   window.addEventListener('unhandledrejection', e => {
     console.log('PJA ext-apply UNHANDLED REJECTION:', e.reason?.message || String(e.reason), e.reason?.stack?.slice(0, 300) || '');
@@ -33,6 +57,7 @@
   });
 
   const ATS_PATTERNS = /greenhouse\.io|lever\.co|workday\.com|myworkdayjobs\.com|jobvite\.com|icims\.com|smartrecruiters\.com|ashbyhq\.com|bamboohr\.com|taleo\.net|applytojob\.com|jazz\.co|recruitee\.com|rippling\.com|successfactors\.com|smashfly\.com|phenom|randstadusa\.com|adecco\.com|manpowergroup\.com|manpower\.com|kellyjobs\.com|adeccousa\.com|heidrick\.com|experis\.com|roberthalf\.com|careers\.|careers\b|myworkday|apply\./i;
+  const CONCRETE_ATS_HOST_PATTERNS = /greenhouse\.io|lever\.co|workday\.com|myworkdayjobs\.com|jobvite\.com|icims\.com|smartrecruiters\.com|ashbyhq\.com|bamboohr\.com|taleo\.net|applytojob\.com|jazz\.co|recruitee\.com|rippling\.com|successfactors\.com|smashfly\.com/i;
 
   // Recovery: if navigateBack stored a destination that survived a page redirect, navigate there now.
   // This handles cases where an ATS page redirected before our setTimeout could fire. Top frame only
@@ -116,6 +141,20 @@
 
       // Only treat per-job lifecycle flags as valid for the queue run that created them.
       const sameRun = queue && job.runId && job.runId === queue.runId;
+      function pjaSanitizeResultJob(j) {
+        const out = {};
+        const allowed = [
+          'id', 'jobId', 'sourceJobId', 'runId', 'applyUrl', 'listingUrl', 'company', 'title',
+          'location', 'ats', 'strategy', 'channel', 'fitScore', 'confidence', 'applicationAt',
+          '_confirmationSource', '_confirmedAt',
+        ];
+        for (const k of allowed) if (j && Object.prototype.hasOwnProperty.call(j, k)) out[k] = j[k];
+        return out;
+      }
+      let profile = pjaSanitizeRuntimeProfile((job.profile && Object.keys(job.profile).length > 0) ? job.profile : {});
+      let answers = (data.pja_answers && Object.keys(data.pja_answers).length > 0) ? data.pja_answers : {};
+      pjaRuntimeProfile = profile;
+      pjaRuntimeAnswers = answers;
 
       // A submit may navigate before the original content-script instance can inspect the result.
       // Recover that lifecycle here, but only promote it after the NEW page supplies a genuine
@@ -149,6 +188,14 @@
       if (job.applyUrl) {
         try {
           const expectedHost = new URL(job.applyUrl).hostname;
+          const expectedConcreteAts = CONCRETE_ATS_HOST_PATTERNS.test(expectedHost);
+          const actualConcreteAts = CONCRETE_ATS_HOST_PATTERNS.test(location.hostname);
+          if (location.hostname !== expectedHost && expectedConcreteAts && actualConcreteAts) {
+            await pjaAddExtDbg('[guard] concrete ATS host mismatch early skip actual=' + location.hostname +
+              ' expected=' + expectedHost + ' job=' + String(job.company || '').slice(0, 60));
+            console.log('PJA ext-apply: concrete ATS hostname mismatch early:', location.hostname, '≠', expectedHost, '— skipping');
+            return;
+          }
           if (location.hostname !== expectedHost && !ATS_PATTERNS.test(location.hostname)) {
             console.log('PJA ext-apply: hostname mismatch early:', location.hostname, '≠', expectedHost, '— skipping');
             return;
@@ -167,8 +214,8 @@
           console.log('PJA ext-apply: handled recovery, confirmed=', wasConfirmed, 'for', job.company);
           const bucket = wasConfirmed ? queue.results.applied : queue.results.skipped;
           bucket.push(wasConfirmed
-            ? { ...queue.jobs[myIdx], appliedAt: Date.now(), note: 'confirmed-before-navigation' }
-            : { ...queue.jobs[myIdx], skipReason: 'legacy_submit_unverified' });
+            ? { ...pjaSanitizeResultJob(queue.jobs[myIdx]), appliedAt: Date.now(), note: 'confirmed-before-navigation' }
+            : { ...pjaSanitizeResultJob(queue.jobs[myIdx]), skipReason: 'legacy_submit_unverified' });
           queue.currentIndex = myIdx + 1;
           if (queue.currentIndex >= queue.jobs.length) queue.status = 'done';
           const persist = wasConfirmed
@@ -176,6 +223,7 @@
               confirmationSource: 'page', confirmedAt: job._confirmedAt || Date.now() })
             : pjaWriteAppliedLog(job, { status: 'submitting', reason: 'legacy_submit_unverified' });
           persist.then(() => chrome.storage.local.set({ pja_ext_queue: queue }, () => {
+            if (chrome.runtime.lastError) console.warn('PJA ext-apply: queue recovery write failed', chrome.runtime.lastError.message);
             // Crash-recovery must also notify the serialized ledger/master. Previously this repaired
             // only the legacy queue, leaving the global ranked run stuck until its watchdog marked a
             // genuinely confirmed submission as failed.
@@ -212,6 +260,14 @@
       if (job.applyUrl) {
         try {
           const expectedHost = new URL(job.applyUrl).hostname;
+          const expectedConcreteAts = CONCRETE_ATS_HOST_PATTERNS.test(expectedHost);
+          const actualConcreteAts = CONCRETE_ATS_HOST_PATTERNS.test(location.hostname);
+          if (location.hostname !== expectedHost && expectedConcreteAts && actualConcreteAts) {
+            await pjaAddExtDbg('[guard] concrete ATS host mismatch skip actual=' + location.hostname +
+              ' expected=' + expectedHost + ' job=' + String(job.company || '').slice(0, 60));
+            console.log('PJA ext-apply: concrete ATS hostname mismatch:', location.hostname, '≠', expectedHost, '— skipping');
+            return;
+          }
           if (location.hostname !== expectedHost && !ATS_PATTERNS.test(location.hostname)) {
             console.log('PJA ext-apply: hostname mismatch:', location.hostname, '≠', expectedHost, '— skipping');
             return;
@@ -271,6 +327,7 @@
         }));
       }
       await waitForForm();
+      if (await pjaOpenWorkdayListingEntry(job, reason)) return { handled: true, reason: 'workday_listing_entry_navigation' };
       const router = window.PJAApplyRouter;
       if (router && typeof router.executeStrategy === 'function') {
         const dispatched = await router.executeStrategy(job, {
@@ -292,6 +349,69 @@
         window.__pjaExtApplyInFlightToken = '';
       }
     }
+  }
+
+  async function pjaOpenWorkdayListingEntry(job, reason) {
+    if (!/workday\.com|myworkdayjobs\.com/i.test(location.hostname)) return false;
+    if (/\/apply(?:\/|$)/i.test(location.pathname)) return false;
+    const hasForm = !!document.querySelector('form input, form select, form textarea, [data-automation-id="textInputBox"], [data-automation-id="selectWidget"], [data-automation-id="bottomNavigationNext"], [data-automation-id="pageFooterNextButton"]');
+    if (hasForm) return false;
+    const visible = el => {
+      try {
+        const r = el.getBoundingClientRect();
+        return r.width > 0 && r.height > 0;
+      } catch (_) {
+        return false;
+      }
+    };
+    const controls = Array.from(document.querySelectorAll('a,button,[role=button]'))
+      .filter(visible)
+      .map(el => ({
+        el,
+        text: (el.textContent || el.getAttribute('aria-label') || '').trim().replace(/\s+/g, ' '),
+        href: el.href || el.getAttribute('href') || '',
+      }))
+      .filter(x => x.text);
+    const entry = controls.find(x => /continue application/i.test(x.text)) ||
+      controls.find(x => /^apply$/i.test(x.text) || /apply now|start application/i.test(x.text));
+    if (!entry) return false;
+
+    const navKey = 'pja_wd_pre_router_entry_' + String((job && (job.id || job.jobId || job.applyUrl)) || location.pathname || '')
+      .replace(/[^\w-]+/g, '_').slice(-90);
+    const attempts = parseInt(sessionStorage.getItem(navKey) || '0', 10) || 0;
+    if (attempts >= 6) {
+      await pjaAddExtDbg('[WD] pre-router listing entry exhausted reason=' + String(reason || '') + ' controls=[' + controls.map(x => x.text).slice(0, 8).join('|') + ']');
+      return false;
+    }
+    sessionStorage.setItem(navKey, String(attempts + 1));
+
+    let targetUrl = '';
+    if (entry.href) {
+      try { targetUrl = new URL(entry.href, location.href).href; } catch (_) {}
+    }
+    if (!targetUrl || targetUrl.replace(/[?#].*$/, '') === location.href.replace(/[?#].*$/, '')) {
+      const sourceUrl = String((job && job.applyUrl) || location.href || '').trim();
+      const cleanUrl = sourceUrl.replace(/[?#].*$/, '').replace(/\/+$/, '');
+      targetUrl = /\/apply\/applyManually(?:\/|$)/i.test(cleanUrl)
+        ? cleanUrl.replace(/\/apply\/applyManually$/i, '/apply')
+        : /\/apply(?:\/|$)/i.test(cleanUrl)
+          ? sourceUrl
+          : cleanUrl + '/apply';
+    }
+
+    await pjaAddExtDbg('[WD] pre-router listing entry attempt=' + (attempts + 1) +
+      ' text=' + entry.text.slice(0, 80) + ' target=' + String(targetUrl || '').slice(0, 180));
+    if (targetUrl && targetUrl.replace(/[?#].*$/, '') !== location.href.replace(/[?#].*$/, '')) {
+      location.assign(targetUrl + (targetUrl.includes('?') ? '&' : '?') + 'pja_wd_entry_retry=' + (attempts + 1));
+      return true;
+    }
+    if (typeof trustedWorkdayClick === 'function') {
+      try {
+        if (await trustedWorkdayClick(entry.el, 'pre-router-listing-apply')) return true;
+      } catch (_) {}
+    }
+    try { entry.el.click(); return true; } catch (_) {}
+    return false;
   }
 
   // The existing external engine contains mature ATS-specific branches. Register those branches
@@ -342,6 +462,12 @@
     // anything else on a confirmation page means the application predates this run.
     const pjaPrevAction = sessionStorage.getItem('pja_last_action') || '';
     sessionStorage.setItem('pja_last_action', 'runExternalApply:' + job.company);
+    let profile = pjaSanitizeRuntimeProfile(
+      job && job.profile && Object.keys(job.profile).length > 0 ? job.profile : pjaRuntimeProfile
+    );
+    let answers = rawAnswers && Object.keys(rawAnswers).length > 0 ? rawAnswers : pjaRuntimeAnswers;
+    pjaRuntimeProfile = profile;
+    pjaRuntimeAnswers = answers || {};
     const writeLocal = (obj) => new Promise(r => chrome.storage.local.set(obj, r));
     const readRecentDbg = () => new Promise(r => chrome.storage.local.get('pja_dbg', d => r((d.pja_dbg || []).slice(-12))));
     const addDbg = msg => new Promise(r => chrome.storage.local.get('pja_dbg', d => {
@@ -976,8 +1102,8 @@
     await sleep(1500); // let dynamic forms settle
 
     // Fall back to stored profile/answers if the job object doesn't include them
-    let profile = (job.profile && Object.keys(job.profile).length > 0) ? job.profile : {};
-    let answers = (rawAnswers && Object.keys(rawAnswers).length > 0) ? rawAnswers : {};
+    profile = (profile && Object.keys(profile).length > 0) ? profile : {};
+    answers = (answers && Object.keys(answers).length > 0) ? answers : {};
     try {
       const stored = await new Promise((resolve, reject) => {
         chrome.storage.local.get(['pja_profile', 'pja_answers'], d => {
@@ -992,7 +1118,9 @@
     }
     // Merge stored profile on top of defaults so new profile keys always have fallback values.
     const defaultProfile = (typeof window.PJA_DEFAULT_PROFILE !== 'undefined') ? window.PJA_DEFAULT_PROFILE : {};
-    profile = Object.assign({}, defaultProfile, profile);
+    profile = pjaSanitizeRuntimeProfile(Object.assign({}, defaultProfile, profile));
+    pjaRuntimeProfile = profile;
+    pjaRuntimeAnswers = answers || {};
     if (!String(profile.phoneCountryCode || '').trim()) profile.phoneCountryCode = defaultProfile.phoneCountryCode || 'United States of America (+1)';
     if (!String(profile.referralSource || '').trim()) profile.referralSource = defaultProfile.referralSource || 'LinkedIn';
     // Promote explicit answer-bank EEO values into the in-memory profile so Workday prompt
@@ -1628,6 +1756,82 @@
         .catch(e => { phaseLog(label + ' err ' + ((e && e.message) || e)); return undefined; })
         .finally(() => clearTimeout(to));
       return Promise.race([wrapped, timeout]);
+    }
+
+    async function repairAshbyRequiredFields(phase) {
+      if (!/ashbyhq\.com/i.test(location.hostname)) return 0;
+      const visible = el => {
+        try {
+          const r = el.getBoundingClientRect();
+          return r.width > 0 && r.height > 0 && !el.disabled;
+        } catch (_) {
+          return false;
+        }
+      };
+      const optionText = radio => {
+        let txt = radio.getAttribute('aria-label') || '';
+        try { if (!txt && radio.id) txt = document.querySelector(`label[for="${CSS.escape(radio.id)}"]`)?.textContent || ''; } catch (_) {}
+        txt = txt || radio.closest('label')?.textContent || radio.parentElement?.textContent || radio.value || '';
+        return String(txt || '').replace(/\s+/g, ' ').trim();
+      };
+      const groupText = radios => {
+        const first = radios[0];
+        const field = first.closest('fieldset,[role="group"],[class*="field"],[class*="question"],[data-testid*="question"],div');
+        const legend = field?.querySelector('legend,[class*="label"],label')?.textContent || '';
+        return String(legend || field?.textContent || '').replace(/\s+/g, ' ').trim().slice(0, 240);
+      };
+      const answerFor = question => {
+        const field = { label: question, type: 'radio', options: [] };
+        const context = { profile, answers: answers || {}, prefs: job && job.prefs || {} };
+        if (typeof pjaResolveRequiredAnswer === 'function') {
+          try {
+            const resolved = pjaResolveRequiredAnswer(field, context);
+            const answer = String(resolved && resolved.answer || '').trim();
+            if (answer) return answer;
+          } catch (_) {}
+        }
+        for (const [rawLabel, rec] of Object.entries(answers || {})) {
+          const q = String(question || '').toLowerCase();
+          const label = String(rawLabel || '').toLowerCase();
+          const answer = String((rec && (rec.answer ?? rec)) || '').trim();
+          if (answer && (q.includes(label.slice(0, 40)) || label.includes(q.slice(0, 40)))) return answer;
+        }
+        return '';
+      };
+      const groups = new Map();
+      for (const radio of pjaQueryAllExt('input[type="radio"]')) {
+        if (!visible(radio)) continue;
+        const key = radio.name || radio.closest('fieldset,[role="group"],[class*="field"],[class*="question"]')?.textContent?.slice(0, 120) || radio.id || Math.random();
+        const arr = groups.get(key) || [];
+        arr.push(radio);
+        groups.set(key, arr);
+      }
+      let repaired = 0;
+      for (const radios of groups.values()) {
+        if (!radios.length || radios.some(r => r.checked)) continue;
+        const question = groupText(radios);
+        const answer = answerFor(question);
+        if (!answer) continue;
+        let committed = false;
+        try {
+          if (typeof pjaSelectRadio === 'function') committed = !!pjaSelectRadio(radios, answer, '');
+        } catch (_) {}
+        if (!radios.some(r => r.checked)) {
+          const lv = answer.toLowerCase();
+          const target = radios.find(r => optionText(r).toLowerCase() === lv || String(r.value || '').toLowerCase() === lv)
+            || radios.find(r => optionText(r).toLowerCase().startsWith(lv))
+            || (/^yes/i.test(answer) ? radios[0] : radios[radios.length - 1]);
+          if (target) {
+            if (typeof pjaClickRadio === 'function') pjaClickRadio(target);
+            else { target.checked = true; target.dispatchEvent(new Event('input', { bubbles: true })); target.dispatchEvent(new Event('change', { bubbles: true })); target.click(); }
+          }
+        }
+        await sleep(120);
+        committed = radios.some(r => r.checked);
+        if (committed) repaired++;
+        await addDbg('[ashby-repair] phase=' + phase + ' question=' + question.slice(0, 70) + ' answer=' + answer + ' committed=' + committed);
+      }
+      return repaired;
     }
 
     // Some Greenhouse forms require a cover letter but initially expose only an "Enter manually"
@@ -3233,6 +3437,7 @@
       await withTimeout(pjaFillSmartRecruitersCustomFields(profile), 20000, 'sr-custom-precheck');
       await sleep(250);
     }
+    await withTimeout(repairAshbyRequiredFields('precheck'), 12000, 'ashby-repair-precheck');
     const srEmptyPrecheck = await recoverSmartRecruitersEmptyStep('precheck');
     if (srEmptyPrecheck === 'rerun') return runExternalApply(job, rawAnswers);
     if (srEmptyPrecheck === 'empty') {
@@ -3599,6 +3804,8 @@
       return;
     }
 
+    await withTimeout(repairAshbyRequiredFields('pre-submit'), 12000, 'ashby-repair-pre-submit');
+
     // Persist a PENDING submit before the click so a navigation can be recovered. Pending is
     // deliberately distinct from handled/applied: the destination page must still prove success.
     const preSubmitUrl = location.href;
@@ -3763,7 +3970,41 @@
         }).filter(Boolean);
         await addDbg('[submit-fail] errs(' + errEls.length + '): ' + errs.join(' | ') + ' | pathHint=' + location.pathname.slice(-24));
         const isWorkdayHost = /workday\.com|myworkdayjobs\.com/i.test(location.hostname);
-        const terminalHelpReason = reactSelectError && isWorkdayHost ? 'wd_selectinput_blocked' : 'submit_unclear';
+        const explicitRequiredError = errEls.some(el => /missing entry|required field|field.*required|value is required|needs corrections|please provide|select.+required/i.test(el.textContent || el.getAttribute('aria-label') || ''));
+        if (/ashbyhq\.com/i.test(location.hostname) && explicitRequiredError) {
+          const ashbyRepaired = await withTimeout(repairAshbyRequiredFields('post-submit:' + errs.join('|').slice(0, 80)), 12000, 'ashby-repair-post-submit');
+          if (ashbyRepaired) {
+            const submitAgainAshby = findButton(/submit.*application|submit.*app|apply now|send application|complete application|^submit$|^submit application$/i);
+            if (submitAgainAshby) {
+              await addDbg('[ashby-repair] retrying submit once after required-field repair n=' + ashbyRepaired);
+              try {
+                submitAgainAshby.scrollIntoView({ block: 'center', behavior: 'instant' });
+                const ar = submitAgainAshby.getBoundingClientRect();
+                const deliveredAshby = await new Promise(resolve => {
+                  try { chrome.runtime.sendMessage({ type: 'LINKEDIN_TRUSTED_CLICK', x: ar.left + ar.width / 2, y: ar.top + ar.height / 2 }, resp => resolve(!(chrome.runtime.lastError || resp?.error))); }
+                  catch (_) { resolve(false); }
+                });
+                if (!deliveredAshby) submitAgainAshby.click();
+              } catch (_) { try { submitAgainAshby.click(); } catch (_) {} }
+              await sleep(4500);
+              success = pjaIsSubmitSuccess({
+                text: document.body?.innerText || '',
+                title: document.title,
+                url: location.href,
+                preSubmitUrl,
+                hasSubmitButton: !!findButton(/submit.*application|submit.*app|apply now|send application|complete application|^submit$|^submit application$/i),
+                hasFormFields: pjaQueryAllExt('form input, form select, form textarea').some(el => el.type !== 'hidden'),
+              });
+              if (success) {
+                await addDbg('[ashby-repair] retry submit confirmed success');
+                await recordResult(job, { success: true, reason: 'applied' });
+                navigateBack(job);
+                return;
+              }
+            }
+          }
+        }
+        const terminalHelpReason = reactSelectError && isWorkdayHost ? 'wd_selectinput_blocked' : explicitRequiredError ? 'missing_required' : 'submit_unclear';
         const recoveryKey = 'pja_recovery_submit_' + (job.id || job.jobId || job.applyUrl || '');
         if (!success && !sessionStorage.getItem(recoveryKey)) {
           sessionStorage.setItem(recoveryKey, '1');
@@ -5433,7 +5674,7 @@
     if (/\bzip\b|zip ?code|postal code/.test(L)) return profile.zip || null;
     if (/\bcity\b (you|do you)[\s\S]{0,15}(live|reside)|what city|which city/.test(L)) return profile.city || null;
     if (/earliest[\s\S]{0,40}(available|availability|start)|when (?:can|could|will|would|are) you[\s\S]{0,35}(start|available)|available start date|start date/.test(L))
-      return profile.startDate || profile.availability || profile.noticePeriod || 'Available with 2 weeks notice';
+      return profile.startDate || profile.availability || profile.noticePeriod || null;
     if (/(country|territory).{0,40}phone.{0,20}code|phone.{0,20}(country|territory).{0,20}code|dial(?:ing|ling) code/.test(L)) return profile.phoneCountryCode || 'United States of America (+1)';
     if (/highest (level of )?education|level of education|education (level|completed)|education you have (completed|attained)/.test(L)) return profile.degree || profile.education || null;
     if (/discipline|field of study|\bmajor\b|area of study|concentration/.test(L)) return profile.major || null;
@@ -5738,10 +5979,14 @@
     if (!fields.length) return { applied: 0, asked: 0 };
     // Deterministic pre-pass: policy questions + profile fields (LinkedIn/location/website)
     // directly from truth — no AI flakiness, and covers TEXT fields (which the AI declined).
-    const detProfile = job.profile || {};
+    const detProfile = Object.assign({}, pjaRuntimeProfile || {}, job.profile || {});
+    const resolverContext = { profile: detProfile, answers: pjaRuntimeAnswers || {}, prefs: job.prefs || {} };
     let detApplied = 0;
     for (const f of fields) {
-      const ans = pjaDeterministicAnswer(f.label) || pjaProfileFieldForLabel(f.label, detProfile);
+      const resolved = typeof pjaResolveRequiredAnswer === 'function'
+        ? pjaResolveRequiredAnswer(f, resolverContext)
+        : null;
+      const ans = (resolved && resolved.answer) || pjaDeterministicAnswer(f.label) || pjaProfileFieldForLabel(f.label, detProfile);
       if (!ans) continue;
       try {
         // Greenhouse Location (City) is a Google-Places autocomplete: it's often collected as a
@@ -5765,6 +6010,8 @@
         }
         else continue;
         detApplied++;
+        await dbg('[resolve] ' + (resolved?.source || 'deterministic') + ' ' +
+          (resolved?.canonicalKey || '').slice(0, 40) + ' label=' + (f.label || '').slice(0, 36));
       } catch (_) {}
     }
     if (detApplied) {
@@ -5782,7 +6029,15 @@
     }
     if (!fields.length) return { applied: detApplied, asked: 0 };
     // checkboxgroup -> present to the AI as a 'select' so it sees the options and copies one exactly.
-    const questions = fields.map(f => ({ label: f.label, type: f.type === 'checkboxgroup' ? 'select' : f.type, options: f.options || [], maxLength: f.maxLength || 0 }));
+    const questions = fields.map(f => {
+      const unresolved = typeof pjaResolveRequiredAnswer === 'function'
+        ? pjaResolveRequiredAnswer(f, resolverContext)
+        : null;
+      return { label: f.label, type: f.type === 'checkboxgroup' ? 'select' : f.type, options: f.options || [], maxLength: f.maxLength || 0,
+        canonicalKey: unresolved && unresolved.canonicalKey || null,
+        sensitive: !!(unresolved && unresolved.sensitive),
+        ats: location.hostname };
+    });
     await dbg('[ai] asking ' + questions.length + ' req Q: ' + questions.map(q=>q.label.slice(0,22)).join(' | ').slice(0,150));
     const resp = await new Promise(resolve => {
       try {
@@ -5806,7 +6061,10 @@
       // the model sometimes returns a wrong value for a fixed-truth question (observed: it answered
       // "No" to "I have read and understand the Export Control statement", where the honest answer
       // is "Yes"). When a deterministic answer exists, use it and ignore the AI's for that field.
-      const det = pjaDeterministicAnswer(f.label) || pjaProfileFieldForLabel(f.label, detProfile);
+      const resolved = typeof pjaResolveRequiredAnswer === 'function'
+        ? pjaResolveRequiredAnswer(f, resolverContext)
+        : null;
+      const det = (resolved && resolved.answer) || pjaDeterministicAnswer(f.label) || pjaProfileFieldForLabel(f.label, detProfile);
       let ans = det || pjaAnswerValue(f.label, a);
       if (!ans) { low++; continue; }
       // Option-typed fields (select/combobox/radio) need the answer to MATCH an option. The AI
@@ -5871,8 +6129,17 @@
       }
       await sleep(400);
     }
+    const remainingAfterAi = collectRequiredEmptyFields(scope);
+    if (remainingAfterAi.length) {
+      await saveMissingQuestions(remainingAfterAi, job, {
+        phase: 'answerer_unresolved',
+        attemptedAnswers: answerCache,
+        resolverContext,
+      });
+      await dbg('[ai] unresolved=' + remainingAfterAi.map(f => (f.label || '').slice(0, 18)).join(' | ').slice(0, 120));
+    }
     await dbg('[ai] applied=' + applied + ' low=' + low + ' of ' + questions.length);
-    return { applied, asked: questions.length, low };
+    return { applied, asked: questions.length, low, unresolved: remainingAfterAi.length };
   }
 
   function getLabelFor(el) {
@@ -5897,18 +6164,68 @@
     return el.getAttribute('placeholder') || el.getAttribute('name') || el.getAttribute('aria-label') || '';
   }
 
-  async function saveMissingQuestions(missing, job) {
+  async function saveMissingQuestions(missing, job, meta = {}) {
     return new Promise(resolve => {
       chrome.storage.local.get('pja_missing_questions', data => {
         const store = data.pja_missing_questions || {};
         for (const f of missing) {
-          const key = f.label.toLowerCase().trim().replace(/\s+/g, ' ').slice(0, 100);
+          const normalizedLabel = typeof pjaNormalizeLabel === 'function'
+            ? pjaNormalizeLabel(f.label)
+            : String(f.label || '').toLowerCase().trim().replace(/\s+/g, ' ').slice(0, 100);
+          const resolved = typeof pjaResolveRequiredAnswer === 'function'
+            ? pjaResolveRequiredAnswer(f, meta.resolverContext || { profile: (job && job.profile) || pjaRuntimeProfile || {}, answers: pjaRuntimeAnswers || {} })
+            : null;
+          const key = normalizedLabel;
           if (!store[key]) {
-            store[key] = { question: f.label, type: f.type, options: f.options, answer: null, seenCount: 0, contexts: [] };
+            store[key] = {
+              question: f.label,
+              rawLabel: f.label,
+              normalizedLabel,
+              canonicalKey: resolved && resolved.canonicalKey || null,
+              ats: (job && (job.ats || job.strategy || job.channel)) || '',
+              type: f.type,
+              fieldType: f.type,
+              options: f.options || [],
+              answer: null,
+              proposedAnswer: null,
+              source: resolved && resolved.source || 'unresolved',
+              confidence: resolved && resolved.confidence || 'low',
+              sensitive: !!(resolved && resolved.sensitive),
+              status: 'needs_user',
+              seenCount: 0,
+              contexts: [],
+              examples: [],
+              diagnostics: [],
+            };
           }
           store[key].seenCount = (store[key].seenCount || 0) + 1;
-          const ctx = { jobId: job.jobId, company: job.company, title: job.title, url: location.href };
-          if (!store[key].contexts.find(c => c.jobId === job.jobId)) store[key].contexts.push(ctx);
+          store[key].rawLabel = store[key].rawLabel || f.label;
+          store[key].normalizedLabel = store[key].normalizedLabel || normalizedLabel;
+          store[key].canonicalKey = store[key].canonicalKey || (resolved && resolved.canonicalKey) || null;
+          store[key].ats = store[key].ats || (job && (job.ats || job.strategy || job.channel)) || '';
+          store[key].fieldType = store[key].fieldType || f.type;
+          store[key].source = resolved && resolved.source !== 'unresolved' ? resolved.source : (store[key].source || 'unresolved');
+          store[key].confidence = resolved && resolved.confidence || store[key].confidence || 'low';
+          store[key].sensitive = !!(store[key].sensitive || resolved && resolved.sensitive);
+          if (resolved && resolved.answer && !store[key].answer && !store[key].proposedAnswer) {
+            store[key].proposedAnswer = resolved.answer;
+            store[key].status = resolved.confidence === 'high' && !resolved.sensitive ? 'proposed' : 'needs_user';
+          }
+          const ctx = { jobId: job.jobId || job.id || '', runId: job.runId || '', company: job.company, title: job.title, url: location.href };
+          if (!store[key].contexts.find(c => (c.jobId || c.url) === (ctx.jobId || ctx.url))) store[key].contexts.push(ctx);
+          store[key].examples = store[key].contexts;
+          const attempted = meta.attemptedAnswers && meta.attemptedAnswers[String(f.label || '').toLowerCase().replace(/\s+/g, ' ').trim()];
+          const diag = {
+            ts: Date.now(),
+            phase: meta.phase || sessionStorage.getItem('pja_last_action') || '',
+            selector: f.el && (f.el.id ? ('#' + f.el.id) : (f.el.name ? ('[name="' + f.el.name + '"]') : f.el.tagName)) || '',
+            attemptedAnswer: attempted || null,
+            answerSource: resolved && resolved.source || 'unresolved',
+            commitVerified: false,
+            visibleError: '',
+          };
+          store[key].diagnostics = (Array.isArray(store[key].diagnostics) ? store[key].diagnostics : []).slice(-9);
+          store[key].diagnostics.push(diag);
         }
         chrome.storage.local.set({ pja_missing_questions: store }, resolve);
       });
@@ -6157,7 +6474,10 @@
     delete job._submitPending;
     delete job._preSubmitUrl;
     delete job._submitStartedAt;
-    await new Promise(resolve => chrome.storage.local.set({ pja_ext_current: job }, resolve));
+    await new Promise(resolve => chrome.storage.local.set({ pja_ext_current: job }, () => {
+      if (chrome.runtime.lastError) console.warn('PJA ext-apply: current result write failed', chrome.runtime.lastError.message);
+      resolve();
+    }));
 
     const alreadyApplied = /^already_applied\b/i.test(String(result.reason || ''));
     let terminalDiagnostic = null;
@@ -6221,9 +6541,9 @@
         if (!queue.results || Array.isArray(queue.results)) queue.results = { applied: [], skipped: [] };
         const r = queue.results;
         if (result.success) {
-          r.applied.push({ ...job, appliedAt: Date.now() });
+          r.applied.push({ ...pjaSanitizeResultJob(job), appliedAt: Date.now() });
         } else {
-          const skipped = { ...job, skipReason: result.fields?.slice(0, 3).join('; ') || result.reason };
+          const skipped = { ...pjaSanitizeResultJob(job), skipReason: result.fields?.slice(0, 3).join('; ') || result.reason };
           if (result.diagnostic) skipped.diagnostic = result.diagnostic;
           r.skipped.push(skipped);
         }
@@ -6232,6 +6552,10 @@
         if (queue.currentIndex >= queue.jobs.length) queue.status = 'done';
 
         chrome.storage.local.set({ pja_ext_queue: queue }, () => {
+          if (chrome.runtime.lastError) {
+            console.warn('PJA ext-apply: queue result write failed', chrome.runtime.lastError.message);
+            try { addDbg('[result] queue write failed: ' + chrome.runtime.lastError.message.slice(0, 120)); } catch (_) {}
+          }
           // Signal the global ranked dispatcher only after this one-job queue is durably finished;
           // otherwise its next queue could be overwritten by this callback.
           try { chrome.runtime.sendMessage({ type: 'APPLICATION_LEDGER_EVENT', event: ledgerEvent, closeTab: !!job.rankedRun }, () => void chrome.runtime.lastError); } catch (_) {}

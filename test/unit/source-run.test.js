@@ -46,6 +46,14 @@ module.exports = async (t) => {
   t.eq(report.modalityC.added, 1, 'source-run: one non-duplicate browser job added');
   t.eq(report.modalityC.enriched, 1, 'source-run: browser mirror enrichment reported');
   t.eq(report.modalityC.needsDescription, 1, 'source-run: descriptionless browser lead explicitly reported');
+  t.eq(report.modalityC.channelHydration.external.hydrated, 1,
+    'source-run: channel hydration counts hydrated external browser leads');
+  t.eq(report.modalityC.channelHydration.indeed_apply.missing, 1,
+    'source-run: channel hydration counts missing Indeed Apply descriptions');
+  t.eq(report.modalityC.hydrationStatuses.hydration_success, 1,
+    'source-run: browser hydration status totals include successes');
+  t.eq(report.modalityC.hydrationStatuses.hydration_missing_dom, 1,
+    'source-run: browser hydration status totals include DOM misses');
   const states = Object.values(store.state);
   t.eq(states.every(s => s.scoreKind === 'heuristic' && !!s.descriptionFingerprint), true,
     'source-run: source scores are marked heuristic with JD fingerprint');

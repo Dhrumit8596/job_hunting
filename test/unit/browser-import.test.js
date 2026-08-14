@@ -32,11 +32,14 @@ module.exports = (t) => {
   t.eq(li.listingUrl, li.applyUrl, 'browser-import: LinkedIn listing URL canonical');
   t.eq(li.description, 'Wafer inspection, defect detection, and SPC.', 'browser-import: HTML description cleaned');
   t.eq(li.descriptionStatus, 'full', 'browser-import: populated description marked full');
+  t.eq(li.hydrationStatus, 'hydration_success', 'browser-import: populated description marks hydration success');
+  t.eq(li.hydrationMethod, 'linkedin_detail_panel', 'browser-import: LinkedIn description defaults to detail-panel hydration');
   t.eq(li.pipelineStatus, 'score_pending', 'browser-import: hydrated browser job enters score_pending');
   t.eq(li.query, 'wafer inspection engineer', 'browser-import: query retained');
   t.eq(li.discoveredAt, 12345, 'browser-import: scrape time becomes discoveredAt');
   t.eq(li.sourceRefs.length, 1, 'browser-import: one provenance source ref');
   t.eq(li.sourceRefs[0].sourcePlatform, 'linkedin', 'browser-import: source ref platform');
+  t.eq(li.sourceRefs[0].hydrationStatus, 'hydration_success', 'browser-import: source ref carries hydration status');
   t.eq(li.provenance.modality, 'browser-linkedin', 'browser-import: modality retained in provenance');
 
   const longDescription = 'x'.repeat(20100);
@@ -59,12 +62,16 @@ module.exports = (t) => {
     applyUrl: 'https://www.indeed.com/viewjob?jk=abc-123&from=serp',
     title: 'Manufacturing Engineer', company: 'Medical Co', location: 'Irvine, CA',
     indeedApply: true, description: '', searchQuery: 'manufacturing engineer',
+    hydrationStatus: 'hydration_deferred_fast_scan', hydrationMethod: 'indeed_fast_card_scan',
+    hydrationReason: 'fast_scan_skipped_detail',
   });
   t.eq(indeed.id, 'abc-123', 'browser-import: Indeed stable job key');
   t.eq(indeed.channel, 'indeed_apply', 'browser-import: Indeed Apply channel');
   t.eq(indeed.listingUrl, 'https://www.indeed.com/viewjob?jk=abc-123', 'browser-import: Indeed canonical listing URL');
   t.eq(indeed.applyUrl, indeed.listingUrl, 'browser-import: Indeed Apply opens listing');
   t.eq(indeed.descriptionStatus, 'missing', 'browser-import: empty Indeed description marked missing');
+  t.eq(indeed.hydrationStatus, 'hydration_deferred_fast_scan', 'browser-import: explicit missing-description hydration status retained');
+  t.eq(indeed.hydrationReason, 'fast_scan_skipped_detail', 'browser-import: hydration reason retained for diagnostics');
   t.eq(indeed.pipelineStatus, 'needs_hydration', 'browser-import: card-only browser lead must hydrate before scoring');
   t.eq(indeed.indeedApply, true, 'browser-import: compatibility Indeed flag retained');
 

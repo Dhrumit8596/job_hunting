@@ -42,6 +42,10 @@ module.exports = (t) => {
     autoApplySource.includes("isWorkdayPhoneCode ? 'phoneCountryCode'") &&
     autoApplySource.includes("val = 'LinkedIn'"),
   'EA/shared fallback: Workday phone-code and referral-source comboboxes use site-specific safe keys');
+  t.ok(autoApplySource.includes('function pjaCloseOpenModalPopups') &&
+    autoApplySource.includes("key: 'Escape'") &&
+    autoApplySource.includes('pjaCloseOpenModalPopups();'),
+  'EA step clicks close open select/combobox popups before trusted Next/Review clicks');
 
   const w = load(MODAL_HTML);
 
@@ -88,6 +92,21 @@ module.exports = (t) => {
     'EA-state: generic Premium upsell is not submission confirmation');
   t.eq(w2.__pjaEasyApplyState(null).open, false, 'EA-state: no modal → not open');
 
+  // Current LinkedIn search results include “Easy Apply” inside cards before the selected-job
+  // detail action. The finder must ignore the badge/card control and return the detail action.
+  const wCurrent = load(`<!DOCTYPE html><html><body>
+    <div role="button" componentkey="job-card-component-ref-111"><span>Easy Apply</span></div>
+    <a id="detail-ea" aria-label="Easy Apply to this job"
+      href="https://www.linkedin.com/jobs/view/4429434522/apply/?openSDUIApplyFlow=true">Easy Apply</a>
+  </body></html>`);
+  t.eq(wCurrent.__pjaFindEasyApplyBtn()?.id, 'detail-ea',
+    'EA opener: card badge cannot shadow the selected-job Easy Apply action');
+  const wRole = load(`<!DOCTYPE html><html><body>
+    <div id="role-ea" role="button" aria-label="Easy Apply to this job"></div>
+  </body></html>`);
+  t.eq(wRole.__pjaFindEasyApplyBtn()?.id, 'role-ea',
+    'EA opener: aria-label-only role=button controls are supported');
+
   // --- button collector excludes PAGE-level buttons (dialog scoping) ---
   // Regression: scanning the whole shadow root pulled in LinkedIn's "Messaging" widget + a page
   // "Next", and clicking the wrong "Next" navigated the page → reload loop (open_loop_skip).
@@ -102,6 +121,26 @@ module.exports = (t) => {
   t.ok(pbtns.includes('Continue to next step'), 'EA: finds the in-dialog button');
   t.ok(!pbtns.includes('Messaging'), 'EA: excludes page-level Messaging button');
   t.ok(!pbtns.includes('Next'), 'EA: excludes page-level Next button (outside the dialog)');
+
+  // --- button collector excludes modal BODY widget buttons ---
+  // Regression from a real LinkedIn run: a date-picker/calendar rendered numeric day buttons
+  // before the footer Review button. Treating those as flow buttons caused repeated Review clicks
+  // on the same step and a final "stuck" failure.
+  const wCalendar = load(`<!DOCTYPE html><html><body>
+    <div class="jobs-easy-apply-modal" role="dialog"><h3>Additional Questions</h3>
+      <section>
+        <button>26</button><button>27</button><button>28</button><button>29</button>
+        <button>30</button><button>31</button><button>1</button><button>2</button>
+      </section>
+      <footer class="artdeco-modal__actionbar">
+        <button>Back</button>
+        <button>Review</button>
+      </footer>
+    </div>
+  </body></html>`);
+  const cbtns = wCalendar.__pjaModalBtns();
+  t.ok(cbtns.includes('Review'), 'EA: finds footer Review when body has numeric date buttons');
+  t.ok(!cbtns.some(b => /^\d+$/.test(b)), 'EA: excludes numeric body widget buttons from flow controls');
 
   // --- pjaFillForm scoped to the open EA modal (never fills LinkedIn's page search bar) ---
   // Regression: document-wide fill populated jobs-search-box-*, triggering a search that closed

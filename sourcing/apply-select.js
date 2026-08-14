@@ -12,9 +12,33 @@
   function norm(s) { return String(s == null ? '' : s).toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim(); }
   function roleKey(j) { return norm(j && j.company) + '::' + norm(j && j.title); }
 
+  // LinkedIn renders a selected job at several equivalent URLs. In particular, the current
+  // search UI keeps the job in `currentJobId` instead of navigating to `/jobs/view/:id`. Keep
+  // the ID extraction here with the other pure identity helpers so tab ownership, duplicate
+  // cleanup, and corpus de-duplication all agree on what constitutes the same posting.
+  function linkedinJobId(value) {
+    const raw = String(value == null ? '' : value).trim();
+    const rawMatch = raw.match(/^(?:linkedin:)?(\d{6,})$/i);
+    if (rawMatch) return rawMatch[1];
+    try {
+      const u = new URL(raw);
+      if (!/(^|\.)linkedin\.com$/i.test(u.hostname)) return '';
+      const selected = String(u.searchParams.get('currentJobId') || '').match(/^\d{6,}$/);
+      if (selected) return selected[0];
+      const view = u.pathname.match(/\/jobs\/view\/(?:[^/?]*?-)?(\d{6,})(?:\/|$)/i);
+      return view ? view[1] : '';
+    } catch (_) { return ''; }
+  }
+
   function applyUrlKey(value) {
     try {
       const u = new URL(String(value || '')); u.hash = '';
+      const linkedInId = linkedinJobId(u.href);
+      if (linkedInId) {
+        u.hostname = 'www.linkedin.com';
+        u.pathname = '/jobs/view/' + linkedInId;
+        u.search = '';
+      }
       for (const k of Array.from(u.searchParams.keys())) if (/^(utm_.+|trk|trackingId|ref|refId|source|src|campaign|from)$/i.test(k)) u.searchParams.delete(k);
       u.searchParams.sort();
       return u.hostname.toLowerCase() + u.pathname.replace(/\/+$/, '') + u.search;
@@ -132,6 +156,20 @@
     obj[key] = (obj[key] || 0) + 1;
   }
 
+  function minEvidenceForFitScore(score) {
+    const n = Number(score);
+    return Number.isFinite(n) && n >= 75 ? 3 : 2;
+  }
+
+  // Full corpus records carry the JD text; compact apply-planning projections deliberately carry
+  // only a readiness bit. Treat both representations identically so removing description payloads
+  // cannot change evidence gates or planning-drop diagnostics.
+  function hasUsableDescription(posting) {
+    if (!posting || /^(missing|stale|needs_description)$/i.test(String(posting.descriptionStatus || ''))) return false;
+    if (posting.descriptionReady === true) return true;
+    return !!String(posting.description || '').trim();
+  }
+
   function planDropReason(id, p, st, opts, context) {
     const threshold = opts.threshold != null ? opts.threshold : 70;
     const maxAttempts = opts.maxAttempts != null ? opts.maxAttempts : 3;
@@ -151,13 +189,13 @@
     if (!hasFit && !includeUnscored) return 'unscored';
     if (hasFit && Number(fit) < threshold) return 'below_threshold';
     if (requireEvidence) {
-      if (!p.description || /^(missing|stale|needs_description)$/i.test(String(p.descriptionStatus || ''))) return 'missing_description_evidence';
+      if (!hasUsableDescription(p)) return 'missing_description_evidence';
       if (Object.prototype.hasOwnProperty.call(opts, 'candidateFingerprint')
           && (!opts.candidateFingerprint || st.candidateFingerprint !== opts.candidateFingerprint)) return 'candidate_fingerprint_mismatch';
       const direct = Array.isArray(st.matchEvidence) ? st.matchEvidence.filter(Boolean) : [];
       const gaps = Array.isArray(st.gaps) ? st.gaps.filter(Boolean) : [];
       const conflicts = Array.isArray(st.conflicts) ? st.conflicts.filter(Boolean) : [];
-      if (direct.length < 3) return 'weak_match_evidence';
+      if (direct.length < minEvidenceForFitScore(fit)) return 'weak_match_evidence';
       if (gaps.length > maxGaps) return 'too_many_match_gaps';
       if (conflicts.length) return 'hard_match_conflict';
       if (!['high', 'medium'].includes(String(st.confidence || '').toLowerCase())) return 'low_score_confidence';
@@ -190,11 +228,11 @@
     const strategy = channel === 'linkedin_easy_apply' ? 'linkedin_ea'
       : channel === 'indeed_apply' ? 'indeed'
       : detectAts(p.applyUrl) || p.detectedAts || p.ats || '';
+    const aggregatorOnly = /(^|\.)(linkedin|indeed|glassdoor)\.com$/i.test(applyHost);
+    if (channel === 'external' && aggregatorOnly && !detectAts(p.applyUrl)) return 'aggregator_without_apply_destination';
     const capability = applyCapabilityStatus(p.applyUrl, strategy || 'generic');
     if (capability.status === 'unsupported') return capability.reason;
     if (capability.status === 'unknown_needs_resolution') return capability.reason;
-    const aggregatorOnly = /(^|\.)(linkedin|indeed|glassdoor)\.com$/i.test(applyHost);
-    if (channel === 'external' && aggregatorOnly && !p.detectedAts) return 'aggregator_without_apply_destination';
     if (atsAllow && !atsAllow.has(String(strategy).toLowerCase())) return 'ats_not_allowed';
     return 'eligible_not_selected';
   }
@@ -263,13 +301,13 @@
       if (!hasFit && !includeUnscored) continue;                    // not scored yet
       if (hasFit && Number(fit) < threshold) continue;              // below the match bar
       if (requireEvidence) {
-        if (!p.description || /^(missing|stale|needs_description)$/i.test(String(p.descriptionStatus || ''))) continue;
+        if (!hasUsableDescription(p)) continue;
         if (Object.prototype.hasOwnProperty.call(opts, 'candidateFingerprint')
             && (!opts.candidateFingerprint || st.candidateFingerprint !== opts.candidateFingerprint)) continue;
         const direct = Array.isArray(st.matchEvidence) ? st.matchEvidence.filter(Boolean) : [];
         const gaps = Array.isArray(st.gaps) ? st.gaps.filter(Boolean) : [];
         const conflicts = Array.isArray(st.conflicts) ? st.conflicts.filter(Boolean) : [];
-        if (direct.length < 3 || gaps.length > maxGaps || conflicts.length || !['high', 'medium'].includes(String(st.confidence || '').toLowerCase())) continue;
+        if (direct.length < minEvidenceForFitScore(fit) || gaps.length > maxGaps || conflicts.length || !['high', 'medium'].includes(String(st.confidence || '').toLowerCase())) continue;
       }
       const postingIds = new Set(recordIdentityIds({ ...p, id }));
       for (const ref of (p.sourceRefs || [])) {
@@ -295,12 +333,13 @@
       const strategy = channel === 'linkedin_easy_apply' ? 'linkedin_ea'
         : channel === 'indeed_apply' ? 'indeed'
         : detectAts(p.applyUrl) || p.detectedAts || p.ats || '';
+      // Browser aggregator listings whose external destination was not resolved are valid sourcing
+      // leads, but they are not safe autonomous-apply targets yet. Classify them before capability
+      // lookup so LinkedIn/Indeed/Glassdoor external rows are not mislabeled unknown handlers.
+      const aggregatorOnly = /(^|\.)(linkedin|indeed|glassdoor)\.com$/i.test(applyHost);
+      if (channel === 'external' && aggregatorOnly && !detectAts(p.applyUrl)) continue;
       const capability = applyCapabilityStatus(p.applyUrl, strategy || 'generic');
       if (capability.status === 'unsupported' || capability.status === 'unknown_needs_resolution') continue;
-      // Browser listings whose external destination was not resolved are valid sourcing leads,
-      // but they are not safe autonomous-apply targets yet.
-      const aggregatorOnly = /(^|\.)(linkedin|indeed|glassdoor)\.com$/i.test(applyHost);
-      if (channel === 'external' && aggregatorOnly && !p.detectedAts) continue;
       if (atsAllow && !atsAllow.has(String(strategy).toLowerCase())) continue; // outside the allow-list
       out.push({
         id, applyUrl: p.applyUrl, company: p.company, title: p.title, location: p.location,
@@ -313,9 +352,11 @@
         matchEvidence: st.matchEvidence || [], gaps: st.gaps || [], conflicts: st.conflicts || [],
         confidence: st.confidence || '', scoreKind: st.scoreKind || '',
         descriptionFingerprint: st.descriptionFingerprint || p.descriptionFingerprint || '',
+        postingDescriptionFingerprint: p.descriptionFingerprint || '',
         evidenceFingerprint: st.evidenceFingerprint || '',
         candidateFingerprint: st.candidateFingerprint || '',
         description: p.description || '', descriptionStatus: p.descriptionStatus || '',
+        descriptionReady: hasUsableDescription(p),
       });
     }
     out.sort((a, b) => (b.fitScore || 0) - (a.fitScore || 0));
@@ -422,9 +463,9 @@
     return counts;
   }
 
-  const API = { buildApplySet, buildApplyPlan, resultToState, poolStatus, roleKey, applyUrlKey, stableRecordId,
+  const API = { buildApplySet, buildApplyPlan, resultToState, poolStatus, roleKey, applyUrlKey, linkedinJobId, stableRecordId,
     recordIdentityIds, appliedIdentity, greenhouseEmbedFallback, exceededBudget, queueJobKey,
-    watchdogDecision, unsupportedAutonomousApplyReason, applyCapabilityStatus };
+    watchdogDecision, unsupportedAutonomousApplyReason, applyCapabilityStatus, hasUsableDescription };
   if (root) root.PJAApplySelect = API;
   if (typeof module !== 'undefined' && module.exports) module.exports = API;
 })(typeof self !== 'undefined' ? self : (typeof globalThis !== 'undefined' ? globalThis : this));
