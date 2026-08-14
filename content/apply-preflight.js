@@ -1,7 +1,8 @@
 'use strict';
 // Phase C (APPLY_ENGINE_PLAN.md): preflight + fill-verification decision logic. PURE and UMD so it's
-// unit-tested in Node and used in the content script (window.PJAPreflight). No DOM here — the caller
-// reads signals off the page and passes them in; this only decides.
+// unit-tested in Node and loaded as window.PJAPreflight. It is currently a shadow migration seam:
+// production external-apply has equivalent inline decisions but does not call this API yet. No DOM
+// here — a future caller reads signals off the page and passes them in; this only decides.
 //
 // Two jobs:
 //  1) preflight: before spending time filling, classify the page → proceed / skip-with-reason.

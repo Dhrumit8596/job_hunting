@@ -3,7 +3,8 @@
 // Load the IndexedDB corpus + apply-selection modules into the SW global scope. Wrapped so a load
 // failure can never brick the whole service worker. Order matters: apply-select needs detect-ats.
 try {
-  importScripts('idb-store.js', 'sourcing/detect-ats.js', 'sourcing/apply-select.js', 'content/apply-router.js', 'application-ledger.js');
+  importScripts('cdp-selfheal.js', 'idb-store.js', 'sourcing/detect-ats.js', 'sourcing/apply-select.js',
+    'content/apply-router.js', 'application-ledger.js');
 } catch (e) { console.error('PJA: module load failed', e); }
 
 // ── Dev mode ──────────────────────────────────────────────────────────────────
@@ -3018,20 +3019,16 @@ async function cdpEnterKey(tabId) {
 
 // ── Message handler ────────────────────────────────────────────────────────
 // ── P1c CDP self-heal ladder (extension side) ──────────────────────────────
-// Mirrors the unit-tested cdp-selfheal.js policy. external-apply reports each apply
+// Uses the unit-tested cdp-selfheal.js policy. external-apply reports each apply
 // outcome; on K consecutive fill-but-no-submit-with-react-select-error (degraded CDP),
 // escalate: reattach debugger → reload extension → dev-server /restart-chrome (with a
 // notify + ~15s cancelable countdown). A real submit resets the ladder.
-let _selfHeal = { consecutiveDegraded: 0, rungIndex: 0 };
-const SELFHEAL_RUNGS = ['none', 'reattach', 'reload', 'restart'];
-function _isDegraded(o) { return !!(o && o.filled && !o.submitted && o.reactSelectError); }
+let _selfHeal = self.PJACdpSelfHeal ? self.PJACdpSelfHeal.initState() : { consecutiveDegraded: 0, rungIndex: 0, lastAction: 'none' };
 function _nextSelfHeal(o, threshold) {
-  threshold = threshold || 2;
-  if (!_isDegraded(o)) { if (o && o.submitted) _selfHeal = { consecutiveDegraded: 0, rungIndex: 0 }; return 'none'; }
-  _selfHeal.consecutiveDegraded += 1;
-  if (_selfHeal.consecutiveDegraded < threshold) return 'none';
-  _selfHeal.rungIndex = Math.min(_selfHeal.rungIndex + 1, SELFHEAL_RUNGS.length - 1);
-  return SELFHEAL_RUNGS[_selfHeal.rungIndex];
+  if (!self.PJACdpSelfHeal) return 'none';
+  const decision = self.PJACdpSelfHeal.nextSelfHeal(_selfHeal, o, { threshold: threshold || 2 });
+  _selfHeal = decision.state;
+  return decision.action;
 }
 async function _selfHealRestart(applyUrl) {
   await chrome.storage.local.set({ pja_restart_pending: true, pja_cancel_restart: false });

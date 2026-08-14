@@ -3,6 +3,9 @@
 const { spawn } = require('child_process');
 
 const SUPPORTED_ENGINES = new Set(['claude', 'codex']);
+const DEFAULT_CODEX_MODEL = 'gpt-5.6-luna';
+const DEFAULT_CODEX_REASONING_EFFORT = 'low';
+const CODEX_REASONING_EFFORTS = new Set(['low', 'medium', 'high', 'xhigh', 'max']);
 
 function normalizeEnginePreference(value) {
   const engine = String(value || '').trim().toLowerCase();
@@ -22,11 +25,30 @@ function parseEngine(argv = process.argv.slice(2), env = process.env) {
   return engine;
 }
 
-function commandFor(engine, systemPrompt) {
+function codexModel(env = process.env) {
+  const value = String(env.PJA_CODEX_MODEL || DEFAULT_CODEX_MODEL).trim();
+  return /^(default|auto)$/i.test(value) ? '' : value;
+}
+
+function codexReasoningEffort(env = process.env) {
+  const value = String(env.PJA_CODEX_REASONING_EFFORT || DEFAULT_CODEX_REASONING_EFFORT).trim().toLowerCase();
+  if (!CODEX_REASONING_EFFORTS.has(value)) {
+    throw new Error(`Unsupported PJA_CODEX_REASONING_EFFORT "${value}"`);
+  }
+  return value;
+}
+
+function commandFor(engine, systemPrompt, env = process.env) {
   if (engine === 'codex') {
+    const model = codexModel(env);
+    const args = ['exec', '--json', '--ephemeral', '--ignore-user-config'];
+    if (model) args.push('--model', model);
+    args.push('--config', `model_reasoning_effort="${codexReasoningEffort(env)}"`,
+      '--config', 'project_doc_max_bytes=0',
+      '--sandbox', 'read-only', '--skip-git-repo-check', '-');
     return {
       command: 'codex',
-      args: ['exec', '--json', '--ephemeral', '--ignore-user-config', '--sandbox', 'read-only', '--skip-git-repo-check', '-'],
+      args,
       inputPrefix: `Follow these instructions as the system-level task for this request:\n\n${systemPrompt}\n\nUser request:\n`
     };
   }
@@ -63,7 +85,7 @@ function parseOutput(engine, stdout) {
 }
 
 function runAiCli({ engine, systemPrompt, userPrompt, timeoutMs = 90000, env = process.env, spawnImpl = spawn }) {
-  const spec = commandFor(engine, systemPrompt);
+  const spec = commandFor(engine, systemPrompt, env);
   return new Promise((resolve, reject) => {
     const child = spawnImpl(spec.command, spec.args, { env });
     let stdout = '';
@@ -97,4 +119,6 @@ function runAiCli({ engine, systemPrompt, userPrompt, timeoutMs = 90000, env = p
   });
 }
 
-module.exports = { SUPPORTED_ENGINES, normalizeEnginePreference, parseEngine, commandFor, parseCodexJsonl, parseOutput, runAiCli };
+module.exports = { SUPPORTED_ENGINES, DEFAULT_CODEX_MODEL, DEFAULT_CODEX_REASONING_EFFORT,
+  normalizeEnginePreference, parseEngine, codexModel, codexReasoningEffort,
+  commandFor, parseCodexJsonl, parseOutput, runAiCli };

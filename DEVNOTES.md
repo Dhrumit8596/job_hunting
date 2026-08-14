@@ -1,5 +1,8 @@
 # Dev Workflow — Job Application Assistant
 
+Current runtime diagrams and module connectivity live in `ARCHITECTURE.md`. For a compact task map,
+run `npm run context -- <scope>` before opening the large integration files.
+
 This file is for developers working on the unpacked Chrome extension.
 
 ## Dev server
@@ -56,6 +59,9 @@ or:
 ```json
 {"ok":true,"engine":"claude-cli","clients":1}
 ```
+
+Additional `aiConfig` fields show the effective Codex model/reasoning setting (or Claude model), so
+a session can verify it is not accidentally using a heavy scorer.
 
 If `clients` is `0`, open `chrome://extensions`, enable Developer mode, reload the unpacked extension, and refresh a supported page.
 

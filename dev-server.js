@@ -23,7 +23,8 @@ const crypto = require('crypto');
 const { WebSocketServer } = require('ws');
 const { exec, spawnSync } = require('child_process');
 const { buildRestartPlan } = require('./chrome-restart');
-const { normalizeEnginePreference, parseEngine, runAiCli } = require('./ai-cli');
+const { normalizeEnginePreference, parseEngine, codexModel, codexReasoningEffort, runAiCli } = require('./ai-cli');
+const { scoringExcerpt } = require('./scoring-context');
 
 const PORT = Number(process.env.PJA_DEV_PORT || 6174);
 if (!Number.isInteger(PORT) || PORT < 1 || PORT > 65535) throw new Error('PJA_DEV_PORT must be a valid TCP port');
@@ -1474,12 +1475,6 @@ most 25 with low confidence until a local candidate profile is configured.
 
 Return ONLY a JSON array. Each item must be {"id":"...","score":0-100,"matchEvidence":[at least 0 concise resume-to-requirement matches],"gaps":[required qualifications not evidenced],"conflicts":[hard conflicts],"confidence":"high|medium|low"}. Evidence must be supported by both the posting text and resume facts. Do not count hedged or potential matches as evidence. If posting requirements are missing, confidence must be low. No markdown.`;
 
-function scoringExcerpt(description) {
-  const text = String(description || '');
-  if (text.length <= 12000) return text;
-  return text.slice(0, 7000) + '\n[... middle omitted ...]\n' + text.slice(-5000);
-}
-
 async function scoreJobChunk(batch) {
   const jobList = batch.map((j, i) => `Job ${i + 1}: id=${JSON.stringify(j.id)}\nTitle: ${j.title}\nCompany: ${j.company}\nLocation: ${j.location}\nPosting: ${scoringExcerpt(j.description)}`).join('\n---\n');
   const prompt = `Score each job using only the resume facts and posting text. A score of 75+ requires at least three direct requirement matches, no hard conflict, realistic seniority, and medium/high confidence.\n\nJobs:\n${jobList}`;
@@ -1641,12 +1636,16 @@ async function handleRequest(req, res) {
 
   if (req.method === 'GET' && req.url === '/health') {
     const effective = await resolveEffectiveAiEngine({ force: true });
+    const aiConfig = effective.engine === 'codex'
+      ? { model: codexModel(), reasoningEffort: codexReasoningEffort() }
+      : { model: 'haiku', reasoningEffort: null };
     res.writeHead(200, CORS);
     res.end(JSON.stringify({
       ok: true,
       engine: `${effective.engine}-cli`,
       engineSource: effective.source,
       processEngine: `${PROCESS_AI_ENGINE}-cli`,
+      aiConfig,
       clients: wsClients.size
     }));
     return;
@@ -3529,6 +3528,9 @@ wss.on('connection', ws => {
 server.listen(PORT, '127.0.0.1', () => {
   console.log(`\n🔬 PJA dev server  →  http://localhost:${PORT}`);
   console.log(`   Engine default    : ${PROCESS_AI_ENGINE} CLI (profile/prefs may override)`);
+  if (PROCESS_AI_ENGINE === 'codex') {
+    console.log(`   Codex scoring     : ${codexModel() || 'configured default'} / ${codexReasoningEffort()} reasoning`);
+  }
   console.log(`   Hot-reload        : curl -X POST http://localhost:${PORT}/reload`);
   console.log(`   Stop              : Ctrl+C\n`);
 });

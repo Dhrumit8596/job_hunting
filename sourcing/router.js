@@ -1,10 +1,11 @@
 'use strict';
-// Channel-router for the unified auto-apply run. From a fit-scored job pool it:
+// LEGACY / TEST-ONLY. The current one-click flow uses apply-select.js for corpus eligibility and
+// content/apply-router.js for executable handler routing. Do not add production policy here.
+// This earlier channel-router takes a fit-scored job pool and:
 //   1. dedupes against everything already applied (both channels) via pja_applied_log + jobId,
 //   2. filters to genuine-fit roles (>= threshold), drops excluded + export-controlled companies,
 //   3. splits the survivors into Easy Apply vs External (ATS) queues, highest-fit first.
-// Pure + synchronous so it can be unit-tested without a browser. The orchestrator feeds `ea`
-// to the backend EA mode (/start-ea) and `external` to external-apply (pja_ext_queue).
+// Pure + synchronous so its historical behavior remains regression-tested without a browser.
 const { jobKey, appliedKeySet, pjaCollectAppliedRecords } = require('./dedupe');
 const { isExportControlledCompany } = require('./filter');
 

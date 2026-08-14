@@ -1,6 +1,7 @@
 'use strict';
 // Tests for the P1c self-heal escalation policy (pure decision logic).
 const path = require('path');
+const fs = require('fs');
 const { initState, isDegradedOutcome, nextSelfHeal } = require(path.resolve(__dirname, '../../cdp-selfheal'));
 
 module.exports = (t) => {
@@ -44,4 +45,8 @@ module.exports = (t) => {
   t.eq(s.consecutiveDegraded, 1, 'skip: does not increment degraded streak');
   r = nextSelfHeal(s, DEGRADED, { threshold: 2 });          // streak 2 → heal
   t.eq(r.action, 'reattach', 'skip: streak resumes → reattach on next degraded');
+
+  const background = fs.readFileSync(path.resolve(__dirname, '../../background.js'), 'utf8');
+  t.ok(background.includes("'cdp-selfheal.js'") && background.includes('self.PJACdpSelfHeal.nextSelfHeal'),
+    'self-heal: service worker loads and uses the unit-tested policy');
 };

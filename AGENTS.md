@@ -2,6 +2,10 @@
 
 This file provides guidance to Codex (Codex.ai/code) when working with code in this repository.
 
+Start with `PROJECT_GOAL.md` and `ARCHITECTURE.md`, then run
+`npm run context -- <overview|apply|sourcing|ai|storage|logs|ui>` to avoid loading unrelated large
+files. See `AI_DEVELOPMENT.md` for the bounded workflow and `OBSERVABILITY.md` for failure contracts.
+
 > **Naming:** the `pja_` / `PJA` prefix used throughout (storage keys, function names) is an
 > opaque internal namespace for this extension — it is **not** a person's name. Do **not**
 > rename `pja_*` storage keys or function prefixes: existing installs hold data under those

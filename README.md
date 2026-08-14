@@ -2,6 +2,12 @@
 
 A Chrome MV3 extension for job searching, job-fit scoring, profile-based form filling, and application tracking.
 
+For new coding sessions, read [PROJECT_GOAL.md](PROJECT_GOAL.md) and
+[ARCHITECTURE.md](ARCHITECTURE.md), then run `npm run context -- <scope>`. The focused workflow is in
+[AI_DEVELOPMENT.md](AI_DEVELOPMENT.md); failure evidence and retesting are in
+[OBSERVABILITY.md](OBSERVABILITY.md). Copy-paste operational, triage, fix, and improvement prompts
+are in [PROMPT_PLAYBOOK.md](PROMPT_PLAYBOOK.md).
+
 The extension is meant to be reusable for any user/profile. The repository should not contain real resume data, personal profile data, passwords, one-time codes, or browser session data. Real user data lives locally in that user's Chrome profile via `chrome.storage.local`.
 
 ## Fastest setup: ask your AI CLI to do it
@@ -11,7 +17,7 @@ If you are giving this repo to someone who uses Claude Code or Codex, they can p
 Claude CLI prompt:
 
 ```text
-I cloned this repo. Read README.md, CLAUDE.md, package.json, and DEVNOTES.md. Set up everything needed to run it locally with Claude CLI. Install npm dependencies, run tests, start the dev server in Claude mode, verify /health, and tell me the exact Chrome extension loading steps I need to do manually. Do not put any personal profile data, resume, password, API key, Gmail content, or one-time code into git.
+I cloned this repo. Read CLAUDE.md, PROJECT_GOAL.md, ARCHITECTURE.md, and DEVNOTES.md, then run `npm run context`. Set up everything needed to run it locally with Claude CLI. Install npm dependencies, run tests, start the dev server in Claude mode, verify /health, and tell me the exact Chrome extension loading steps I need to do manually. Do not put any personal profile data, resume, password, API key, Gmail content, or one-time code into git.
 ```
 
 Optional hands-off Claude mode, for a trusted disposable clone only:
@@ -25,7 +31,7 @@ Some Claude CLI installs may expose this as `claude-cli --dangerously-skip-permi
 Codex CLI prompt:
 
 ```text
-I cloned this repo. Read README.md, AGENTS.md, package.json, and DEVNOTES.md. Set up everything needed to run it locally with Codex CLI. Install npm dependencies, run tests, start the dev server in Codex mode, verify /health, and tell me the exact Chrome extension loading steps I need to do manually. Do not put any personal profile data, resume, password, API key, Gmail content, or one-time code into git.
+I cloned this repo. Read AGENTS.md, PROJECT_GOAL.md, ARCHITECTURE.md, and DEVNOTES.md, then run `npm run context`. Set up everything needed to run it locally with Codex CLI. Install npm dependencies, run tests, start the dev server in Codex mode, verify /health, and tell me the exact Chrome extension loading steps I need to do manually. Do not put any personal profile data, resume, password, API key, Gmail content, or one-time code into git.
 ```
 
 After the AI assistant finishes, the user usually still needs to do the Chrome UI step:
@@ -123,6 +129,15 @@ Equivalent environment-variable form:
 ```bash
 PJA_AI_ENGINE=codex node dev-server.js
 ```
+
+Codex scoring uses a lightweight structured-task default (`gpt-5.6-luna`, low reasoning). Override
+it when needed:
+
+```bash
+PJA_CODEX_MODEL=gpt-5.6-terra PJA_CODEX_REASONING_EFFORT=medium npm run start:codex
+```
+
+Use `PJA_CODEX_MODEL=default` to let Codex choose its configured default.
 
 Check that the server is alive:
 

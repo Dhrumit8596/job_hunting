@@ -8,6 +8,7 @@
 // react-select (country/education/policy) never commits — i.e. trusted CDP events aren't landing.
 // One such failure can be a hard form; K CONSECUTIVE ones mean CDP itself is degraded.
 
+(function (root) {
 const RUNGS = ['none', 'reattach', 'reload', 'restart'];
 
 function initState() {
@@ -44,4 +45,7 @@ function nextSelfHeal(prev, outcome, opts = {}) {
   return { state, action: state.lastAction };
 }
 
-module.exports = { initState, isDegradedOutcome, nextSelfHeal, RUNGS };
+const API = { initState, isDegradedOutcome, nextSelfHeal, RUNGS };
+if (root) root.PJACdpSelfHeal = API;
+if (typeof module !== 'undefined' && module.exports) module.exports = API;
+})(typeof self !== 'undefined' ? self : (typeof globalThis !== 'undefined' ? globalThis : this));

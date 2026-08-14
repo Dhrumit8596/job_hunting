@@ -7,8 +7,10 @@
   },
   "scripts": {
     "test": "node test/check-syntax.js && node test/privacy-scan.js && node test/unit/run.js",
+    "test:unit": "node test/unit/run.js",
     "start": "node dev-server.js",
     "start:codex": "node dev-server.js --engine codex",
+    "context": "node scripts/ai-context.js",
     "apply:all": "node scripts/pja-apply-all.js",
     "apply:all:dry-run": "node scripts/pja-apply-all.js --dry-run",
     "apply:status": "node scripts/pja-apply-all.js status",
@@ -19,7 +21,7 @@
   "keywords": [],
   "author": "",
   "license": "ISC",
-  "description": "",
+  "description": "Profile-driven Chrome extension for sourcing, ranking, and applying to jobs through one unified flow",
   "dependencies": {
     "ws": "^8.21.0"
   },

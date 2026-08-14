@@ -1,5 +1,9 @@
 # CLAUDE.md
 
+Start with `PROJECT_GOAL.md` and `ARCHITECTURE.md`, then run
+`npm run context -- <overview|apply|sourcing|ai|storage|logs|ui>` to avoid loading unrelated large
+files. See `AI_DEVELOPMENT.md` for the bounded workflow and `OBSERVABILITY.md` for failure contracts.
+
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
 > **Naming:** the `pja_` / `PJA` prefix used throughout (storage keys, function names) is an
