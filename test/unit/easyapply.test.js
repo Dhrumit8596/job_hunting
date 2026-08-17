@@ -122,6 +122,37 @@ module.exports = (t) => {
   t.ok(!pbtns.includes('Messaging'), 'EA: excludes page-level Messaging button');
   t.ok(!pbtns.includes('Next'), 'EA: excludes page-level Next button (outside the dialog)');
 
+  // LinkedIn can reuse the same heading for distinct pages. Stuck detection must follow a
+  // value-free step fingerprint, not the heading, while ignoring changes to entered values.
+  const wRepeat = load(`<!DOCTYPE html><html><body>
+    <div class="jobs-easy-apply-modal" role="dialog"><h3>Contact info</h3>
+      <div role="progressbar" aria-valuenow="25"></div>
+      <label for="email-step">Email address</label><select id="email-step" required><option>One</option></select>
+      <footer><button>Next</button></footer>
+    </div>
+  </body></html>`);
+  const firstContactFingerprint = wRepeat.__pjaEasyApplyStepFingerprint();
+  wRepeat.document.querySelector('select').value = 'One';
+  t.eq(wRepeat.__pjaEasyApplyStepFingerprint(), firstContactFingerprint,
+    'EA: step fingerprint excludes entered values');
+  const repeatedDialog = wRepeat.document.querySelector('.jobs-easy-apply-modal');
+  repeatedDialog.innerHTML = `<h3>Contact info</h3>
+    <div role="progressbar" aria-valuenow="50"></div>
+    <label for="phone-step">Mobile phone number</label><input id="phone-step" type="tel" required>
+    <footer><button>Next</button></footer>`;
+  t.ok(wRepeat.__pjaEasyApplyStepFingerprint() !== firstContactFingerprint,
+    'EA: repeated Contact info heading with different progress/fields is a new step');
+  repeatedDialog.innerHTML = `<h3>Additional Questions</h3>
+    <label for="years-step">Years of experience</label><input id="years-step" type="text" required>
+    <footer><button>Next</button></footer>`;
+  const firstQuestionsFingerprint = wRepeat.__pjaEasyApplyStepFingerprint();
+  repeatedDialog.innerHTML = `<h3>Additional Questions</h3>
+    <fieldset><legend>Are you authorized to work?</legend>
+      <label><input type="radio" name="auth" required>Yes</label>
+    </fieldset><footer><button>Next</button></footer>`;
+  t.ok(wRepeat.__pjaEasyApplyStepFingerprint() !== firstQuestionsFingerprint,
+    'EA: repeated Additional Questions heading with different controls is a new step');
+
   // --- button collector excludes modal BODY widget buttons ---
   // Regression from a real LinkedIn run: a date-picker/calendar rendered numeric day buttons
   // before the footer Review button. Treating those as flow buttons caused repeated Review clicks

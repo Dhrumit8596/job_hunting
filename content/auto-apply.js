@@ -141,6 +141,50 @@ function pjaModalBtns() {
   return out;
 }
 
+// LinkedIn reuses broad headings such as "Contact info" and "Additional Questions" across
+// distinct pages. A heading alone is therefore not a step identity. Build a bounded, value-free
+// fingerprint from progress metadata and visible control labels; user-entered values are excluded.
+function pjaEasyApplyStepFingerprint() {
+  const modal = pjaGetCurrentModal();
+  if (!modal?.root) return '';
+  const root = modal.root;
+  const clean = value => String(value || '').replace(/\s+/g, ' ').trim().toLowerCase().slice(0, 160);
+  const visible = el => {
+    try {
+      const rect = el.getBoundingClientRect?.();
+      return !rect || rect.width > 0 || rect.height > 0 || !!el.offsetParent;
+    } catch (_) { return true; }
+  };
+  const labelFor = el => {
+    try {
+      const label = (typeof window.pjaGetLabel === 'function' ? window.pjaGetLabel(el) : '') ||
+        (el.id ? root.querySelector(`label[for="${CSS.escape(el.id)}"]`)?.textContent : '') ||
+        el.getAttribute?.('aria-label') || el.getAttribute?.('data-test-text-entity-list-form-component') ||
+        el.getAttribute?.('name') || el.id || '';
+      return clean(label);
+    } catch (_) { return ''; }
+  };
+  const progress = Array.from(root.querySelectorAll(
+    '[role="progressbar"], [aria-valuenow], .artdeco-completeness-meter-linear__progress-element, [class*="progress"]'
+  )).filter(visible).slice(0, 6).map(el => [
+    clean(el.getAttribute?.('aria-valuenow')),
+    clean(el.getAttribute?.('aria-valuetext')),
+    clean(el.textContent),
+  ].filter(Boolean).join(':')).filter(Boolean);
+  const legends = Array.from(root.querySelectorAll('legend')).filter(visible)
+    .slice(0, 12).map(el => clean(el.textContent)).filter(Boolean);
+  const controls = Array.from(root.querySelectorAll(
+    'input:not([type="hidden"]), select, textarea, [role="combobox"], [contenteditable="true"]'
+  )).filter(visible).slice(0, 40).map(el => [
+    clean(el.tagName),
+    clean(el.getAttribute?.('type') || el.getAttribute?.('role')),
+    el.required || el.getAttribute?.('aria-required') === 'true' ? 'required' : 'optional',
+    labelFor(el),
+  ].join(':'));
+  return [clean(pjaModalHeading()), `progress=${progress.join(',')}`, `legends=${legends.join(',')}`,
+    `controls=${controls.join(',')}`, `actions=${pjaModalBtns().map(clean).join(',')}`].join('|').slice(0, 2400);
+}
+
 // Classify the current Easy Apply modal state — used for mid-refresh resilience: if LinkedIn
 // reloads mid-flow and the modal comes back showing a post-submit confirmation, we must record
 // success and NOT click Submit again (double-submit guard). Pure-ish (reads the given modal root).
@@ -798,8 +842,8 @@ async function pjaAutoApplyOne(job, profile, answers, onStatus) {
 
   // Step through the modal
   const MAX_STEPS = 15;
-  let prevHeading = null;
-  let sameHeadingCount = 0;
+  let prevStepFingerprint = null;
+  let sameStepCount = 0;
 
   for (let step = 0; step < MAX_STEPS; step++) {
     if (PJA_AUTO_STATE.aborted) return { success: false, reason: 'aborted' };
@@ -814,10 +858,11 @@ async function pjaAutoApplyOne(job, profile, answers, onStatus) {
     const heading = pjaModalHeading() || `Step ${step + 1}`;
     onStatus(`${title}: ${heading}…`);
 
-    // Detect stuck (same heading after trying to advance)
-    if (heading === prevHeading) {
-      sameHeadingCount++;
-      if (sameHeadingCount >= 2) {
+    // Detect stuck only when the same value-free step identity remains after advance attempts.
+    const stepFingerprint = pjaEasyApplyStepFingerprint();
+    if (stepFingerprint && stepFingerprint === prevStepFingerprint) {
+      sameStepCount++;
+      if (sameStepCount >= 2) {
         const emptyFields = pjaEmptyRequiredFields();
         pjaDismissModal();
         return {
@@ -828,9 +873,9 @@ async function pjaAutoApplyOne(job, profile, answers, onStatus) {
         };
       }
     } else {
-      sameHeadingCount = 0;
+      sameStepCount = 0;
     }
-    prevHeading = heading;
+    prevStepFingerprint = stepFingerprint;
 
     // Skip resume step — just click Next
     const isResumeStep = /resume/i.test(heading);
@@ -1195,8 +1240,8 @@ async function pjaApplyOnCurrentPage(job, profile, answers, onStatus) {
   }
 
   const MAX_STEPS = 15;
-  let prevHeading = null;
-  let sameHeadingCount = 0;
+  let prevStepFingerprint = null;
+  let sameStepCount = 0;
 
   for (let step = 0; step < MAX_STEPS; step++) {
     if (PJA_AUTO_STATE.aborted) return { success: false, reason: 'aborted' };
@@ -1213,18 +1258,20 @@ async function pjaApplyOnCurrentPage(job, profile, answers, onStatus) {
     pjaTrace('step' + step + ' heading=' + heading.slice(0, 25));
     onStatus(`${title}: ${heading}…`);
 
-    if (heading === prevHeading) {
-      sameHeadingCount++;
-      if (sameHeadingCount >= 2) {
+    const stepFingerprint = pjaEasyApplyStepFingerprint();
+    if (stepFingerprint && stepFingerprint === prevStepFingerprint) {
+      sameStepCount++;
+      if (sameStepCount >= 2) {
         const emptyFields = pjaEmptyRequiredFields();
-        await pjaRecordEasyApplyStepDiagnostics('same-heading-stuck', heading, { sameHeadingCount });
+        await pjaRecordEasyApplyStepDiagnostics('same-step-stuck', heading,
+          { sameStepCount, stepFingerprint: stepFingerprint.slice(0, 1200) });
         pjaDismissModal();
         return { success: false, reason: 'stuck', heading, fields: emptyFields };
       }
     } else {
-      sameHeadingCount = 0;
+      sameStepCount = 0;
     }
-    prevHeading = heading;
+    prevStepFingerprint = stepFingerprint;
 
     const isResumeStep = /resume/i.test(heading);
     if (!isResumeStep) {
@@ -1447,6 +1494,7 @@ window.__pjaExternalApplyOnCurrentPage = pjaExternalApplyOnCurrentPage;
 // Testable Easy Apply modal helpers (used by unit tests + internally).
 window.__pjaModalHeading               = pjaModalHeading;
 window.__pjaModalBtns                  = pjaModalBtns;
+window.__pjaEasyApplyStepFingerprint   = pjaEasyApplyStepFingerprint;
 window.__pjaFillRequiredRadioFallback  = pjaFillRequiredRadioFallback;
 window.__pjaAutoCheckConsent           = pjaAutoCheckConsent;
 window.__pjaSelfIdPick                 = pjaSelfIdPick;

@@ -28,6 +28,7 @@ const { scoringExcerpt } = require('./scoring-context');
 const ApplyProgress = require('./apply-progress');
 const ApplyRunControl = require('./apply-run-control');
 const LocalJsonClient = require('./local-json-client');
+const ScoringFrontier = require('./scoring-frontier');
 const { decideRecovery } = require('./apply-recovery-policy');
 
 const PORT = Number(process.env.PJA_DEV_PORT || 6174);
@@ -3084,18 +3085,11 @@ ${(description || '').slice(0, 6000)}`;
             return hydrated;
           });
           jobs.sort((a, b) => (Number(b.fitScore) || 0) - (Number(a.fitScore) || 0));
-          if (scoreCandidateLimit > 0 && jobs.length > scoreCandidateLimit) {
-            for (const j of jobs.slice(scoreCandidateLimit)) {
-              planningDrops = appendPlanningDrop(planningDrops, j, 'rescore_candidate_limit', planningDropLimit);
-            }
-            jobs = jobs.slice(0, scoreCandidateLimit);
-          }
-          const reusable = [], needsScore = [];
-          for (const j of jobs) {
-            const fp = j.postingDescriptionFingerprint || j.descriptionFingerprint || '';
-            if (j.scoreKind === 'llm' && j.fitScore != null && fp && j.descriptionFingerprint === fp &&
-                j.candidateFingerprint === runtimeCandidateFingerprint) reusable.push(j);
-            else needsScore.push(j);
+          const frontier = ScoringFrontier.partition(jobs,
+            { limit: scoreCandidateLimit, candidateFingerprint: runtimeCandidateFingerprint });
+          const { reusable, needsScore } = frontier;
+          for (const j of frontier.deferred) {
+            planningDrops = appendPlanningDrop(planningDrops, j, 'rescore_candidate_limit', planningDropLimit);
           }
           const scored = [];
           for (let offset = 0; offset < needsScore.length; offset += 10) {

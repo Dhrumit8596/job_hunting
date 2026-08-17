@@ -99,6 +99,7 @@ pure modules are:
 - `apply-run-state.js` — versioned compact state, transition/health enums, ownership-safe reducer.
 - `apply-run-control.js` — pure pre-queue creation, freshness, and late-worker ownership rules.
 - `local-json-client.js` — explicit-timeout loopback transport for long source/plan workers.
+- `scoring-frontier.js` — cached-score reuse and token-bounded advancement into unscored candidates.
 - `apply-progress.js` — exact-run snapshot and bounded transition events from queue/ledger state.
 - `apply-recovery-policy.js` — deterministic wait/inspect/resume/stop/report actions.
 
@@ -112,7 +113,9 @@ substitutes a latest or different run.
 Category runs isolate both channel and strategy and use a run-scoped confirmed target, so one
 category's confirmations cannot satisfy another category. Their default evidence-scoring window is
 20 candidates (or four times the requested coverage/attempt reserve, whichever is larger); callers
-may raise `scoreCandidateLimit` explicitly after a supply-limited report.
+may raise `scoreCandidateLimit` explicitly after a supply-limited report. Cached scores whose JD and
+candidate fingerprints still match never consume that new-score budget, so later runs advance into
+previously deferred candidates.
 
 ## Sourcing and scoring flow
 

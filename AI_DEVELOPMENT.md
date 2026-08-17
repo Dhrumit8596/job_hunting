@@ -62,6 +62,9 @@ Runtime safeguards now in code:
 - Single-category apply runs default to a small 20-candidate evidence-scoring window (or four times
   their requested reserve) rather than the broad planner window. Raise `scoreCandidateLimit` only
   when a supply-limited report justifies the extra model cost.
+- The scoring window limits only new model evaluations. Matching cached JD/candidate evidence is
+  reused without consuming that budget, so later runs advance into the deferred scoring frontier
+  instead of repeatedly spending their cap on the same jobs.
 - `scoring-context.js` bounds each long posting to 7,000 characters while retaining its opening,
   requirement-bearing lines, nearby context, and closing.
 - Scoring evidence is cached by both job-description and candidate fingerprints.
