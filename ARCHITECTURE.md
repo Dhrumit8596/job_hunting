@@ -13,10 +13,12 @@ The system has three runtimes:
 3. **Local dev server** — owns HTTP/CLI entry points, sourcing adapters, AI calls, planning, and
    developer report generation. It communicates with the service worker over WebSocket.
 
-The source of truth for jobs is IndexedDB. The source of truth for a running batch is
-`pja_ranked_apply`. The source of truth for outcomes is `pja_application_ledger` plus the compact
-completed-run snapshot. `pja_ext_queue` and the native-channel queues are per-handler transport
-state, not the global orchestrator.
+The source of truth for jobs is IndexedDB. Before queue installation, the source of truth for an
+admitted batch is `pja_apply_run_control`; after ownership-safe handoff, it is `pja_ranked_apply`.
+The source of truth for outcomes is `pja_application_ledger` plus the compact completed-run snapshot.
+`pja_ext_queue` and the native-channel queues are per-handler transport state, not the global
+orchestrator. The editable overview is
+[One-click Apply Architecture v3](https://www.figma.com/board/1g3FrLoyCT5z5KB4vTgiFW).
 
 ## End-to-end one-click sequence
 

@@ -5,14 +5,19 @@
 The control-plane work in this plan is implemented. The shared schema/reducer, exact-run progress
 adapter, deterministic recovery policy, run-specific HTTP APIs, CLI watcher, popup status adapter,
 category isolation, bounded category scoring, shared external preflight policy, and local run
-handoff are active. The duplicate test-only `sourcing/router.js` seam was removed. The implemented
-diagram is in [One-click Apply Architecture v2](https://www.figma.com/board/1g3FrLoyCT5z5KB4vTgiFW).
+handoff are active. Durable admission now persists `pja_apply_run_control` before returning HTTP
+202; sourcing/planning are observable, concurrent admission is serialized, and a failed or timed-out
+worker cannot install a late queue after losing ownership. The duplicate test-only
+`sourcing/router.js` seam was removed. The current diagram is
+[One-click Apply Architecture v3](https://www.figma.com/board/1g3FrLoyCT5z5KB4vTgiFW).
 
 Verification completed:
 
 - Full syntax, privacy, unit, and whitespace suites pass.
 - A local fixture proved exact-run watch from active handler through confirmed terminal state and
   automatic report export.
+- A runtime no-job smoke test proved immediate durable admission followed through the exact-run API
+  to a terminal planning result, with zero applications and no model scoring.
 - The extension/dev-server preflight passed with one connected client and a configured candidate
   profile/resume.
 - All eight category dry gates ran with unchanged fit, evidence, location, duplicate, and safety
@@ -70,16 +75,19 @@ and exit with a meaningful status code.
 - Do not require a model to read `background.js`, `dev-server.js`, or raw browser logs to monitor a
   healthy run.
 
-## Current control-plane gap
+## Resolved control-plane gap
 
-The current start command performs preflight, sourcing, planning, and queue installation, then exits.
-The browser service worker continues asynchronously. `npm run apply:status` provides only a one-time
-latest-run snapshot, so an AI session must remember the `runId`, poll manually, infer whether an
-unchanged job is healthy or stuck, decide when recovery is safe, and remember to export a report.
+Previously, the start request held one HTTP connection through preflight, sourcing, planning, and
+queue installation. A transport timeout could return no `runId` while nested work continued and
+later installed an orphan queue. Observation also began only after `pja_ranked_apply` existed.
 
-This is a missing run-observation contract, not a prompting problem.
+Now `/apply-all` persists a compact run-control record before returning HTTP 202. The CLI follows the
+exact `runId` through `sourcing`, `planning`, browser dispatch, and terminal reporting. The internal
+worker must still own the planning record immediately before `startRankedApply`; terminal or replaced
+control state rejects late installation. These are deterministic lifecycle guarantees, not prompting
+conventions.
 
-## Target architecture
+## Implemented architecture
 
 ```mermaid
 flowchart LR

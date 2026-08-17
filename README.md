@@ -387,8 +387,11 @@ npm run apply:preflight
 ```
 
 Both the popup button and CLI run a readiness preflight first. The preflight fails closed when the
-extension is disconnected, the candidate profile/resume is not configured, or another ranked apply
-run is already active.
+extension is disconnected, the candidate profile/resume is not configured, or another planning or
+ranked apply run is already active. `/apply-all` then returns HTTP 202 with a durable `runId`; follow
+that exact ID with `npm run apply:watch -- --run-id <runId>` or use `--wait`. Sourcing and planning
+continue asynchronously and are visible phases, so a caller must not treat the admission request
+ending as run failure.
 
 Apply-run responses and exported reports include planning-drop diagnostics for corpus jobs that were
 not launched, grouped by reasons such as low score, missing hydrated description, prior blocked host,
@@ -491,7 +494,9 @@ Common endpoints:
 | `/analyze` | POST | Scores one job. |
 | `/batch-score` | POST | Scores a batch of jobs. |
 | `/answer-questions` | POST | Generates factual answers for application questions. |
-| `/apply-all` | POST | Sources jobs and starts a ranked application run across all supported channels. |
+| `/apply-all` | POST | Persists a durable run ID, returns HTTP 202, then asynchronously sources and starts an ownership-checked ranked run. |
+| `/apply-runs/:runId` | GET | Returns exact-run progress from admission through sourcing, planning, applying, and terminal reporting. |
+| `/apply-runs/:runId/events` | GET | Returns bounded events for one exact run without latest-run fallback. |
 | `/source-v2` | POST | Builds/imports a sourced job corpus. |
 | `/apply-run` | POST | Starts a ranked application run from the corpus. |
 | `/apply-status` | GET | Returns compact active/last ranked-run progress and auto-exports a report for terminal runs. |

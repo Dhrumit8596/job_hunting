@@ -53,7 +53,7 @@ This seeds `pja_ext_queue` + `pja_ext_current` into storage and opens the first 
 | `/analyze` | POST | Single job fit score (`{title, company, description}`) |
 | `/batch-score` | POST | Up to 10 jobs in one Claude call |
 | `/outreach` | POST | Generates DM + email for a job + person |
-| `/apply-all` | POST | Default broad apply command: runs `/source-v2` then `/apply-run` across LinkedIn Easy Apply, Indeed Apply, and external ATS/company-site jobs |
+| `/apply-all` | POST | Durable broad apply admission: returns HTTP 202 + `runId`, then asynchronously runs `/source-v2` and `/apply-run` across supported channels |
 | `/source-v2` | POST | Builds/imports the normalized sourced job corpus |
 | `/apply-run` | POST | Starts a ranked application run from the corpus |
 | `/set-storage` | POST | `chrome.storage.local.set(body)` — body is passed **flat**, not nested |
@@ -61,6 +61,8 @@ This seeds `pja_ext_queue` + `pja_ext_current` into storage and opens the first 
 Use `/apply-all` for “apply N jobs” requests. Use `/start-ea` only for a deliberately
 LinkedIn-Easy-Apply-only batch. Pass `queries:[...]` to `/apply-all` or `/source-v2` for a
 targeted sourcing run; those query terms are forwarded to discovery adapters before ranking.
+Follow the returned exact run at `/apply-runs/:runId`; `sourcing` and `planning` are observable
+phases before `pja_ranked_apply` exists. Never infer failure from the admission request ending.
 
 **`/set-storage` gotcha:** the body JSON is passed directly to `chrome.storage.local.set()`. Send `{"pja_ext_queue": {...}}`, NOT `{"data": {"pja_ext_queue": {...}}}`.
 
@@ -123,6 +125,7 @@ Plain DOM value assignment doesn't update React state. For any React-based ATS (
 | `pja_shortlist` | Scanner results with `fitScore`, `skills`, `flags` |
 | `pja_contacts` | Recruiter/HM tracker |
 | `pja_templates` | DM + email templates |
+| `pja_apply_run_control` | Durable pre-queue run identity, sourcing/planning phase, and bounded admission/planning failure |
 | `pja_ext_queue` | Active queue: `{ status, jobs[], currentIndex, results, runId }` |
 | `pja_ext_current` | Single job being applied: `{ ...job, profile, answers, returnUrl, applyUrl, runId }` |
 | `pja_missing_questions` | Fields autofill couldn't fill (for answer-bank prompting) |

@@ -85,7 +85,9 @@ The extension ID is installation-specific. Do not assume another developer has t
 | `/batch-score` | POST | Scores up to 10 jobs in one request. |
 | `/answer-questions` | POST | Generates truthful answers for required form questions. |
 | `/outreach` | POST | Generates outreach copy for a job/person. |
-| `/apply-all` | POST | Sources jobs and starts a ranked application run across all supported channels. |
+| `/apply-all` | POST | Returns HTTP 202 + durable `runId`, then asynchronously sources and installs an ownership-checked ranked run. |
+| `/apply-runs/:runId` | GET | Exact progress across sourcing, planning, browser handling, and terminal state. |
+| `/apply-runs/:runId/events` | GET | Bounded exact-run lifecycle/outcome events. |
 | `/source-v2` | POST | Builds/imports the normalized sourced job corpus. |
 | `/apply-run` | POST | Starts a ranked application run from the corpus. |
 | `/inspect-apply` | GET | Returns sanitized active application diagnostics. |
