@@ -25,6 +25,8 @@ const { exec, spawnSync } = require('child_process');
 const { buildRestartPlan } = require('./chrome-restart');
 const { normalizeEnginePreference, parseEngine, codexModel, codexReasoningEffort, runAiCli } = require('./ai-cli');
 const { scoringExcerpt } = require('./scoring-context');
+const ApplyProgress = require('./apply-progress');
+const { decideRecovery } = require('./apply-recovery-policy');
 
 const PORT = Number(process.env.PJA_DEV_PORT || 6174);
 if (!Number.isInteger(PORT) || PORT < 1 || PORT > 65535) throw new Error('PJA_DEV_PORT must be a valid TCP port');
@@ -578,6 +580,20 @@ function diagnosticMatchesReportRow(row = {}, diagnostic = {}, runId = '') {
   return true;
 }
 
+function diagnosticHasRunJobIdentity(diagnostic = {}, rows = []) {
+  const diagJobId = String(diagnostic.jobId || diagnostic.id || '').trim().toLowerCase();
+  const diagUrl = String(diagnostic.applyUrl || diagnostic.url || '').trim().toLowerCase();
+  const norm = value => String(value || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+  const diagCompany = norm(diagnostic.company), diagTitle = norm(diagnostic.title);
+  return (rows || []).some(row => {
+    const rowJobId = String(row.jobId || row.id || '').trim().toLowerCase();
+    const rowUrl = String(row.url || row.applyUrl || '').trim().toLowerCase();
+    if (diagJobId && rowJobId && diagJobId === rowJobId) return true;
+    if (diagUrl && rowUrl && diagUrl === rowUrl) return true;
+    return !!(diagCompany && diagTitle && diagCompany === norm(row.company) && diagTitle === norm(row.title));
+  });
+}
+
 function collectReportDiagnostics(storage = {}, ranked = null, allRows = [], runId = '') {
   const raw = [];
   for (const row of allRows || []) {
@@ -586,6 +602,7 @@ function collectReportDiagnostics(storage = {}, ranked = null, allRows = [], run
   const stored = Array.isArray(storage.pja_apply_diagnostics) ? storage.pja_apply_diagnostics : [];
   for (const d of stored) {
     if (runId && d.runId && d.runId !== runId) continue;
+    if (runId && !d.runId && !diagnosticHasRunJobIdentity(d, allRows)) continue;
     const row = {
       runId: d.runId || '',
       jobId: d.jobId || '',
@@ -1389,10 +1406,10 @@ async function oneClickPreflight(options = {}) {
   };
 }
 
-function summarizeApplyStatus(storage = {}) {
+function summarizeApplyStatus(storage = {}, options = {}) {
   const activeRanked = storage.pja_ranked_apply || null;
   const completedRanked = storage.pja_last_completed_apply_run || null;
-  const ranked = activeRanked || completedRanked || null;
+  const ranked = ApplyProgress.runFromStorage(storage, options.runId) || null;
   const results = ranked && ranked.results || {};
   const count = key => Array.isArray(results[key]) ? results[key].length
     : ranked && ranked.counts && ranked.counts[key] != null ? Number(ranked.counts[key]) || 0
@@ -1400,13 +1417,29 @@ function summarizeApplyStatus(storage = {}) {
   const currentJob = ranked && Array.isArray(ranked.jobs)
     ? ranked.jobs[ranked.inFlightIndex != null ? ranked.inFlightIndex : ranked.currentIndex]
     : null;
-  const lastFailure = storage.pja_last_apply_failure || null;
-  const active = !!(activeRanked && /^(applying|paused_for_patch|paused_for_fix)$/i.test(String(activeRanked.status || '')));
+  const rawLastFailure = storage.pja_last_apply_failure || null;
+  const rankedJobs = ranked && Array.isArray(ranked.jobs) ? ranked.jobs : [];
+  const failureJobId = String(rawLastFailure && (rawLastFailure.jobId || rawLastFailure.id) || '');
+  const failureOwned = !!(rawLastFailure && ranked && (
+    rawLastFailure.runId && rawLastFailure.runId === ranked.runId ||
+    !rawLastFailure.runId && failureJobId && rankedJobs.some(job =>
+      String(job.jobId || job.id || '') === failureJobId)
+  ));
+  const failedRows = results && Array.isArray(results.failed) ? results.failed : [];
+  const lastFailure = failureOwned ? rawLastFailure : failedRows[failedRows.length - 1] || null;
+  const active = !!(ranked && /^(applying|paused_for_patch|paused_for_fix)$/i.test(String(ranked.status || '')));
+  const publicRun = ApplyProgress.publicProgress(storage, {
+    runId: options.runId,
+    clients: wsClients.size,
+    now: options.now,
+    handlerBudgetMs: options.handlerBudgetMs,
+    reportPath: options.reportPath,
+  });
   return {
     ok: true,
     clients: wsClients.size,
     active,
-    run: ranked ? {
+    run: ranked ? Object.assign({
       runId: ranked.runId || null,
       status: ranked.status || '',
       active,
@@ -1426,7 +1459,7 @@ function summarizeApplyStatus(storage = {}) {
         channel: safeReportText(currentJob.channel || 'external'),
         ats: safeReportText(currentJob.ats || currentJob.strategy || ''),
       } : null,
-    } : null,
+    }, publicRun || {}) : null,
     lastCompletedRun: completedRanked ? {
       runId: completedRanked.runId || null,
       status: completedRanked.status || '',
@@ -1607,7 +1640,85 @@ async function handleRequest(req, res) {
     return;
   }
 
-  if (req.method === 'GET' && req.url === '/apply-status') {
+  const parsedRequestUrl = new URL(req.url, `http://127.0.0.1:${PORT}`);
+  const runStatusMatch = parsedRequestUrl.pathname.match(/^\/apply-runs\/([^/]+)$/);
+  const runEventsMatch = parsedRequestUrl.pathname.match(/^\/apply-runs\/([^/]+)\/events$/);
+  const runResumeMatch = parsedRequestUrl.pathname.match(/^\/apply-runs\/([^/]+)\/resume$/);
+
+  if (req.method === 'GET' && runStatusMatch) {
+    try {
+      const runId = safeReportId(decodeURIComponent(runStatusMatch[1] || ''));
+      const st = await getStorageFromExtension([
+        'pja_ranked_apply', 'pja_last_completed_apply_run', 'pja_application_ledger',
+        'pja_applied_log', 'pja_apply_diagnostics', 'pja_last_apply_failure', 'pja_dbg',
+      ], 8000);
+      const selected = ApplyProgress.runFromStorage(st || {}, runId);
+      if (!selected) {
+        res.writeHead(404, CORS);
+        res.end(JSON.stringify({ ok: false, error: 'apply run not found', runId, clients: wsClients.size }));
+        return;
+      }
+      const autoReport = isTerminalApplyStatus(selected.status) ? writeApplyRunReport(st || {}, { runId }) : null;
+      const status = summarizeApplyStatus(st || {}, { runId, reportPath: autoReport && autoReport.file });
+      status.report = autoReport;
+      status.recovery = decideRecovery(status.run);
+      res.writeHead(200, CORS);
+      res.end(JSON.stringify(status));
+    } catch (e) {
+      res.writeHead(500, CORS);
+      res.end(JSON.stringify({ ok: false, error: e.message, clients: wsClients.size }));
+    }
+    return;
+  }
+
+  if (req.method === 'GET' && runEventsMatch) {
+    try {
+      const runId = safeReportId(decodeURIComponent(runEventsMatch[1] || ''));
+      const st = await getStorageFromExtension([
+        'pja_ranked_apply', 'pja_last_completed_apply_run', 'pja_application_ledger',
+      ], 8000);
+      if (!ApplyProgress.runFromStorage(st || {}, runId)) {
+        res.writeHead(404, CORS);
+        res.end(JSON.stringify({ ok: false, error: 'apply run not found', runId, clients: wsClients.size }));
+        return;
+      }
+      const after = Number(parsedRequestUrl.searchParams.get('after')) || 0;
+      const events = ApplyProgress.runEvents(st || {}, { runId, after, limit: parsedRequestUrl.searchParams.get('limit') });
+      const nextCursor = events.length ? events[events.length - 1].cursor : after;
+      res.writeHead(200, CORS);
+      res.end(JSON.stringify({ ok: true, runId, events, nextCursor }));
+    } catch (e) {
+      res.writeHead(500, CORS);
+      res.end(JSON.stringify({ ok: false, error: e.message, clients: wsClients.size }));
+    }
+    return;
+  }
+
+  if (req.method === 'POST' && runResumeMatch) {
+    try {
+      req.resume();
+      const runId = safeReportId(decodeURIComponent(runResumeMatch[1] || ''));
+      const st = await getStorageFromExtension(['pja_ranked_apply'], 8000);
+      const active = st && st.pja_ranked_apply;
+      if (!active || active.runId !== runId || !/^(applying|paused_for_patch|paused_for_fix)$/i.test(String(active.status || ''))) {
+        res.writeHead(409, CORS);
+        res.end(JSON.stringify({ ok: false, error: 'run is not the active resumable run', runId,
+          activeRunId: active && active.runId || null }));
+        return;
+      }
+      const data = await wsAsk('resumeRankedApply', {}, 'resumeRankedApplyReply', 30000);
+      res.writeHead(data && data.ok && data.runId === runId ? 200 : 409, CORS);
+      res.end(JSON.stringify(data && data.runId === runId ? data : {
+        ok: false, error: 'resume ownership mismatch', runId, observedRunId: data && data.runId || null,
+      }));
+    } catch (e) {
+      res.writeHead(500, CORS);
+      res.end(JSON.stringify({ ok: false, error: e.message, clients: wsClients.size }));
+    }
+    return;
+  }
+
+  if (req.method === 'GET' && parsedRequestUrl.pathname === '/apply-status') {
     try {
       const st = await getStorageFromExtension([
         'pja_ranked_apply',
@@ -1622,7 +1733,13 @@ async function handleRequest(req, res) {
         'pja_profile_write_rejected',
         'pja_resume_filename',
       ], 8000);
-      const status = summarizeApplyStatus(st || {});
+      const requestedRunId = parsedRequestUrl.searchParams.get('runId');
+      if (requestedRunId && !ApplyProgress.runFromStorage(st || {}, safeReportId(requestedRunId))) {
+        res.writeHead(404, CORS);
+        res.end(JSON.stringify({ ok: false, error: 'apply run not found', runId: safeReportId(requestedRunId), clients: wsClients.size }));
+        return;
+      }
+      const status = summarizeApplyStatus(st || {}, { runId: requestedRunId ? safeReportId(requestedRunId) : undefined });
       const autoReport = maybeAutoExportApplyReport(st || {});
       if (autoReport) status.report = autoReport;
       res.writeHead(200, CORS);
@@ -2457,6 +2574,7 @@ ${(description || '').slice(0, 6000)}`;
     req.on('end', async () => {
       try {
         const o = body ? JSON.parse(body) : {};
+        const requestedRunId = safeReportId(o.runId || `apply-${Date.now()}`);
         if (o.preflight !== false) {
           const preflight = await oneClickPreflight(o);
           if (!preflight.ok) {
@@ -2506,6 +2624,7 @@ ${(description || '').slice(0, 6000)}`;
         }
         if (o.maxBrowserAgeMs != null) sourceBody.maxBrowserAgeMs = Number(o.maxBrowserAgeMs);
         const applyBody = Object.assign({}, o, {
+          runId: requestedRunId,
           applyAllAboveScore,
           stopMode: applyAllAboveScore ? 'all_above_score' : (o.stopMode || 'target_confirmed'),
           targetConfirmed,
@@ -2524,6 +2643,13 @@ ${(description || '').slice(0, 6000)}`;
           requiredChannels: coverageMode ? Array.from(new Set(coverageChannels.map(x => String(x || '').trim()).filter(Boolean))) : o.requiredChannels,
           requiredStrategies: coverageMode ? Array.from(new Set(coverageStrategies.map(x => String(x || '').trim().toLowerCase()).filter(Boolean))) : o.requiredStrategies,
         });
+        // A single-category run does not need the broad planner's 150–300 candidate scoring
+        // window. Bound evidence scoring to a small reserve around the requested attempts; callers
+        // can explicitly raise scoreCandidateLimit after a supply-limited report.
+        if (o.category && o.scoreCandidateLimit == null) {
+          applyBody.scoreCandidateLimit = Math.max(20, coverageAttemptCount * 4,
+            Number(applyBody.attemptCap || 0) * 4);
+        }
         if (coverageMode && applyBody.attemptCap == null) applyBody.attemptCap = coverageAttemptCount;
         delete applyBody.source;
         delete applyBody.sourceTarget;
@@ -2555,7 +2681,12 @@ ${(description || '').slice(0, 6000)}`;
 
         const applyResp = await postLocalJson('/apply-run', applyBody, Number(o.applyTimeoutMs) || 600000);
         res.writeHead(applyResp.status || (applyResp.ok ? 200 : 502), CORS);
+        const startedRunId = applyResp.data && applyResp.data.runId || requestedRunId;
         res.end(JSON.stringify({ success: !!(applyResp.ok && (!applyResp.data || applyResp.data.success !== false)),
+          runId: startedRunId,
+          statusUrl: `/apply-runs/${encodeURIComponent(startedRunId)}`,
+          eventsUrl: `/apply-runs/${encodeURIComponent(startedRunId)}/events`,
+          reportUrl: '/export-apply-report',
           sourceOptions: sourceBody, applyOptions: applyBody,
           sourceHydration: sourceResp.data && sourceResp.data.report && sourceResp.data.report.modalityC
             ? sourceResp.data.report.modalityC.channelHydration || null : null,
@@ -2716,6 +2847,12 @@ ${(description || '').slice(0, 6000)}`;
         const candidateStatus = await refreshRuntimeCandidateProfile();
         const Ledger = require('./application-ledger');
         const day = o.day || Ledger.dayKey(Date.now(), timeZone);
+        const plannedRunId = safeReportId(o.runId || ('apply-' + Date.now()));
+        const category = String(o.category || '').trim().toLowerCase();
+        // Broad one-click runs keep the historical day-wide target. Category validation runs
+        // deliberately own an independent target so completing one five-job batch cannot make
+        // the next category appear already complete.
+        const targetScope = category ? 'run' : 'day';
         const companyDeny = new Set((Array.isArray(o.companyDeny) ? o.companyDeny : [])
           .map(x => String(x).trim().toLowerCase()).filter(Boolean));
         const titleDeny = (Array.isArray(o.titleDeny) ? o.titleDeny : [])
@@ -2757,9 +2894,11 @@ ${(description || '').slice(0, 6000)}`;
               remaining: run.remaining != null ? run.remaining : run.targetConfirmed })); return;
           }
         }
-        const todayAudit = applicationAuditFromStorage(control, { day, timeZone, target: dailyTarget || 1 }).audit;
-        const alreadyConfirmedToday = todayAudit.counts.confirmed;
-        const remainingTarget = applyAllAboveScore ? null : todayAudit.remaining;
+        const targetAudit = applicationAuditFromStorage(control, targetScope === 'run'
+          ? { runId: plannedRunId, day: null, target: dailyTarget || 1 }
+          : { day, timeZone, target: dailyTarget || 1 }).audit;
+        const alreadyConfirmedToday = targetScope === 'day' ? targetAudit.counts.confirmed : 0;
+        const remainingTarget = applyAllAboveScore ? null : targetAudit.remaining;
         if (!applyAllAboveScore && remainingTarget <= 0) {
           res.writeHead(200, CORS); res.end(JSON.stringify({ success: true, dryRun, planned: 0,
             note: 'daily confirmed target already reached', day, timeZone, dailyTarget,
@@ -2771,7 +2910,8 @@ ${(description || '').slice(0, 6000)}`;
         const setResp = await wsAsk('getApplySet', { threshold: rescore ? 0 : threshold,
           dailyCap: rescore ? 0 : dailyCap, perCompanyCap: rescore ? 0 : perCompanyCap,
           includeUnscored: !!rescore,
-          atsAllow, requireEvidence: !rescore && requireEvidence, maxGaps,
+          atsAllow, channelAllow: Array.isArray(o.channelAllow) ? o.channelAllow : null,
+          requireEvidence: !rescore && requireEvidence, maxGaps,
           retryDeferred: e2eSafe ? false : undefined,
           maxAttempts: e2eSafe ? 1 : undefined,
           candidateFingerprint: !rescore ? runtimeCandidateFingerprint : undefined,
@@ -3051,7 +3191,7 @@ ${(description || '').slice(0, 6000)}`;
           ats: j.ats || j.strategy, strategy: j.strategy || '', channel: j.channel || 'external',
           applyUrl: j.applyUrl, listingUrl: j.listingUrl || '', location: j.location, fitScore: j.fitScore,
           confidence: j.confidence || '', profile: {}, answers: {} }));
-        const runId = 'apply-' + Date.now();
+        const runId = plannedRunId;
         const plannedAt = Date.now();
         for (const j of queueJobs) { j.runId = runId; j.applicationAt = plannedAt; }
         const byStrategy = {};
@@ -3063,16 +3203,16 @@ ${(description || '').slice(0, 6000)}`;
           indeed_apply: indeedApplyJobs.length };
 
         if (!dryRun) {
-          const master = { status: 'applying', jobs: queueJobs, currentIndex: 0, inFlightIndex: null,
+          const master = { schemaVersion: 2, status: 'applying', phase: 'dispatching', jobs: queueJobs, currentIndex: 0, inFlightIndex: null,
             results: { confirmed: [], failed: [], unverified: [], skipped: [] }, blockedChannels: [],
-            runId, runMode, applyAllAboveScore, targetConfirmed: dailyTarget, dailyTarget, attemptCap, threshold,
-            day, timeZone,
+            runId, category, runMode, applyAllAboveScore, targetConfirmed: dailyTarget, dailyTarget, attemptCap, threshold,
+            targetScope, day: targetScope === 'day' ? day : '', calendarDay: day, timeZone,
             confirmedCount: alreadyConfirmedToday, remaining: remainingTarget,
             stopBeforeSubmit, e2eSafe,
             workdayAttemptTimeoutMs: o.workdayAttemptTimeoutMs != null ? Math.max(30000, Number(o.workdayAttemptTimeoutMs) || 0) : undefined,
             planningDrops: planningDrops || null,
             coverage: coverageMode, coverageCount, channelCoverage, strategyCoverage,
-            startedAt: plannedAt, updatedAt: plannedAt };
+            startedAt: plannedAt, updatedAt: plannedAt, lastTransitionAt: plannedAt };
           const started = await wsAsk('startRankedApply', { master, force: !!o.force },
             'startRankedApplyReply', 30000);
           if (!started || started.ok !== true) {
@@ -3097,7 +3237,7 @@ ${(description || '').slice(0, 6000)}`;
         res.end(JSON.stringify({ success: true, dryRun, planned: queueJobs.length,
           runMode, applyAllAboveScore, targetConfirmed: remainingTarget, dailyTarget,
           alreadyConfirmedToday, remainingTarget,
-          day, timeZone, assistedExcluded, includeAssisted, e2eSafe,
+          day, timeZone, targetScope, category, assistedExcluded, includeAssisted, e2eSafe,
           reserveCount: applyAllAboveScore ? 0 : Math.max(0, queueJobs.length - remainingTarget), runId, byChannel,
           byStrategy, channelCoverage, strategyCoverage, coverage: coverageMode, coverageCount, corpusTotal: setResp.total,
           planningDrops: planningDrops || null, report,

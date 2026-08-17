@@ -14,6 +14,7 @@
     "apply:all": "node scripts/pja-apply-all.js",
     "apply:all:dry-run": "node scripts/pja-apply-all.js --dry-run",
     "apply:status": "node scripts/pja-apply-all.js status",
+    "apply:watch": "node scripts/pja-apply-all.js watch",
     "apply:report": "node scripts/pja-apply-all.js report",
     "apply:preflight": "node scripts/pja-apply-all.js preflight",
     "check:profile": "node test/merged_profile.js"

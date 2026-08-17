@@ -51,6 +51,8 @@ the failure snapshot.
 
 ```bash
 npm run apply:status
+npm run apply:status -- --run-id apply-...
+npm run apply:watch -- --run-id apply-...
 npm run apply:report
 curl http://localhost:6174/inspect-apply
 curl -X POST http://localhost:6174/corpus-status -H 'Content-Type: application/json' -d '{}'
@@ -58,6 +60,11 @@ curl -X POST http://localhost:6174/corpus-status -H 'Content-Type: application/j
 
 Generated reports are local and gitignored. Start with the newest run report, then inspect only the
 cluster/retest rows relevant to the reason being fixed.
+
+For automation and handoff, prefer `GET /apply-runs/:runId` and its bounded `/events` endpoint over
+raw logs or latest-run inference. Public progress includes phase, category, counts, current compact
+job identity, seconds since the last meaningful transition, health, and next action; it excludes
+profile values, descriptions, HTML, and form values.
 
 ## Reason-to-owner map
 

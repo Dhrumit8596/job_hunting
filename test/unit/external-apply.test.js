@@ -25,6 +25,11 @@ const P = {
 module.exports = (t) => {
   const externalSource = fs.readFileSync(path.resolve(__dirname, '../../content/external-apply.js'), 'utf8');
   const backgroundSource = fs.readFileSync(path.resolve(__dirname, '../../background.js'), 'utf8');
+  t.ok(externalSource.includes('window.PJAPreflight') &&
+    externalSource.includes('pjaClassifyExternalPreflight') &&
+    externalSource.includes("preflight.reason === 'chatbot_apply_manual'") &&
+    externalSource.includes("closedPreflight.reason === 'posting_not_found'"),
+  'external apply: production dead-posting and chatbot classification uses the shared preflight policy');
   t.ok(externalSource.includes('const PJA_EXT_STOP_BEFORE_SUBMIT_DEFAULT = false'),
     'external apply: live E2E submission is the default unless a run explicitly requests review mode');
   t.ok(externalSource.includes('google\\.com$/i.test(location.hostname)') &&

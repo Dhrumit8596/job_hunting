@@ -102,6 +102,7 @@ async function pjaBuildApplySet(opts) {
     threshold: opts && opts.threshold != null ? opts.threshold : 70,
     dailyCap: opts && opts.dailyCap != null ? opts.dailyCap : 30,
     atsAllow: opts && opts.atsAllow,
+    channelAllow: opts && opts.channelAllow,
     retryDeferred: opts && Object.prototype.hasOwnProperty.call(opts, 'retryDeferred') ? opts.retryDeferred : undefined,
     maxAttempts: opts && opts.maxAttempts != null ? opts.maxAttempts : undefined,
     requireEvidence: !!(opts && opts.requireEvidence),

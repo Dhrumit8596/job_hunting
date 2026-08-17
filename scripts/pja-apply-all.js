@@ -2,6 +2,34 @@
 'use strict';
 
 const http = require('http');
+const fs = require('fs');
+const path = require('path');
+
+const RUN_HANDOFF_FILE = process.env.PJA_RUN_HANDOFF_FILE ||
+  path.resolve(__dirname, '..', '.pja-run.local.json');
+
+function readRunHandoff(file = RUN_HANDOFF_FILE) {
+  try {
+    const value = JSON.parse(fs.readFileSync(file, 'utf8'));
+    return value && value.runId ? value : null;
+  } catch (_) { return null; }
+}
+
+function writeRunHandoff(value, file = RUN_HANDOFF_FILE) {
+  if (!value || !value.runId) return null;
+  const prior = readRunHandoff(file) || {};
+  const next = {
+    schemaVersion: 1,
+    runId: String(value.runId),
+    port: Number(value.port || prior.port || 6174),
+    status: String(value.status || prior.status || 'started'),
+    category: String(value.category || prior.category || ''),
+    reportPath: String(value.reportPath || prior.reportPath || ''),
+    updatedAt: Date.now(),
+  };
+  fs.writeFileSync(file, JSON.stringify(next, null, 2) + '\n', { mode: 0o600 });
+  return next;
+}
 
 function usage() {
   return `Usage: npm run apply:all -- [command] [options]
@@ -12,6 +40,7 @@ source jobs → score/rank → route by channel/ATS → apply → log outcomes.
 Commands:
   start                    Start the one-click flow (default)
   status                   Show compact active/last ranked-run progress
+  watch                    Follow one run until it reaches a terminal state
   report                   Export the sanitized developer markdown report
   preflight                Check readiness without starting a run
 
@@ -23,6 +52,13 @@ Options:
   --max-gaps <n>            Maximum scored gaps allowed (default: 20)
   --source-target <n>       Sourcing target before ranking
   --attempt-cap <n>         Maximum attempted jobs; 0 means no attempt cap
+  --category <name>         Restrict the run to one channel/ATS category
+  --run-id <id>             Inspect, watch, or report one exact run
+  --wait                    Follow the started run until terminal and export its report
+  --poll-seconds <n>        Watch polling interval (default: 20)
+  --timeout-minutes <n>     Maximum watch duration (default: 240)
+  --json-lines              Emit compact NDJSON progress records while watching
+  --allow-resume            Permit one bounded resume after inspect on a stalled run
   --query <text>            Add a targeted sourcing query; can repeat
   --coverage                Require real-job coverage across the default supported strategies
   --coverage-count <n>      Require/reserve this many jobs per coverage bucket
@@ -43,6 +79,8 @@ Options:
 Examples:
   npm run apply:all -- --dry-run --target 20 --query "metrology engineer"
   npm run apply:all -- --target 5 --threshold 75
+  npm run apply:all -- --target 5 --category greenhouse --wait
+  npm run apply:watch -- --run-id apply-123
   npm run apply:status
   npm run apply:report
 `;
@@ -62,6 +100,12 @@ function readArgs(argv) {
       requireEvidence: true,
     },
     port: Number(process.env.PJA_DEV_PORT || 6174),
+    wait: false,
+    pollSeconds: 20,
+    timeoutMinutes: 240,
+    jsonLines: false,
+    allowResume: false,
+    runId: '',
   };
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i];
@@ -69,7 +113,7 @@ function readArgs(argv) {
       if (i + 1 >= argv.length) throw new Error(`${arg} requires a value`);
       return argv[++i];
     };
-    if (i === 0 && /^(start|status|report|preflight)$/i.test(arg)) {
+    if (i === 0 && /^(start|status|watch|report|preflight)$/i.test(arg)) {
       out.command = arg.toLowerCase();
     } else if (arg === '--help' || arg === '-h') out.help = true;
     else if (arg === '--dry-run') out.body.dryRun = true;
@@ -103,6 +147,13 @@ function readArgs(argv) {
     else if (arg === '--max-gaps') out.body.maxGaps = Number(next());
     else if (arg === '--source-target') out.body.sourceTarget = Number(next());
     else if (arg === '--attempt-cap') out.body.attemptCap = Number(next());
+    else if (arg === '--category') out.body.category = String(next()).trim().toLowerCase();
+    else if (arg === '--run-id') out.runId = String(next()).trim();
+    else if (arg === '--wait') out.wait = true;
+    else if (arg === '--poll-seconds') out.pollSeconds = Number(next());
+    else if (arg === '--timeout-minutes') out.timeoutMinutes = Number(next());
+    else if (arg === '--json-lines') out.jsonLines = true;
+    else if (arg === '--allow-resume') out.allowResume = true;
     else if (arg === '--port') out.port = Number(next());
     else if (arg === '--required-channel') {
       if (!Array.isArray(out.body.requiredChannels)) out.body.requiredChannels = [];
@@ -127,10 +178,43 @@ function readArgs(argv) {
     }
   }
   if (!Number.isInteger(out.port) || out.port < 1 || out.port > 65535) throw new Error('Invalid --port');
+  if (!Number.isFinite(out.pollSeconds) || out.pollSeconds < 1 || out.pollSeconds > 300) throw new Error('Invalid --poll-seconds');
+  if (!Number.isFinite(out.timeoutMinutes) || out.timeoutMinutes < 1) throw new Error('Invalid --timeout-minutes');
   if (Array.isArray(out.body.retryBlockedHosts)) {
     out.body.retryBlockedHosts = out.body.retryBlockedHosts.filter(Boolean);
   }
+  applyCategoryOptions(out.body);
   return out;
+}
+
+function applyCategoryOptions(body) {
+  const category = String(body && body.category || '').trim().toLowerCase();
+  if (!category) return body;
+  const aliases = {
+    linkedin: 'linkedin_easy_apply', linkedin_easy_apply: 'linkedin_easy_apply',
+    indeed: 'indeed_apply', indeed_apply: 'indeed_apply',
+    greenhouse: 'greenhouse', workday: 'workday', ashby: 'ashby', lever: 'lever',
+    smartrecruiters: 'smartrecruiters', generic: 'generic', fallback: 'generic',
+  };
+  const resolved = aliases[category];
+  if (!resolved) throw new Error(`Unknown --category: ${category}`);
+  body.category = resolved;
+  body.coverage = true;
+  body.coverageCount = body.coverageCount != null ? body.coverageCount : Math.max(1, Number(body.targetConfirmed) || 1);
+  if (resolved === 'linkedin_easy_apply' || resolved === 'indeed_apply') {
+    body.requiredChannels = [resolved];
+    body.coverageChannels = [resolved];
+    body.coverageStrategies = [];
+    body.channelAllow = [resolved];
+    if (resolved === 'linkedin_easy_apply') body.includeAssisted = true;
+  } else {
+    body.requiredStrategies = [resolved];
+    body.coverageChannels = [];
+    body.coverageStrategies = [resolved];
+    body.channelAllow = ['external'];
+    body.atsAllow = [resolved];
+  }
+  return body;
 }
 
 function getJson(port, pathname) {
@@ -192,7 +276,9 @@ function summarize(result) {
   return {
     success: data.success === true,
     status: result.status,
-    runId: apply.runId || null,
+    runId: data.runId || apply.runId || null,
+    statusUrl: data.statusUrl || null,
+    eventsUrl: data.eventsUrl || null,
     planned: apply.planned ?? null,
     byChannel: apply.byChannel || null,
     byStrategy: apply.byStrategy || null,
@@ -243,21 +329,145 @@ function summarizeReport(result) {
   };
 }
 
-(async () => {
+function sleep(ms) { return new Promise(resolve => setTimeout(resolve, ms)); }
+
+function terminalStatus(status) {
+  return /^(done|exhausted|day_changed|aborted|cancelled|failed)$/i.test(String(status || ''));
+}
+
+function compactProgress(data) {
+  const run = data && data.run || {};
+  return {
+    runId: run.runId || null,
+    status: run.status || '',
+    phase: run.phase || '',
+    category: run.category || '',
+    progress: `${Math.min(Number(run.currentIndex) || 0, Number(run.total) || 0)}/${Number(run.total) || 0}`,
+    attempt: run.attempt || 0,
+    targetConfirmed: run.targetConfirmed,
+    confirmed: run.confirmed || 0,
+    unverified: run.unverified || 0,
+    failed: run.failed || 0,
+    skipped: run.skipped || 0,
+    currentJob: run.currentJob ? `${run.currentJob.company || ''} — ${run.currentJob.title || ''}`.trim() : null,
+    health: run.health || '',
+    secondsSinceTransition: run.secondsSinceTransition || 0,
+    nextAction: run.nextAction || '',
+    terminalReason: run.terminalReason || null,
+    reportPath: run.reportPath || data && data.report && data.report.file || null,
+  };
+}
+
+function watchExitCode(progress) {
+  if (!progress) return 6;
+  if (progress.health === 'disconnected') return 5;
+  if (progress.health === 'manual') return 3;
+  if (progress.status === 'done' && progress.targetConfirmed != null && progress.confirmed >= progress.targetConfirmed) return 0;
+  if (progress.status === 'exhausted') return 2;
+  if (/^(aborted|cancelled|failed|day_changed)$/i.test(progress.status || '')) return 4;
+  return 0;
+}
+
+async function watchRun(parsed, runId) {
+  if (!runId) throw new Error('watch requires --run-id, a runId returned by start, or a saved local handoff');
+  const encoded = encodeURIComponent(runId);
+  const started = Date.now();
+  const timeoutMs = parsed.timeoutMinutes * 60 * 1000;
+  let lastSignature = '';
+  let lastPrintedAt = 0;
+  let recoveryAttempts = 0;
+  let missingRunRetries = 0;
+  while (Date.now() - started <= timeoutMs) {
+    const status = await getJson(parsed.port, `/apply-runs/${encoded}`);
+    if (!status.ok || !status.data || status.data.ok === false) {
+      // The service worker may be briefly unavailable while an application tab is opening. The
+      // exact-run endpoint must never fall back to a different run, but a bounded retry prevents a
+      // transient storage/WS gap from detaching the watcher from the run it just started.
+      if (status.status === 404 && missingRunRetries < 2) {
+        missingRunRetries++;
+        process.stdout.write(JSON.stringify({ runId, status: 'status_retry', httpStatus: 404,
+          attempt: missingRunRetries, reason: 'exact run temporarily unavailable' }) + '\n');
+        await sleep(Math.min(parsed.pollSeconds * 1000, 2000));
+        continue;
+      }
+      process.stdout.write(JSON.stringify({ runId, status: 'status_error', httpStatus: status.status,
+        error: status.data && status.data.error || 'status request failed' }) + '\n');
+      return status.status === 404 ? 6 : 5;
+    }
+    missingRunRetries = 0;
+    const progress = compactProgress(status.data);
+    if (progress.runId !== runId) {
+      process.stdout.write(JSON.stringify({ runId, status: 'ownership_mismatch', observedRunId: progress.runId }) + '\n');
+      return 6;
+    }
+    const signature = JSON.stringify({ status: progress.status, phase: progress.phase, progress: progress.progress,
+      confirmed: progress.confirmed, failed: progress.failed, skipped: progress.skipped,
+      unverified: progress.unverified, currentJob: progress.currentJob, health: progress.health,
+      nextAction: progress.nextAction });
+    if (signature !== lastSignature || Date.now() - lastPrintedAt >= 60000) {
+      process.stdout.write(parsed.jsonLines ? JSON.stringify(progress) + '\n' :
+        `[${new Date().toISOString()}] ${progress.runId} ${progress.status}/${progress.phase} ` +
+        `${progress.progress} confirmed=${progress.confirmed}/${progress.targetConfirmed ?? '?'} ` +
+        `failed=${progress.failed} skipped=${progress.skipped} health=${progress.health}` +
+        `${progress.currentJob ? ` current="${progress.currentJob}"` : ''}\n`);
+      lastSignature = signature;
+      lastPrintedAt = Date.now();
+      writeRunHandoff({ runId, port: parsed.port, status: progress.status,
+        category: progress.category, reportPath: progress.reportPath });
+    }
+    if (terminalStatus(progress.status)) {
+      const report = await postJson(parsed.port, '/export-apply-report', { runId });
+      const reportSummary = summarizeReport(report);
+      writeRunHandoff({ runId, port: parsed.port, status: progress.status,
+        category: progress.category, reportPath: reportSummary.file || progress.reportPath });
+      process.stdout.write(JSON.stringify({ terminal: progress, report: reportSummary }, null, parsed.jsonLines ? 0 : 2) + '\n');
+      return watchExitCode(progress);
+    }
+    if (progress.health === 'disconnected') return 5;
+    if (progress.health === 'manual') return 3;
+    if (progress.health === 'stalled') {
+      if (recoveryAttempts === 0) {
+        await getJson(parsed.port, '/inspect-apply');
+        recoveryAttempts = 1;
+      } else if (recoveryAttempts === 1 && parsed.allowResume) {
+        const resumed = await postJson(parsed.port, `/apply-runs/${encoded}/resume`, {});
+        if (!resumed.ok || resumed.data && resumed.data.ok === false) return 4;
+        recoveryAttempts = 2;
+      } else {
+        process.stdout.write(JSON.stringify({ runId, status: 'stalled', action: 'stop_for_fix',
+          reason: 'handler remained stalled after bounded inspection/recovery' }) + '\n');
+        return 4;
+      }
+    } else if (progress.health === 'healthy' || progress.health === 'waiting') recoveryAttempts = 0;
+    await sleep(parsed.pollSeconds * 1000);
+  }
+  process.stdout.write(JSON.stringify({ runId, status: 'watch_timeout', timeoutMinutes: parsed.timeoutMinutes }) + '\n');
+  return 4;
+}
+
+async function main(argv = process.argv.slice(2)) {
   try {
-    const parsed = readArgs(process.argv.slice(2));
+    const parsed = readArgs(argv);
     if (parsed.help) {
       process.stdout.write(usage());
       return;
     }
     if (parsed.command === 'status') {
-      const status = await getJson(parsed.port, '/apply-status');
+      const status = await getJson(parsed.port, parsed.runId
+        ? `/apply-runs/${encodeURIComponent(parsed.runId)}` : '/apply-status');
       process.stdout.write(JSON.stringify(summarizeStatus(status), null, 2) + '\n');
       if (!status.ok || status.data && status.data.ok === false) process.exitCode = 1;
       return;
     }
+    if (parsed.command === 'watch') {
+      const handoff = parsed.runId ? null : readRunHandoff();
+      const code = await watchRun(parsed, parsed.runId || handoff && handoff.runId);
+      process.exitCode = code;
+      return;
+    }
     if (parsed.command === 'report') {
-      const report = await postJson(parsed.port, '/export-apply-report', parsed.body);
+      const report = await postJson(parsed.port, '/export-apply-report', Object.assign({}, parsed.body,
+        parsed.runId ? { runId: parsed.runId } : {}));
       process.stdout.write(JSON.stringify(summarizeReport(report), null, 2) + '\n');
       if (!report.ok || report.data && report.data.success === false) process.exitCode = 1;
       return;
@@ -278,10 +488,21 @@ function summarizeReport(result) {
       }
     }
     const result = await postJson(parsed.port, '/apply-all', parsed.body);
-    process.stdout.write(JSON.stringify(summarize(result), null, 2) + '\n');
+    const summary = summarize(result);
+    process.stdout.write(JSON.stringify(summary, null, 2) + '\n');
     if (!result.ok || result.data && result.data.success === false) process.exitCode = 1;
+    else {
+      writeRunHandoff({ runId: summary.runId, port: parsed.port, status: 'started',
+        category: parsed.body.category });
+      if (parsed.wait) process.exitCode = await watchRun(parsed, summary.runId);
+    }
   } catch (e) {
     process.stderr.write(`pja-apply-all: ${e.message}\n\n${usage()}`);
     process.exitCode = 1;
   }
-})();
+}
+
+if (require.main === module) main();
+
+module.exports = { readArgs, applyCategoryOptions, summarize, summarizeStatus, summarizeReport,
+  compactProgress, terminalStatus, watchExitCode, readRunHandoff, writeRunHandoff, watchRun, main };

@@ -180,6 +180,7 @@
     const includeUnscored = opts.includeUnscored === true;
     const now = opts.now != null ? Number(opts.now) : Date.now();
     const atsAllow = opts.atsAllow && opts.atsAllow.length ? new Set(opts.atsAllow.map(x => String(x).toLowerCase())) : null;
+    const channelAllow = opts.channelAllow && opts.channelAllow.length ? new Set(opts.channelAllow.map(x => String(x).toLowerCase())) : null;
     if (maxBrowserAgeMs != null && /^(linkedin|indeed|glassdoor)$/i.test(String(p.sourcePlatform || p.ats || ''))) {
       const seen = typeof p.discoveredAt === 'number' ? p.discoveredAt : Date.parse(p.discoveredAt || '');
       if (!Number.isFinite(seen) || now - seen > maxBrowserAgeMs) return 'stale_browser_listing';
@@ -225,6 +226,7 @@
     if (!channel && (p.isEasyApply || (p.ats === 'linkedin' && p.sourcePlatform === 'linkedin'))) channel = p.isEasyApply ? 'linkedin_easy_apply' : '';
     if (!channel && p.indeedApply) channel = 'indeed_apply';
     if (!channel) channel = 'external';
+    if (channelAllow && !channelAllow.has(String(channel).toLowerCase())) return 'channel_not_allowed';
     const strategy = channel === 'linkedin_easy_apply' ? 'linkedin_ea'
       : channel === 'indeed_apply' ? 'indeed'
       : detectAts(p.applyUrl) || p.detectedAts || p.ats || '';
@@ -281,6 +283,7 @@
     // only jobs whose detected strategy is in the list are eligible — a hard guarantee the run can't
     // touch an account-creation ATS.
     const atsAllow = opts.atsAllow && opts.atsAllow.length ? new Set(opts.atsAllow.map(x => String(x).toLowerCase())) : null;
+    const channelAllow = opts.channelAllow && opts.channelAllow.length ? new Set(opts.channelAllow.map(x => String(x).toLowerCase())) : null;
     const identity = appliedIdentity(opts.appliedRecords || [], opts.appliedRoleKeys instanceof Set
       ? Array.from(opts.appliedRoleKeys) : (opts.appliedRoleKeys || []));
     const blockedIdentity = appliedIdentity(opts.blockedRecords || []);
@@ -330,6 +333,7 @@
       if (!channel && (p.isEasyApply || (p.ats === 'linkedin' && p.sourcePlatform === 'linkedin'))) channel = p.isEasyApply ? 'linkedin_easy_apply' : '';
       if (!channel && p.indeedApply) channel = 'indeed_apply';
       if (!channel) channel = 'external';
+      if (channelAllow && !channelAllow.has(String(channel).toLowerCase())) continue;
       const strategy = channel === 'linkedin_easy_apply' ? 'linkedin_ea'
         : channel === 'indeed_apply' ? 'indeed'
         : detectAts(p.applyUrl) || p.detectedAts || p.ats || '';

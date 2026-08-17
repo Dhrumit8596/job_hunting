@@ -5,6 +5,7 @@ candidate.local.txt
 *.local.json
 *.local.md
 *.local.txt
+.pja-run.local.json
 .env
 .env.*
 candidate*

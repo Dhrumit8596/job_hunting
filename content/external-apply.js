@@ -12,6 +12,13 @@
 
   function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
+  function pjaClassifyExternalPreflight(signals) {
+    const policy = window.PJAPreflight;
+    if (!policy || typeof policy.classifyPreflight !== 'function') return null;
+    return policy.classifyPreflight(signals || {});
+  }
+  window.pjaClassifyExternalPreflight = pjaClassifyExternalPreflight;
+
   // When true, the flow fills the form and stops WITHOUT clicking the final submit,
   // leaving the completed application on screen for the user to review + submit.
   // Set false to auto-submit. (Read live from storage so it can be toggled per run.)
@@ -1325,9 +1332,11 @@
       const chatbotWidget = /paradox\.ai|olivia\.paradox|chatbot|conversational apply/i.test(
         (document.documentElement.outerHTML || '').slice(0, 20000)
       );
-      if (chatApplyControl || (chatbotWidget && /chat to apply|text to apply/.test(pageTxt))) {
+      const preflight = pjaClassifyExternalPreflight({ hasApplyForm: hasFormInputs,
+        hasChatbot: chatApplyControl || (chatbotWidget && /chat to apply|text to apply/.test(pageTxt)) });
+      if (preflight && preflight.action === 'skip' && preflight.reason === 'chatbot_apply_manual') {
         console.log('PJA ext-apply: chatbot apply detected — skipping for manual follow-up');
-        await recordResult(job, { success: false, reason: 'chatbot_apply_manual' });
+        await recordResult(job, { success: false, reason: preflight.reason });
         navigateBack(job);
         return;
       }
@@ -1512,12 +1521,13 @@
       // Detect this BEFORE the generic no_apply_btn path so we record a distinct, honest reason
       // and don't waste retry cycles hunting for an Apply button that will never exist.
       const _bodyTxt = (document.body.innerText || '').slice(0, 400);
-      if (pjaIsClosedPosting(_bodyTxt)) {
+      const closedPreflight = pjaClassifyExternalPreflight({ isDeadPosting: pjaIsClosedPosting(_bodyTxt) });
+      if (closedPreflight && closedPreflight.action === 'skip' && closedPreflight.reason === 'posting_not_found') {
         await new Promise(r => chrome.storage.local.get('pja_dbg', d => { const a=(d.pja_dbg||[]).slice(-40); a.push(new Date().toISOString().slice(11,19)+' [EXT] posting_not_found host='+location.hostname+' url='+location.pathname.slice(-40)); chrome.storage.local.set({pja_dbg:a}, r); }));
         console.log('PJA ext-apply: posting_not_found (404/closed) — skipping.');
         sessionStorage.setItem('pja_last_action', 'recordResult:posting_not_found:' + job.company);
         await maybeRequestApplyHelp('posting_not_found', { formSummary: 'posting unavailable or closed' });
-        await recordResult(job, { success: false, reason: 'posting_not_found' });
+        await recordResult(job, { success: false, reason: closedPreflight.reason });
         navigateBack(job);
         return;
       }

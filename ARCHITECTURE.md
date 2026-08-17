@@ -75,6 +75,28 @@ Both primary entry points converge on `/apply-all`:
 Do not implement a new “apply N jobs” path around `/start-ea`; that endpoint is deliberately
 LinkedIn-only and is not the unified product flow.
 
+### Exact-run observation contract
+
+`/apply-all` allocates the `runId` before planning and returns run-specific status/events URLs.
+`GET /apply-runs/:runId` never falls back to another latest run; unknown IDs return 404. The shared
+pure modules are:
+
+- `apply-run-state.js` — versioned compact state, transition/health enums, ownership-safe reducer.
+- `apply-progress.js` — exact-run snapshot and bounded transition events from queue/ledger state.
+- `apply-recovery-policy.js` — deterministic wait/inspect/resume/stop/report actions.
+
+`npm run apply:all -- --target N --category C --wait` follows the returned ID through terminal
+state and exports its report. `npm run apply:watch -- --run-id ID` resumes that observation in a new
+session. A compact gitignored `.pja-run.local.json` stores only the last followed ID/status; browser
+storage and the ledger remain authoritative. The watcher tolerates at most two transient 404s while
+the service worker changes tabs, then fails with the ownership/missing-run exit code; it never
+substitutes a latest or different run.
+
+Category runs isolate both channel and strategy and use a run-scoped confirmed target, so one
+category's confirmations cannot satisfy another category. Their default evidence-scoring window is
+20 candidates (or four times the requested coverage/attempt reserve, whichever is larger); callers
+may raise `scoreCandidateLimit` explicitly after a supply-limited report.
+
 ## Sourcing and scoring flow
 
 ```mermaid
@@ -181,9 +203,9 @@ These classifications are important when deciding whether a file can be removed.
 
 | Module/path | Status | Evidence / action |
 | --- | --- | --- |
-| `content/apply-preflight.js` | **Shadow / unplugged** | Injected by the manifest and unit-tested, but `window.PJAPreflight` is never called by production code. Equivalent captcha/chatbot/dead-posting/success checks live in `external-apply.js`. Integrate one decision at a time or remove it with explicit regression tests. |
+| `content/apply-preflight.js` | **Active shared policy** | Injected before `external-apply.js`; production delegates stable dead-posting and chatbot decisions to `window.PJAPreflight`. Fill verification/success helpers remain pure seams for later incremental adoption. |
 | `cdp-selfheal.js` | **Active shared policy** | UMD module loaded by the service worker and imported by unit tests. `background.js` owns browser actions but delegates ladder decisions to this module. |
-| `sourcing/router.js` | **Legacy/test-only** | Only its unit test imports it. Current autonomous selection is `sourcing/apply-select.js`; execution routing is `content/apply-router.js`. Do not add new logic here. |
+| `sourcing/router.js` | **Removed legacy seam** | No production loader imported it, so the test-only duplicate router was removed. Corpus eligibility lives in `sourcing/apply-select.js`; execution routing lives in `content/apply-router.js`. |
 | `sourcing/pipeline.js` + `/source` | **Reachable legacy path** | `/source` can still source/review, but queue launch is forced off. Unified one-click uses `/source-v2` + `/apply-run`. Keep only for compatibility or deprecate explicitly. |
 | `/start-ea`, `/start-indeed-apply`, `/start-scan` | **Reachable alternate tools** | Useful targeted/manual endpoints; not part of the unified entry path. |
 | `confirmation-tracker.js` | **Reachable admin path** | Used by `/reconcile`, not by every run automatically. The application ledger remains primary evidence. |
@@ -213,7 +235,7 @@ These classifications are important when deciding whether a file can be removed.
    the existing result/diagnostic contract.
 2. Split `dev-server.js` by endpoint family only after adding handler-level tests; it currently mixes
    HTTP transport, sourcing, scoring, planning, control endpoints, and reports.
-3. Resolve `apply-preflight.js` as either a real shared policy or deleted shadow code.
+3. Continue moving stable preflight/success decisions into `apply-preflight.js` one at a time, with production-usage regression tests.
 4. Standardize bounded structured debug events. `pja_dbg` currently contains useful but inconsistent
    strings from several modules.
 

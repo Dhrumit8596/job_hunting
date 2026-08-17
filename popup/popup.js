@@ -58,6 +58,7 @@ let allContacts = [];
 let activeFilter = 'All';
 let activeContactFilter = 'All';
 let activeTab = 'pipeline';
+let activeOneClickRunId = '';
 
 // ── Init ──────────────────────────────────────────────────────────────────────
 document.getElementById('btn-settings').addEventListener('click', () => {
@@ -230,7 +231,9 @@ async function startOneClickApply() {
     }
     const apply = data.apply || {};
     const planned = apply.planned != null ? apply.planned : 'ranked';
-    const runId = apply.runId ? ` · ${apply.runId}` : '';
+    activeOneClickRunId = String(data.runId || apply.runId || '');
+    if (activeOneClickRunId) chrome.storage.local.set({ pja_ui_follow_run_id: activeOneClickRunId });
+    const runId = activeOneClickRunId ? ` · ${activeOneClickRunId}` : '';
     status.textContent = `Started ${planned} job run${runId}.`;
     status.className = 'one-click-status ok';
     setTimeout(refreshOneClickStatus, 1200);
@@ -249,20 +252,28 @@ function formatRunStatus(data) {
   }
   const r = data.run;
   const total = r.total || 0;
-  const idx = r.currentIndex != null ? Math.min(r.currentIndex + 1, total || r.currentIndex + 1) : '?';
+  const idx = r.attempt != null ? r.attempt : r.currentIndex != null ? Math.min(r.currentIndex + 1, total || r.currentIndex + 1) : '?';
   const job = r.currentJob ? ` · ${r.currentJob.company} — ${r.currentJob.title}` : '';
   const blocked = data.blocked && data.blocked.records ? ` · blocked ${data.blocked.records}` : '';
-  return `${r.status}: ${idx}/${total} · confirmed ${r.confirmed}, failed ${r.failed}, skipped ${r.skipped}${blocked}${job}`;
+  const phase = r.phase ? `/${r.phase}` : '';
+  const health = r.health ? ` · ${r.health}${r.secondsSinceTransition != null ? ` ${r.secondsSinceTransition}s` : ''}` : '';
+  return `${r.status}${phase}: ${idx}/${total} · confirmed ${r.confirmed}, failed ${r.failed}, skipped ${r.skipped}${health}${blocked}${job}`;
 }
 
 async function refreshOneClickStatus() {
   const status = document.getElementById('one-click-status');
   if (!status) return;
   try {
-    const resp = await fetch(`${PJA_DEV_SERVER}/apply-status`);
+    if (!activeOneClickRunId) {
+      const saved = await getLocalStorage(['pja_ui_follow_run_id']);
+      activeOneClickRunId = String(saved.pja_ui_follow_run_id || '');
+    }
+    const statusPath = activeOneClickRunId
+      ? `/apply-runs/${encodeURIComponent(activeOneClickRunId)}` : '/apply-status';
+    const resp = await fetch(`${PJA_DEV_SERVER}${statusPath}`);
     const data = await resp.json().catch(() => ({}));
     status.textContent = formatRunStatus(data);
-    status.className = data && data.run && data.run.status === 'exhausted'
+    status.className = data && data.run && /^(done|exhausted)$/i.test(data.run.status || '')
       ? 'one-click-status ok'
       : data && data.ok !== false ? 'one-click-status' : 'one-click-status error';
   } catch (e) {
@@ -283,7 +294,7 @@ async function exportOneClickReport() {
     const resp = await fetch(`${PJA_DEV_SERVER}/export-apply-report`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({}),
+      body: JSON.stringify(activeOneClickRunId ? { runId: activeOneClickRunId } : {}),
     });
     const data = await resp.json().catch(() => ({}));
     if (!resp.ok || data.success === false) throw new Error(data.error || `HTTP ${resp.status}`);

@@ -24,7 +24,10 @@ module.exports = (t) => {
     popupJs.includes('queries: queries.length ? queries : DEFAULT_SEARCH_TITLES') &&
     popupJs.includes("fetch(`${PJA_DEV_SERVER}/one-click-preflight`") &&
     popupJs.includes("fetch(`${PJA_DEV_SERVER}/apply-all`") &&
-    popupJs.includes("fetch(`${PJA_DEV_SERVER}/apply-status`") &&
+    popupJs.includes("`/apply-runs/${encodeURIComponent(activeOneClickRunId)}` : '/apply-status'") &&
+    popupJs.includes('pja_ui_follow_run_id') &&
+    popupJs.includes('r.phase') &&
+    popupJs.includes('r.health') &&
     popupJs.includes("fetch(`${PJA_DEV_SERVER}/export-apply-report`") &&
     popupJs.includes('data.blocked && data.blocked.records') &&
     popupJs.includes('ONE_CLICK_DEFAULTS') &&
@@ -63,12 +66,15 @@ module.exports = (t) => {
     pkg.scripts['apply:all'] === 'node scripts/pja-apply-all.js' &&
     pkg.scripts['apply:all:dry-run'] === 'node scripts/pja-apply-all.js --dry-run' &&
     pkg.scripts['apply:status'] === 'node scripts/pja-apply-all.js status' &&
+    pkg.scripts['apply:watch'] === 'node scripts/pja-apply-all.js watch' &&
     pkg.scripts['apply:report'] === 'node scripts/pja-apply-all.js report' &&
     pkg.scripts['apply:preflight'] === 'node scripts/pja-apply-all.js preflight' &&
     cli.includes("postJson(parsed.port, '/apply-all', parsed.body)") &&
     cli.includes("getJson(parsed.port, '/one-click-preflight')") &&
-    cli.includes("getJson(parsed.port, '/apply-status')") &&
-    cli.includes("postJson(parsed.port, '/export-apply-report', parsed.body)") &&
+    cli.includes("`/apply-runs/${encodeURIComponent(parsed.runId)}` : '/apply-status'") &&
+    cli.includes('async function watchRun(parsed, runId)') &&
+    cli.includes("parsed.wait) process.exitCode = await watchRun(parsed, summary.runId)") &&
+    cli.includes("postJson(parsed.port, '/export-apply-report', Object.assign({}, parsed.body") &&
     cli.includes('Commands:') &&
     cli.includes('--query <text>') &&
     cli.includes('--retry-blocked') &&
@@ -95,7 +101,9 @@ module.exports = (t) => {
   t.ok(
     dev.includes("req.url === '/export-apply-report'") &&
     dev.includes("req.url === '/one-click-preflight'") &&
-    dev.includes("req.url === '/apply-status'") &&
+    dev.includes("parsedRequestUrl.pathname === '/apply-status'") &&
+    dev.includes("/^\\/apply-runs\\/([^/]+)$/") &&
+    dev.includes("/^\\/apply-runs\\/([^/]+)\\/events$/") &&
     dev.includes('summarizeApplyStatus') &&
     dev.includes('maybeAutoExportApplyReport') &&
     dev.includes('isTerminalApplyStatus') &&
@@ -115,6 +123,8 @@ module.exports = (t) => {
     dev.includes('## Per-job lifecycle') &&
     dev.includes('Good jobs found but not autonomously applyable yet') &&
     dev.includes('diagnosticMatchesReportRow') &&
+    dev.includes('diagnosticHasRunJobIdentity') &&
+    dev.includes('if (runId && !d.runId && !diagnosticHasRunJobIdentity(d, allRows)) continue') &&
     dev.includes('## Failure/drop groups') &&
     dev.includes('## Highest reward fix clusters') &&
     dev.includes('## Fix opportunity candidates from this run') &&
@@ -146,6 +156,8 @@ module.exports = (t) => {
     dev.includes('DEFAULT_COVERAGE_CHANNELS') &&
     dev.includes('DEFAULT_COVERAGE_STRATEGIES') &&
     dev.includes('coverageMode') &&
+    dev.includes('if (o.category && o.scoreCandidateLimit == null)') &&
+    dev.includes('Math.max(20, coverageAttemptCount * 4') &&
     dev.includes('waitForBrowserChannelCoverage') &&
     dev.includes('browserScan') &&
     dev.includes("await launch('linkedin'") &&

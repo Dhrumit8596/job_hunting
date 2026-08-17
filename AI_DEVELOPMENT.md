@@ -59,6 +59,9 @@ answers are required.
 Runtime safeguards now in code:
 
 - Fit scoring uses batches of at most 10 jobs.
+- Single-category apply runs default to a small 20-candidate evidence-scoring window (or four times
+  their requested reserve) rather than the broad planner window. Raise `scoreCandidateLimit` only
+  when a supply-limited report justifies the extra model cost.
 - `scoring-context.js` bounds each long posting to 7,000 characters while retaining its opening,
   requirement-bearing lines, nearby context, and closing.
 - Scoring evidence is cached by both job-description and candidate fingerprints.
@@ -116,6 +119,17 @@ curl http://localhost:6174/health
 
 Live job submission is not a routine test. Prefer pure unit tests, local HTML fixtures, dry-run
 planning, then stop-before-submit validation. A real submission needs an intentional live run.
+
+For an intentional run, let the CLI own progress rather than asking a model to poll logs:
+
+```bash
+npm run apply:all -- --target 5 --category greenhouse --wait --json-lines
+npm run apply:watch -- --run-id apply-...
+```
+
+The watcher prints bounded state changes/heartbeats, follows only the exact `runId`, exports the
+terminal report, and returns a stable exit code. Do not proceed to stop-before-submit or live tests
+when the category coverage gate reports fewer qualified jobs than the requested target.
 
 ## Documentation discipline
 
