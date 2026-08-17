@@ -1193,14 +1193,21 @@ if (DEV_MODE) {
           try {
             const msg = JSON.parse(event.data);
             if (msg.cmd === 'setStorage') {
-              pjaSafeSetStorageFromExternal(msg.data, 'dev-server:setStorage')
-                .then(result => console.log('PJA: storage set via WS:', result.ok ? Object.keys(result.data || {}) : ('rejected ' + result.reason)));
-              // A /source-v2 payload carries the normalized corpus — ingest it into IndexedDB.
-              if (msg.data && msg.data.pja_job_index) {
-                pjaIngestCorpus(msg.data.pja_job_index, msg.data.pja_job_state || {})
-                  .then(n => console.log('PJA: corpus ingested', n, 'jobs'))
-                  .catch(e => console.error('PJA: corpus ingest failed', e));
-              }
+              (async () => {
+                let result;
+                try {
+                  result = await pjaSafeSetStorageFromExternal(msg.data, 'dev-server:setStorage');
+                  console.log('PJA: storage set via WS:', result.ok ? Object.keys(result.data || {}) : ('rejected ' + result.reason));
+                  // A /source-v2 payload carries the normalized corpus — ingest it into IndexedDB.
+                  if (msg.data && msg.data.pja_job_index) {
+                    const ingested = await pjaIngestCorpus(msg.data.pja_job_index, msg.data.pja_job_state || {});
+                    console.log('PJA: corpus ingested', ingested, 'jobs');
+                  }
+                } catch (e) { result = { ok: false, error: e.message }; }
+                if (msg.reqId) {
+                  try { _wsReloadSocket.send(JSON.stringify({ cmd: 'setStorageReply', reqId: msg.reqId, data: result })); } catch (_) {}
+                }
+              })();
             } else if (msg.cmd === 'importCorpus') {
               // Description-rich corpora go directly to IndexedDB over this acknowledged WS path.
               // Avoid mirroring multi-megabyte posting text into chrome.storage's small quota.

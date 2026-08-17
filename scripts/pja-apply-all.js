@@ -106,6 +106,7 @@ function readArgs(argv) {
     jsonLines: false,
     allowResume: false,
     runId: '',
+    handoffFile: RUN_HANDOFF_FILE,
   };
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i];
@@ -363,6 +364,7 @@ function watchExitCode(progress) {
   if (progress.health === 'disconnected') return 5;
   if (progress.health === 'manual') return 3;
   if (progress.status === 'done' && progress.targetConfirmed != null && progress.confirmed >= progress.targetConfirmed) return 0;
+  if (progress.status === 'done' && progress.targetConfirmed != null && progress.confirmed < progress.targetConfirmed) return 2;
   if (progress.status === 'exhausted') return 2;
   if (/^(aborted|cancelled|failed|day_changed)$/i.test(progress.status || '')) return 4;
   return 0;
@@ -413,13 +415,13 @@ async function watchRun(parsed, runId) {
       lastSignature = signature;
       lastPrintedAt = Date.now();
       writeRunHandoff({ runId, port: parsed.port, status: progress.status,
-        category: progress.category, reportPath: progress.reportPath });
+        category: progress.category, reportPath: progress.reportPath }, parsed.handoffFile);
     }
     if (terminalStatus(progress.status)) {
       const report = await postJson(parsed.port, '/export-apply-report', { runId });
       const reportSummary = summarizeReport(report);
       writeRunHandoff({ runId, port: parsed.port, status: progress.status,
-        category: progress.category, reportPath: reportSummary.file || progress.reportPath });
+        category: progress.category, reportPath: reportSummary.file || progress.reportPath }, parsed.handoffFile);
       process.stdout.write(JSON.stringify({ terminal: progress, report: reportSummary }, null, parsed.jsonLines ? 0 : 2) + '\n');
       return watchExitCode(progress);
     }
@@ -460,7 +462,7 @@ async function main(argv = process.argv.slice(2)) {
       return;
     }
     if (parsed.command === 'watch') {
-      const handoff = parsed.runId ? null : readRunHandoff();
+      const handoff = parsed.runId ? null : readRunHandoff(parsed.handoffFile);
       const code = await watchRun(parsed, parsed.runId || handoff && handoff.runId);
       process.exitCode = code;
       return;
@@ -493,7 +495,7 @@ async function main(argv = process.argv.slice(2)) {
     if (!result.ok || result.data && result.data.success === false) process.exitCode = 1;
     else {
       writeRunHandoff({ runId: summary.runId, port: parsed.port, status: 'started',
-        category: parsed.body.category });
+        category: parsed.body.category }, parsed.handoffFile);
       if (parsed.wait) process.exitCode = await watchRun(parsed, summary.runId);
     }
   } catch (e) {

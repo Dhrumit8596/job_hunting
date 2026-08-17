@@ -37,14 +37,17 @@ sequenceDiagram
     Server->>SW: WS getStorage
     SW-->>Server: profile, resume, prefs, active-run state
     Entry->>Server: POST /apply-all
-    Server->>Server: split source options from apply options
-    Server->>Source: POST /source-v2
+    Server->>SW: persist pja_apply_run_control(runId, sourcing)
+    Server-->>Entry: 202 + runId + exact status/events URLs
+    Server->>Server: async /apply-all-internal worker
+    Server->>Source: POST /source-v2 (owned by runId)
     Source->>SW: WS getBrowserShortlist
     Source->>Source: fetch adapters + browser leads
     Source->>Source: normalize, hydrate, filter, dedupe, prescore
     Source->>SW: WS importCorpus
     SW->>DB: import normalized index + state
-    Server->>Server: POST /apply-run
+    Server->>SW: update run control phase to planning
+    Server->>Server: POST /apply-run (owned by runId)
     Server->>SW: WS getApplySet
     SW->>DB: compact planning read
     SW-->>Server: eligible compact job stubs + drop reasons
@@ -56,6 +59,7 @@ sequenceDiagram
         Server->>SW: WS updateScores
         SW->>DB: persist score + evidence fingerprints
     end
+    Server->>SW: verify run-control ownership
     Server->>SW: WS startRankedApply(master)
     SW->>SW: persist pja_ranked_apply and dispatch current job
     SW->>Tab: open dedicated native/ATS handler tab
@@ -77,11 +81,18 @@ LinkedIn-only and is not the unified product flow.
 
 ### Exact-run observation contract
 
-`/apply-all` allocates the `runId` before planning and returns run-specific status/events URLs.
+`/apply-all` allocates and durably persists the `runId` before returning HTTP 202 with run-specific
+status/events URLs. Sourcing and planning then continue asynchronously through
+`/apply-all-internal`. The durable control record makes pre-queue progress observable and prevents
+a caller/network timeout from losing the run identity. Immediately before queue installation,
+`/apply-run` verifies that the worker still owns the same planning record; a timed-out or failed
+worker therefore cannot install a late orphan queue.
+
 `GET /apply-runs/:runId` never falls back to another latest run; unknown IDs return 404. The shared
 pure modules are:
 
 - `apply-run-state.js` — versioned compact state, transition/health enums, ownership-safe reducer.
+- `apply-run-control.js` — pure pre-queue creation, freshness, and late-worker ownership rules.
 - `apply-progress.js` — exact-run snapshot and bounded transition events from queue/ledger state.
 - `apply-recovery-policy.js` — deterministic wait/inspect/resume/stop/report actions.
 
@@ -184,6 +195,7 @@ extracted into independent files.
 | State | Owner | Meaning |
 | --- | --- | --- |
 | IndexedDB `jobs`/`jobState` | `idb-store.js` through service worker | Canonical sourced postings, descriptions, fit evidence, attempts, and state. |
+| `pja_apply_run_control` | `dev-server.js`, acknowledged by `background.js` | Compact durable pre-queue lifecycle (`preflight`/`sourcing`/`planning`) and terminal admission/planning failure. Also acts as the late-worker ownership token. |
 | `pja_ranked_apply` | `background.js` | One global ranked run, current index, in-flight tab, results, planning drops. |
 | `pja_application_ledger` | serialized writer in `background.js` | Evidence-bearing outcome events; used for confirmed counts and idempotency. |
 | `pja_last_completed_apply_run` | `background.js` | Compact terminal snapshot retained after the active run changes. |

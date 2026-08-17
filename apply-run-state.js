@@ -6,7 +6,7 @@
 (function (root) {
   const SCHEMA_VERSION = 2;
   const TERMINAL_STATUSES = new Set(['done', 'exhausted', 'day_changed', 'aborted', 'cancelled', 'failed']);
-  const ACTIVE_STATUSES = new Set(['applying', 'paused_for_patch', 'paused_for_fix']);
+  const ACTIVE_STATUSES = new Set(['planning', 'applying', 'paused_for_patch', 'paused_for_fix']);
   const PHASES = new Set(['preflight', 'sourcing', 'planning', 'dispatching', 'handler', 'recovery', 'reporting', 'terminal']);
   const HEALTH = new Set(['healthy', 'waiting', 'stalled', 'manual', 'disconnected', 'terminal']);
 

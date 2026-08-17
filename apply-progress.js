@@ -5,12 +5,16 @@ const RunState = require('./apply-run-state');
 function runFromStorage(storage, runId) {
   const active = storage && storage.pja_ranked_apply || null;
   const completed = storage && storage.pja_last_completed_apply_run || null;
+  const control = storage && storage.pja_apply_run_control || null;
   if (runId) {
     if (active && active.runId === runId) return active;
     if (completed && completed.runId === runId) return completed;
+    if (control && control.runId === runId) return control;
     return null;
   }
-  return active || completed || null;
+  if (active) return active;
+  if (control && RunState.isActiveStatus(control.status)) return control;
+  return completed || control || null;
 }
 
 function publicProgress(storage = {}, options = {}) {
@@ -31,7 +35,8 @@ function publicProgress(storage = {}, options = {}) {
       String(job.jobId || job.id || '') === failureJobId)
   ));
   const failed = run.results && Array.isArray(run.results.failed) ? run.results.failed : [];
-  const lastFailure = failureOwned ? rawLastFailure : failed[failed.length - 1] || null;
+  const lastFailure = failureOwned ? rawLastFailure : failed[failed.length - 1] ||
+    run.error ? { reason: run.error } : null;
   return {
     ...snapshot,
     lastFailure: lastFailure ? {
@@ -66,7 +71,9 @@ function runEvents(storage = {}, options = {}) {
       occurredAt: Number(event.occurredAt || event.applicationAt) || null,
     }));
   const synthetic = [];
-  if (run.startedAt) synthetic.push({ cursor: Number(run.startedAt), runId, phase: 'dispatching', status: 'started', reason: 'run_installed', occurredAt: Number(run.startedAt) });
+  if (run.startedAt) synthetic.push({ cursor: Number(run.startedAt), runId,
+    phase: String(run.initialPhase || (run.status === 'planning' ? 'preflight' : 'dispatching')),
+    status: 'started', reason: run.status === 'planning' ? 'run_control_created' : 'run_installed', occurredAt: Number(run.startedAt) });
   if (run.finishedAt) synthetic.push({ cursor: Number(run.finishedAt), runId, phase: 'terminal', status: String(run.status || ''), reason: String(run.terminalReason || run.status || ''), occurredAt: Number(run.finishedAt) });
   return synthetic.concat(rows)
     .filter(event => event.cursor > after)

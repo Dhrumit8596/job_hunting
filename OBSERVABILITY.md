@@ -66,6 +66,11 @@ raw logs or latest-run inference. Public progress includes phase, category, coun
 job identity, seconds since the last meaningful transition, health, and next action; it excludes
 profile values, descriptions, HTML, and form values.
 
+The exact-run endpoint is valid as soon as `/apply-all` returns: before a browser queue exists it
+reads the acknowledged `pja_apply_run_control` record and reports `sourcing` or `planning`. If that
+worker fails or times out, the same run becomes terminal `failed` and retains a bounded error;
+there must never be a later unowned queue installation for that ID.
+
 ## Reason-to-owner map
 
 | Failure family | Primary owner |

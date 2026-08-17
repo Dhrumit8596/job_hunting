@@ -26,6 +26,7 @@ const { buildRestartPlan } = require('./chrome-restart');
 const { normalizeEnginePreference, parseEngine, codexModel, codexReasoningEffort, runAiCli } = require('./ai-cli');
 const { scoringExcerpt } = require('./scoring-context');
 const ApplyProgress = require('./apply-progress');
+const ApplyRunControl = require('./apply-run-control');
 const { decideRecovery } = require('./apply-recovery-policy');
 
 const PORT = Number(process.env.PJA_DEV_PORT || 6174);
@@ -39,6 +40,9 @@ let _lastQueueStatus = null;
 // Process-local planning mutex. The extension service worker independently enforces the final
 // active-run lock, but this closes the minutes-long scoreAll race between concurrent HTTP calls.
 let applyRunPlanning = false;
+// Admission is much shorter than planning: it only serializes preflight + durable control write so
+// two simultaneous one-click requests cannot both pass before either run identity is visible.
+let applyRunAdmission = false;
 
 const DEFAULT_COVERAGE_CHANNELS = ['linkedin_easy_apply', 'indeed_apply'];
 const DEFAULT_COVERAGE_STRATEGIES = ['greenhouse', 'workday', 'ashby', 'lever', 'smartrecruiters'];
@@ -415,6 +419,22 @@ function setStorageToExtension(obj) {
     if (c.readyState === 1) { c.send(JSON.stringify({ cmd: 'setStorage', data: obj })); pushed++; }
   }
   return pushed;
+}
+
+async function persistApplyRunControl(value, options = {}) {
+  if (!value || !value.runId) throw new Error('apply run control requires runId');
+  const currentStorage = await getStorageFromExtension(['pja_apply_run_control'], 5000);
+  const current = currentStorage && currentStorage.pja_apply_run_control;
+  const next = ApplyRunControl.build(current, value, options);
+  const result = await wsAsk('setStorage', { data: { pja_apply_run_control: next } }, 'setStorageReply', 10000);
+  if (!result || result.ok !== true) throw new Error(result && (result.error || result.reason) || 'apply run control was not persisted');
+  return next;
+}
+
+function activeApplyRunControl(control, now = Date.now()) {
+  // A crashed dev server cannot finalize its control record. Do not permanently deadlock future
+  // work, but keep the record observable so its exact-run status reports stalled/abandoned work.
+  return ApplyRunControl.isActive(control, { now, maxAgeMs: 60 * 60 * 1000 });
 }
 
 // Fire-and-forget WS command to the extension (e.g. openTab).
@@ -1034,7 +1054,8 @@ function summarizeBlockedFromLedger(storage = {}) {
 function renderApplyRunReport(storage, options = {}) {
   const activeRanked = storage && storage.pja_ranked_apply || null;
   const completedRanked = storage && storage.pja_last_completed_apply_run || null;
-  const ranked = activeRanked || completedRanked || null;
+  const runControl = storage && storage.pja_apply_run_control || null;
+  const ranked = ApplyProgress.runFromStorage(storage || {}, options.runId) || null;
   const ledger = storage && storage.pja_application_ledger && storage.pja_application_ledger.events
     ? Object.values(storage.pja_application_ledger.events) : [];
   const appliedLog = Array.isArray(storage && storage.pja_applied_log) ? storage.pja_applied_log : [];
@@ -1062,7 +1083,15 @@ function renderApplyRunReport(storage, options = {}) {
     .slice(-40)
     .map(e => compactReportJob(e, e.status || (e.success ? 'confirmed' : 'applied_log')));
   const debugTail = Array.isArray(storage && storage.pja_dbg) ? storage.pja_dbg.slice(-30).map(safeReportText) : [];
-  const lastFailure = compactReportJob(storage && storage.pja_last_apply_failure, 'last_failure');
+  const rawLastFailure = storage && storage.pja_last_apply_failure || null;
+  const rankedJobIds = new Set((Array.isArray(ranked && ranked.jobs) ? ranked.jobs : [])
+    .map(job => String(job && (job.jobId || job.id) || '')).filter(Boolean));
+  const rawFailureOwned = !!(rawLastFailure && ranked && (
+    rawLastFailure.runId && rawLastFailure.runId === ranked.runId ||
+    !rawLastFailure.runId && rankedJobIds.has(String(rawLastFailure.jobId || rawLastFailure.id || ''))
+  ));
+  const lastFailure = compactReportJob(rawFailureOwned ? rawLastFailure
+    : ranked && ranked.error ? { runId, reason: ranked.error } : null, 'last_failure');
   const profileFieldCount = storage && storage.pja_profile && typeof storage.pja_profile === 'object'
     ? Object.entries(storage.pja_profile).filter(([k, v]) => k !== 'savedAt' && v != null && String(v).trim()).length : null;
   const resumeConfigured = !!(storage && storage.pja_resume_filename);
@@ -1088,7 +1117,10 @@ function renderApplyRunReport(storage, options = {}) {
   lines.push('## Summary');
   lines.push('');
   lines.push(`- Run status: ${safeReportText(ranked && ranked.status || 'unknown')}`);
-  lines.push(`- State source: ${activeRanked ? 'active ranked run' : completedRanked ? 'last completed ranked run' : 'none'}`);
+  const stateSource = activeRanked && activeRanked.runId === runId ? 'active ranked run'
+    : completedRanked && completedRanked.runId === runId ? 'last completed ranked run'
+      : runControl && runControl.runId === runId ? 'durable run control' : 'none';
+  lines.push(`- State source: ${stateSource}`);
   if (ranked && ranked.runMode) lines.push(`- Run mode: ${safeReportText(ranked.runMode)}`);
   lines.push(`- Current index: ${ranked && ranked.currentIndex != null ? ranked.currentIndex : 'unknown'} / ${ranked && Array.isArray(ranked.jobs) ? ranked.jobs.length : 'unknown'}`);
   lines.push(`- Confirmed: ${count('confirmed')}`);
@@ -1384,9 +1416,11 @@ function appendPlanningDrop(planningDrops, job, reason, dropLimit = 200) {
 
 async function oneClickPreflight(options = {}) {
   const status = await refreshRuntimeCandidateProfile();
-  const storage = wsClients.size ? await getStorageFromExtension(['pja_ranked_apply'], 5000) : {};
-  const active = storage && storage.pja_ranked_apply && /^(applying|paused_for_patch|paused_for_fix)$/i
+  const storage = wsClients.size ? await getStorageFromExtension(['pja_ranked_apply', 'pja_apply_run_control'], 5000) : {};
+  const activeRanked = storage && storage.pja_ranked_apply && /^(applying|paused_for_patch|paused_for_fix)$/i
     .test(String(storage.pja_ranked_apply.status || ''));
+  const activeControl = activeApplyRunControl(storage && storage.pja_apply_run_control);
+  const active = activeRanked || activeControl;
   const problems = [];
   if (wsClients.size < 1) problems.push('extension_not_connected');
   if (options.requireCandidateProfile !== false && !status.configured) problems.push('candidate_profile_not_configured');
@@ -1398,10 +1432,12 @@ async function oneClickPreflight(options = {}) {
     clients: wsClients.size,
     candidate: status,
     activeRun: active ? {
-      runId: storage.pja_ranked_apply.runId || null,
-      status: storage.pja_ranked_apply.status || '',
-      currentIndex: storage.pja_ranked_apply.currentIndex,
-      total: Array.isArray(storage.pja_ranked_apply.jobs) ? storage.pja_ranked_apply.jobs.length : null,
+      runId: (activeRanked ? storage.pja_ranked_apply : storage.pja_apply_run_control).runId || null,
+      status: (activeRanked ? storage.pja_ranked_apply : storage.pja_apply_run_control).status || '',
+      phase: (activeRanked ? storage.pja_ranked_apply : storage.pja_apply_run_control).phase || '',
+      currentIndex: (activeRanked ? storage.pja_ranked_apply : storage.pja_apply_run_control).currentIndex,
+      total: Array.isArray((activeRanked ? storage.pja_ranked_apply : storage.pja_apply_run_control).jobs)
+        ? (activeRanked ? storage.pja_ranked_apply : storage.pja_apply_run_control).jobs.length : null,
     } : null,
   };
 }
@@ -1427,7 +1463,7 @@ function summarizeApplyStatus(storage = {}, options = {}) {
   ));
   const failedRows = results && Array.isArray(results.failed) ? results.failed : [];
   const lastFailure = failureOwned ? rawLastFailure : failedRows[failedRows.length - 1] || null;
-  const active = !!(ranked && /^(applying|paused_for_patch|paused_for_fix)$/i.test(String(ranked.status || '')));
+  const active = !!(ranked && /^(planning|applying|paused_for_patch|paused_for_fix)$/i.test(String(ranked.status || '')));
   const publicRun = ApplyProgress.publicProgress(storage, {
     runId: options.runId,
     clients: wsClients.size,
@@ -1649,7 +1685,7 @@ async function handleRequest(req, res) {
     try {
       const runId = safeReportId(decodeURIComponent(runStatusMatch[1] || ''));
       const st = await getStorageFromExtension([
-        'pja_ranked_apply', 'pja_last_completed_apply_run', 'pja_application_ledger',
+        'pja_ranked_apply', 'pja_last_completed_apply_run', 'pja_apply_run_control', 'pja_application_ledger',
         'pja_applied_log', 'pja_apply_diagnostics', 'pja_last_apply_failure', 'pja_dbg',
       ], 8000);
       const selected = ApplyProgress.runFromStorage(st || {}, runId);
@@ -1675,7 +1711,7 @@ async function handleRequest(req, res) {
     try {
       const runId = safeReportId(decodeURIComponent(runEventsMatch[1] || ''));
       const st = await getStorageFromExtension([
-        'pja_ranked_apply', 'pja_last_completed_apply_run', 'pja_application_ledger',
+        'pja_ranked_apply', 'pja_last_completed_apply_run', 'pja_apply_run_control', 'pja_application_ledger',
       ], 8000);
       if (!ApplyProgress.runFromStorage(st || {}, runId)) {
         res.writeHead(404, CORS);
@@ -1723,6 +1759,7 @@ async function handleRequest(req, res) {
       const st = await getStorageFromExtension([
         'pja_ranked_apply',
         'pja_last_completed_apply_run',
+        'pja_apply_run_control',
         'pja_application_ledger',
         'pja_applied_log',
         'pja_apply_diagnostics',
@@ -1964,6 +2001,7 @@ async function handleRequest(req, res) {
         const st = await getStorageFromExtension([
           'pja_ranked_apply',
           'pja_last_completed_apply_run',
+          'pja_apply_run_control',
           'pja_application_ledger',
           'pja_applied_log',
           'pja_apply_diagnostics',
@@ -2558,7 +2596,83 @@ ${(description || '').slice(0, 6000)}`;
     return;
   }
 
-  // ── /apply-all: safe full-flow wrapper for normal use ──────────────────────
+  // ── /apply-all: durable asynchronous entrypoint for normal use ─────────────
+  // Persist the run identity before acknowledging the request, then let the internal worker own
+  // sourcing and planning. Callers can immediately follow the exact run without holding a fragile
+  // HTTP request open for several model/browser operations.
+  if (req.method === 'POST' && req.url === '/apply-all') {
+    let body = '';
+    req.on('data', d => body += d);
+    req.on('end', async () => {
+      let requestedRunId = '';
+      if (applyRunAdmission) {
+        res.writeHead(409, CORS);
+        res.end(JSON.stringify({ success: false, stage: 'admission', error: 'another apply run is being admitted' }));
+        return;
+      }
+      applyRunAdmission = true;
+      try {
+        const o = body ? JSON.parse(body) : {};
+        requestedRunId = safeReportId(o.runId || `apply-${Date.now()}`);
+        if (o.preflight !== false) {
+          const preflight = await oneClickPreflight(o);
+          if (!preflight.ok) {
+            res.writeHead(409, CORS);
+            res.end(JSON.stringify({ success: false, stage: 'preflight', preflight,
+              error: 'one-click preflight failed: ' + preflight.problems.join(', ') }));
+            return;
+          }
+        }
+        const targetConfirmed = o.targetConfirmed != null ? Math.max(1, Number(o.targetConfirmed) || 1) : 20;
+        await persistApplyRunControl({ runId: requestedRunId, status: 'planning', phase: 'sourcing',
+          initialPhase: 'preflight', targetConfirmed, category: String(o.category || '').trim().toLowerCase(),
+          terminalReason: null, error: null }, { create: true });
+        const accepted = { success: true, accepted: true, status: 'planning', phase: 'sourcing',
+          runId: requestedRunId,
+          statusUrl: `/apply-runs/${encodeURIComponent(requestedRunId)}`,
+          eventsUrl: `/apply-runs/${encodeURIComponent(requestedRunId)}/events`,
+          reportUrl: '/export-apply-report' };
+        res.writeHead(202, CORS);
+        res.end(JSON.stringify(accepted));
+
+        setTimeout(async () => {
+          try {
+            const worker = await postLocalJson('/apply-all-internal', Object.assign({}, o, {
+              runId: requestedRunId, preflight: false, _ownedRunControl: true,
+            }), Number(o.workflowTimeoutMs) || 45 * 60 * 1000);
+            const failed = !worker.ok || worker.data && worker.data.success === false;
+            if (failed) {
+              await persistApplyRunControl({ runId: requestedRunId, status: 'failed', phase: 'terminal',
+                terminalReason: String(worker.data && (worker.data.error || worker.data.stage) || `worker_http_${worker.status}`).slice(0, 120),
+                error: String(worker.data && worker.data.error || `HTTP ${worker.status}`).slice(0, 500) });
+            } else {
+              const applyResult = worker.data && worker.data.apply || {};
+              const noQueue = !applyResult.dryRun && Number(applyResult.planned) === 0;
+              await persistApplyRunControl({ runId: requestedRunId, status: noQueue ? 'exhausted' : 'done', phase: 'terminal',
+                terminalReason: applyResult.dryRun ? 'dry_run_complete'
+                  : noQueue ? String(applyResult.note || 'nothing_eligible').slice(0, 120)
+                    : 'handed_off_to_ranked_run' });
+            }
+          } catch (e) {
+            try {
+              await persistApplyRunControl({ runId: requestedRunId, status: 'failed', phase: 'terminal',
+                terminalReason: /abort/i.test(e.name || '') ? 'workflow_timeout' : 'workflow_error',
+                error: String(e.message || e).slice(0, 500) });
+            } catch (persistError) {
+              console.error(`[PJA] could not finalize run control ${requestedRunId}:`, persistError.message);
+            }
+          }
+        }, 0);
+      } catch (e) {
+        console.error('[PJA] /apply-all admission error:', e.message);
+        res.writeHead(503, CORS);
+        res.end(JSON.stringify({ success: false, runId: requestedRunId || null, stage: 'admission', error: e.message }));
+      } finally { applyRunAdmission = false; }
+    });
+    return;
+  }
+
+  // ── /apply-all-internal: source + plan worker owned by the durable control ─
   // Runs broad sourcing first, then the unified ranked driver. Prefer this over
   // /start-ea for "apply N jobs" because /start-ea is LinkedIn Easy Apply only.
   // body supports:
@@ -2568,7 +2682,7 @@ ${(description || '').slice(0, 6000)}`;
   //   }
   // Unrecognized top-level fields are forwarded to /apply-run, so callers can still use
   // atsAllow, companyDeny, titleDeny, candidateIds, stopBeforeSubmit, force, etc.
-  if (req.method === 'POST' && req.url === '/apply-all') {
+  if (req.method === 'POST' && req.url === '/apply-all-internal') {
     let body = '';
     req.on('data', d => body += d);
     req.on('end', async () => {
@@ -2660,7 +2774,7 @@ ${(description || '').slice(0, 6000)}`;
 
         let sourceResp = { ok: true, skipped: true, status: 200, data: { note: 'source:false' } };
         if (o.source !== false) {
-          sourceResp = await postLocalJson('/source-v2', sourceBody, Number(o.sourceTimeoutMs) || 300000);
+          sourceResp = await postLocalJson('/source-v2', sourceBody, Number(o.sourceTimeoutMs) || 15 * 60 * 1000);
           if (!sourceResp.ok || sourceResp.data && sourceResp.data.success === false) {
             res.writeHead(sourceResp.status || 502, CORS);
             res.end(JSON.stringify({ success: false, stage: 'source-v2', sourceOptions: sourceBody,
@@ -2679,7 +2793,8 @@ ${(description || '').slice(0, 6000)}`;
           }
         }
 
-        const applyResp = await postLocalJson('/apply-run', applyBody, Number(o.applyTimeoutMs) || 600000);
+        if (o._ownedRunControl) await persistApplyRunControl({ runId: requestedRunId, status: 'planning', phase: 'planning' });
+        const applyResp = await postLocalJson('/apply-run', applyBody, Number(o.applyTimeoutMs) || 20 * 60 * 1000);
         res.writeHead(applyResp.status || (applyResp.ok ? 200 : 502), CORS);
         const startedRunId = applyResp.data && applyResp.data.runId || requestedRunId;
         res.end(JSON.stringify({ success: !!(applyResp.ok && (!applyResp.data || applyResp.data.success !== false)),
@@ -2691,9 +2806,9 @@ ${(description || '').slice(0, 6000)}`;
           sourceHydration: sourceResp.data && sourceResp.data.report && sourceResp.data.report.modalityC
             ? sourceResp.data.report.modalityC.channelHydration || null : null,
           source: sourceResp.data, apply: applyResp.data }));
-        console.log(`[PJA] /apply-all: source=${o.source === false ? 'skipped' : 'done'} applyStatus=${applyResp.status}`);
+        console.log(`[PJA] /apply-all-internal: source=${o.source === false ? 'skipped' : 'done'} applyStatus=${applyResp.status}`);
       } catch (e) {
-        console.error('[PJA] /apply-all error:', e.message);
+        console.error('[PJA] /apply-all-internal error:', e.message);
         res.writeHead(500, CORS);
         res.end(JSON.stringify({ success: false, error: e.message }));
       }
@@ -3203,6 +3318,18 @@ ${(description || '').slice(0, 6000)}`;
           indeed_apply: indeedApplyJobs.length };
 
         if (!dryRun) {
+          if (o._ownedRunControl) {
+            const ownershipStorage = await getStorageFromExtension(['pja_apply_run_control'], 8000);
+            const ownership = ownershipStorage && ownershipStorage.pja_apply_run_control;
+            if (!ApplyRunControl.ownsPlanning(ownership, runId)) {
+              res.writeHead(409, CORS);
+              res.end(JSON.stringify({ success: false, stage: 'run_ownership',
+                error: 'planner no longer owns this run; refusing late queue installation', runId,
+                observedRunId: ownership && ownership.runId || null,
+                observedStatus: ownership && ownership.status || null }));
+              return;
+            }
+          }
           const master = { schemaVersion: 2, status: 'applying', phase: 'dispatching', jobs: queueJobs, currentIndex: 0, inFlightIndex: null,
             results: { confirmed: [], failed: [], unverified: [], skipped: [] }, blockedChannels: [],
             runId, category, runMode, applyAllAboveScore, targetConfirmed: dailyTarget, dailyTarget, attemptCap, threshold,

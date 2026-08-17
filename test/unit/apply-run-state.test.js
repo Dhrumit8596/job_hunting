@@ -40,6 +40,11 @@ module.exports = t => {
   const disconnected = RunState.createSnapshot(run, { now, clients: 0 });
   t.eq(disconnected.health, 'disconnected', 'run state: missing extension is explicit');
 
+  const planning = RunState.createSnapshot({ runId: 'plan-1', status: 'planning', phase: 'sourcing',
+    jobs: [], counts: {}, startedAt: now - 1000, updatedAt: now - 500 }, { now, clients: 1 });
+  t.ok(planning.active, 'run state: planning is active before a browser queue exists');
+  t.eq(planning.phase, 'sourcing', 'run state: planning preserves its observable phase');
+
   const terminal = RunState.createSnapshot({ ...run, status: 'done', finishedAt: now }, { now, clients: 1 });
   t.eq(terminal.phase, 'terminal', 'run state: terminal status maps to terminal phase');
   t.eq(terminal.terminalReason, 'done', 'run state: terminal reason defaults to status');

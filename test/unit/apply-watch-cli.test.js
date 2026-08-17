@@ -33,6 +33,8 @@ module.exports = async t => {
     'watch CLI: target success exits zero');
   t.eq(CLI.watchExitCode({ status: 'exhausted', health: 'terminal', targetConfirmed: 5, confirmed: 3 }), 2,
     'watch CLI: supply exhaustion has a stable nonzero code');
+  t.eq(CLI.watchExitCode({ status: 'done', health: 'terminal', targetConfirmed: 5, confirmed: 0 }), 2,
+    'watch CLI: a misleading done state cannot report success below target');
 
   const handoffFile = path.join(os.tmpdir(), `pja-run-handoff-${process.pid}.json`);
   try {
@@ -55,14 +57,15 @@ module.exports = async t => {
         res.end(JSON.stringify({ ok: false, error: 'apply run not found' }));
         return;
       }
-      const terminal = statusHits > 2;
+      const planning = statusHits === 2;
+      const terminal = statusHits > 3;
       res.end(JSON.stringify({ ok: true, clients: 1, run: {
-        schemaVersion: 2, runId: 'apply-fixture', status: terminal ? 'done' : 'applying',
-        phase: terminal ? 'terminal' : 'handler', category: 'greenhouse', currentIndex: terminal ? 1 : 0,
-        total: 1, attempt: 1, targetConfirmed: 1, confirmed: terminal ? 1 : 0,
-        unverified: 0, failed: 0, skipped: 0, health: terminal ? 'terminal' : 'waiting',
-        nextAction: terminal ? 'export_report' : 'waiting_for_handler', secondsSinceTransition: 0,
-        currentJob: terminal ? null : { company: 'Fixture Co', title: 'Fixture Role' },
+        schemaVersion: 2, runId: 'apply-fixture', status: terminal ? 'done' : planning ? 'planning' : 'applying',
+        phase: terminal ? 'terminal' : planning ? 'sourcing' : 'handler', category: 'greenhouse', currentIndex: terminal ? 1 : 0,
+        total: planning ? 0 : 1, attempt: planning ? 0 : 1, targetConfirmed: 1, confirmed: terminal ? 1 : 0,
+        unverified: 0, failed: 0, skipped: 0, health: terminal ? 'terminal' : planning ? 'healthy' : 'waiting',
+        nextAction: terminal ? 'export_report' : planning ? 'wait' : 'waiting_for_handler', secondsSinceTransition: 0,
+        currentJob: terminal || planning ? null : { company: 'Fixture Co', title: 'Fixture Role' },
       } }));
       return;
     }
@@ -76,13 +79,15 @@ module.exports = async t => {
     res.end(JSON.stringify({ error: 'not found' }));
   });
   await new Promise(resolve => fixture.listen(0, '127.0.0.1', resolve));
+  const fixtureHandoff = path.join(os.tmpdir(), `pja-watch-fixture-${process.pid}.json`);
   try {
     const code = await CLI.watchRun({ port: fixture.address().port, timeoutMinutes: 1,
-      pollSeconds: 1, jsonLines: true, allowResume: false }, 'apply-fixture');
+      pollSeconds: 1, jsonLines: true, allowResume: false, handoffFile: fixtureHandoff }, 'apply-fixture');
     t.eq(code, 0, 'watch CLI: fixture run is followed from active state to confirmed terminal success');
-    t.ok(statusHits >= 3, 'watch CLI: fixture watcher survives one transient exact-run 404 and polls until terminal');
+    t.ok(statusHits >= 4, 'watch CLI: fixture watcher follows pre-queue planning, applying, and terminal state after a transient 404');
     t.eq(reportHits, 1, 'watch CLI: fixture terminal handling exports exactly one report');
   } finally {
+    try { fs.unlinkSync(fixtureHandoff); } catch (_) {}
     await new Promise(resolve => fixture.close(resolve));
   }
 };

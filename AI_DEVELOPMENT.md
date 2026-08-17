@@ -130,6 +130,10 @@ npm run apply:watch -- --run-id apply-...
 The watcher prints bounded state changes/heartbeats, follows only the exact `runId`, exports the
 terminal report, and returns a stable exit code. Do not proceed to stop-before-submit or live tests
 when the category coverage gate reports fewer qualified jobs than the requested target.
+The initial command should return quickly with HTTP 202 and a durable run ID; sourcing and planning
+are normal watcher phases, not a reason to keep an HTTP request or model session open. Tests that
+exercise the watcher must pass a temporary handoff path so they cannot overwrite
+`.pja-run.local.json`.
 
 ## Documentation discipline
 
