@@ -27,6 +27,7 @@ const { normalizeEnginePreference, parseEngine, codexModel, codexReasoningEffort
 const { scoringExcerpt } = require('./scoring-context');
 const ApplyProgress = require('./apply-progress');
 const ApplyRunControl = require('./apply-run-control');
+const LocalJsonClient = require('./local-json-client');
 const { decideRecovery } = require('./apply-recovery-policy');
 
 const PORT = Number(process.env.PJA_DEV_PORT || 6174);
@@ -238,22 +239,7 @@ const CORS = {
 };
 
 async function postLocalJson(pathname, body, timeoutMs = 300000) {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
-  try {
-    const resp = await fetch(`http://127.0.0.1:${PORT}${pathname}`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body || {}),
-      signal: controller.signal,
-    });
-    const text = await resp.text();
-    let data;
-    try { data = text ? JSON.parse(text) : {}; } catch (_) { data = { raw: text }; }
-    return { ok: resp.ok, status: resp.status, data };
-  } finally {
-    clearTimeout(timer);
-  }
+  return LocalJsonClient.postJson({ port: PORT, pathname, body, timeoutMs });
 }
 
 function gateScoredApplyJobs(inputJobs, opts = {}) {

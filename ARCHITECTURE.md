@@ -89,12 +89,16 @@ status/events URLs. Sourcing and planning then continue asynchronously through
 a caller/network timeout from losing the run identity. Immediately before queue installation,
 `/apply-run` verifies that the worker still owns the same planning record; a timed-out or failed
 worker therefore cannot install a late orphan queue.
+Internal `/source-v2` and `/apply-run` calls use `local-json-client.js`, whose explicit request
+timeout covers the complete response rather than inheriting Node fetch's shorter implicit header
+timeout. Transport failures identify the endpoint and configured duration.
 
 `GET /apply-runs/:runId` never falls back to another latest run; unknown IDs return 404. The shared
 pure modules are:
 
 - `apply-run-state.js` — versioned compact state, transition/health enums, ownership-safe reducer.
 - `apply-run-control.js` — pure pre-queue creation, freshness, and late-worker ownership rules.
+- `local-json-client.js` — explicit-timeout loopback transport for long source/plan workers.
 - `apply-progress.js` — exact-run snapshot and bounded transition events from queue/ledger state.
 - `apply-recovery-policy.js` — deterministic wait/inspect/resume/stop/report actions.
 
