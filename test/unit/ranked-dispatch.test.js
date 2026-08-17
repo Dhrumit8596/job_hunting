@@ -7,6 +7,11 @@ const ROOT = path.resolve(__dirname, '../..');
 module.exports = async (t) => {
   const source = fs.readFileSync(path.join(ROOT, 'background.js'), 'utf8');
   const dev = fs.readFileSync(path.join(ROOT, 'dev-server.js'), 'utf8');
+  t.ok(source.includes("attempt ? 'click-retry' : 'click'") &&
+    source.includes('/debugger is not attached/i.test(message)') &&
+    source.includes('LinkedIn click recovered after detached debugger') &&
+    source.includes('recovered: !!result?.recovered'),
+  'LinkedIn trusted click retries a detached CDP session once and reports recovery');
   t.ok(source.includes("'content/apply-router.js'") &&
     source.includes('const PJA_RANKED_LAUNCHERS = {') &&
     source.includes('async function pjaDispatchRankedJob(job, master)') &&

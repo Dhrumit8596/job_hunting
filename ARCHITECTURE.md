@@ -246,6 +246,9 @@ These classifications are important when deciding whether a file can be removed.
   answers. Missing facts become `needs_manual`/missing-question diagnostics.
 - CAPTCHA, anti-bot, and account locks are terminal/manual states, not bypass targets.
 - React-controlled fields must use native setters/events, Fiber callbacks, or trusted CDP paths.
+- LinkedIn modal advance/submit actions must remain trusted CDP clicks. A detached session gets one
+  serialized detach/reattach retry; transport failure is terminal `trusted_click_failed`, never a
+  synthetic click fallback.
 - `runId`/job ownership checks must remain around result writes and queue advancement.
 - Planning and active-run storage stay compact; descriptions belong in IndexedDB.
 - Rule ordering in `PJA_FIELD_RULES` is semantic and must stay most-specific first.

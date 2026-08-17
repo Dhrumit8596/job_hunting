@@ -2669,21 +2669,39 @@ async function cdpLinkedInClick(tabId, x, y) {
   if (typeof x !== 'number' || typeof y !== 'number') throw new Error('no coords for LinkedIn click');
   const xr = Math.round(x), yr = Math.round(y);
 
-  const attachedC = await cdpAttachDiag(tabId, 'click');
-  if (!attachedC) throw new Error('cdp-attach-failed');
-  try {
-    await chrome.debugger.sendCommand({ tabId }, 'Input.dispatchMouseEvent', {
-      type: 'mouseMoved', x: xr, y: yr, button: 'none', buttons: 0, clickCount: 0, modifiers: 0
-    });
-    await new Promise(r => setTimeout(r, 40));
-    await chrome.debugger.sendCommand({ tabId }, 'Input.dispatchMouseEvent', {
-      type: 'mousePressed', x: xr, y: yr, button: 'left', buttons: 1, clickCount: 1, modifiers: 0
-    });
-    await new Promise(r => setTimeout(r, 70));
-    await chrome.debugger.sendCommand({ tabId }, 'Input.dispatchMouseEvent', {
-      type: 'mouseReleased', x: xr, y: yr, button: 'left', buttons: 0, clickCount: 1, modifiers: 0
-    });
-  } finally { try { await chrome.debugger.detach({ tabId }); } catch (_) {} }
+  // A service-worker/reload race can detach CDP between a successful attach and the first
+  // command. Retry that specific transport failure once under the existing per-tab lock. Never
+  // replace this with a synthetic DOM click: LinkedIn rejects untrusted step-advance events.
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const attachedC = await cdpAttachDiag(tabId, attempt ? 'click-retry' : 'click');
+    if (!attachedC) throw new Error('cdp-attach-failed');
+    try {
+      await chrome.debugger.sendCommand({ tabId }, 'Input.dispatchMouseEvent', {
+        type: 'mouseMoved', x: xr, y: yr, button: 'none', buttons: 0, clickCount: 0, modifiers: 0
+      });
+      await new Promise(r => setTimeout(r, 40));
+      await chrome.debugger.sendCommand({ tabId }, 'Input.dispatchMouseEvent', {
+        type: 'mousePressed', x: xr, y: yr, button: 'left', buttons: 1, clickCount: 1, modifiers: 0
+      });
+      await new Promise(r => setTimeout(r, 70));
+      await chrome.debugger.sendCommand({ tabId }, 'Input.dispatchMouseEvent', {
+        type: 'mouseReleased', x: xr, y: yr, button: 'left', buttons: 0, clickCount: 1, modifiers: 0
+      });
+      if (attempt) await cdpDbg('LinkedIn click recovered after detached debugger');
+      return { recovered: attempt > 0 };
+    } catch (e) {
+      const message = String(e && e.message || e);
+      if (attempt === 0 && /debugger is not attached/i.test(message)) {
+        await cdpDbg('LinkedIn click detached after attach; retrying once');
+        try { await chrome.debugger.detach({ tabId }); } catch (_) {}
+        await new Promise(r => setTimeout(r, 100));
+        continue;
+      }
+      throw e;
+    } finally {
+      try { await chrome.debugger.detach({ tabId }); } catch (_) {}
+    }
+  }
 }
 
 // ── CDP trusted type: click at coords to focus, then type text via real key events ──
@@ -3179,7 +3197,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
 
   if (msg.type === 'LINKEDIN_TRUSTED_CLICK') {
     pjaWithCdpTabLock(_sender.tab.id, () => cdpLinkedInClick(_sender.tab.id, msg.x, msg.y))
-      .then(() => sendResponse({ ok: true }))
+      .then(result => sendResponse({ ok: true, recovered: !!result?.recovered }))
       .catch(e => {
         try { chrome.storage.local.get('pja_dbg', d => { const a=(d.pja_dbg||[]).slice(-40); a.push(new Date().toISOString().slice(11,19)+' [EA] CDP_ERROR: '+(e.message||e)); chrome.storage.local.set({pja_dbg:a}); }); } catch(_){}
         sendResponse({ error: e.message });

@@ -38,6 +38,9 @@ function load(html) {
 
 module.exports = (t) => {
   const autoApplySource = fs.readFileSync(path.resolve(ROOT, 'content/auto-apply.js'), 'utf8');
+  const trustedClickSource = autoApplySource.slice(
+    autoApplySource.indexOf('function pjaTrustedClickInModal'),
+    autoApplySource.indexOf('function pjaDismissModal'));
   t.ok(autoApplySource.includes('required-combobox skip phone code visible US') &&
     autoApplySource.includes("isWorkdayPhoneCode ? 'phoneCountryCode'") &&
     autoApplySource.includes("val = 'LinkedIn'"),
@@ -46,6 +49,10 @@ module.exports = (t) => {
     autoApplySource.includes("key: 'Escape'") &&
     autoApplySource.includes('pjaCloseOpenModalPopups();'),
   'EA step clicks close open select/combobox popups before trusted Next/Review clicks');
+  t.ok(autoApplySource.includes('CDP timeout; trusted click failed') &&
+    autoApplySource.includes("reason: 'trusted_click_failed'") &&
+    !trustedClickSource.includes('pjaClickInModal(label)'),
+  'EA step clicks fail explicitly instead of using LinkedIn-rejected synthetic fallback');
 
   const w = load(MODAL_HTML);
 

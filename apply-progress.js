@@ -35,8 +35,9 @@ function publicProgress(storage = {}, options = {}) {
       String(job.jobId || job.id || '') === failureJobId)
   ));
   const failed = run.results && Array.isArray(run.results.failed) ? run.results.failed : [];
-  const lastFailure = failureOwned ? rawLastFailure : failed[failed.length - 1] ||
-    run.error ? { reason: run.error } : null;
+  const lastFailure = failureOwned
+    ? rawLastFailure
+    : (failed[failed.length - 1] || (run.error ? { reason: run.error } : null));
   return {
     ...snapshot,
     lastFailure: lastFailure ? {

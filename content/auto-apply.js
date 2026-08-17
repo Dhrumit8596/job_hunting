@@ -343,8 +343,8 @@ function pjaCloseOpenModalPopups() {
 
 // LinkedIn checks isTrusted on Easy Apply step-advance clicks — a synthetic click
 // (.click()/dispatchEvent) makes the page reload. Route step clicks through the
-// background CDP trusted-click (real isTrusted=true mouse event). Falls back to a
-// synthetic click if the message round-trip fails. Returns true if the label exists.
+// background CDP trusted-click (real isTrusted=true mouse event). A transport failure returns
+// false; it must never fall back to a synthetic step click because LinkedIn rejects it.
 function pjaTrustedClickInModal(label) {
   const m = pjaGetCurrentModal();
   if (!m) return Promise.resolve(false);
@@ -361,16 +361,22 @@ function pjaTrustedClickInModal(label) {
   const x = r.left + r.width / 2, y = r.top + r.height / 2;
   return new Promise(resolve => {
     let done = false;
-    const t = setTimeout(() => { if (!done) { done = true; pjaTrace('CDP timeout→synthetic ' + label); pjaClickInModal(label); resolve(true); } }, 4000);
+    const t = setTimeout(() => { if (!done) { done = true; pjaTrace('CDP timeout; trusted click failed ' + label); resolve(false); } }, 6000);
     try {
       chrome.runtime.sendMessage({ type: 'LINKEDIN_TRUSTED_CLICK', x, y }, (resp) => {
         if (done) return;
         done = true; clearTimeout(t);
-        if (chrome.runtime.lastError || resp?.error) { pjaTrace('CDP fail→synthetic ' + label + ' err=' + (resp?.error || chrome.runtime.lastError?.message || '')); pjaClickInModal(label); }
-        else { pjaTrace('CDP click ok ' + label); }
-        resolve(true);
+        if (chrome.runtime.lastError || resp?.error) {
+          pjaTrace('CDP trusted click failed ' + label + ' err=' + (resp?.error || chrome.runtime.lastError?.message || ''));
+          resolve(false);
+        } else {
+          pjaTrace('CDP click ok ' + label + (resp?.recovered ? ' (reattached)' : ''));
+          resolve(true);
+        }
       });
-    } catch (_) { if (!done) { done = true; clearTimeout(t); pjaClickInModal(label); resolve(true); } }
+    } catch (e) {
+      if (!done) { done = true; clearTimeout(t); pjaTrace('CDP trusted click threw ' + label + ' err=' + (e?.message || e || '')); resolve(false); }
+    }
   });
 }
 
@@ -900,7 +906,8 @@ async function pjaAutoApplyOne(job, profile, answers, onStatus) {
     const btns = pjaModalBtns();
 
     if (btns.includes('Submit application')) {
-      pjaClickInModal('Submit application');
+      const clicked = await pjaTrustedClickInModal('Submit application');
+      if (!clicked) { pjaDismissModal(); return { success: false, reason: 'trusted_click_failed', heading, action: 'Submit application' }; }
       const confirmed = await pjaWaitForEasyApplyConfirmation();
       // Dismiss LinkedIn's post-apply dialog only after explicit confirmation.
       const notNow = Array.from(document.querySelectorAll('button'))
@@ -935,15 +942,17 @@ async function pjaAutoApplyOne(job, profile, answers, onStatus) {
       }
     }
 
-    if (btns.includes('Review')) {
-      pjaClickInModal('Review');
-    } else if (btns.includes('Next')) {
-      pjaClickInModal('Next');
-    } else if (btns.includes('Continue to next step')) {
-      pjaClickInModal('Continue to next step');
-    } else {
+    const advanceLabel = btns.includes('Review') ? 'Review'
+      : btns.includes('Next') ? 'Next'
+      : btns.includes('Continue to next step') ? 'Continue to next step'
+      : null;
+    if (!advanceLabel) {
       pjaDismissModal();
       return { success: false, reason: 'unknown_buttons', btns };
+    }
+    if (!await pjaTrustedClickInModal(advanceLabel)) {
+      pjaDismissModal();
+      return { success: false, reason: 'trusted_click_failed', heading, action: advanceLabel };
     }
 
     await pjaAutoWait(1200);
@@ -1325,7 +1334,11 @@ async function pjaApplyOnCurrentPage(job, profile, answers, onStatus) {
         return { success: false, reason: 'ready_to_submit' };
       }
       pjaTrace('clicking Submit application');
-      await pjaTrustedClickInModal('Submit application');
+      if (!await pjaTrustedClickInModal('Submit application')) {
+        await pjaRecordEasyApplyStepDiagnostics('trusted-click-failed', heading, { action: 'Submit application' });
+        pjaDismissModal();
+        return { success: false, reason: 'trusted_click_failed', heading, action: 'Submit application' };
+      }
       const confirmed = await pjaWaitForEasyApplyConfirmation();
       // Dismiss post-apply dialog only after explicit confirmation.
       const notNow = Array.from(document.querySelectorAll('button'))
@@ -1367,10 +1380,17 @@ async function pjaApplyOnCurrentPage(job, profile, answers, onStatus) {
 
     // Step-advance clicks MUST be trusted (CDP) — LinkedIn rejects synthetic clicks on
     // Next/Review and reloads the page, killing the flow mid-step (the "mid-refresh" issue).
-    if (btns.includes('Review')) await pjaTrustedClickInModal('Review');
-    else if (btns.includes('Next')) await pjaTrustedClickInModal('Next');
-    else if (btns.includes('Continue to next step')) await pjaTrustedClickInModal('Continue to next step');
-    else { pjaTrace('result=unknown_buttons btns=' + btns.join(',').slice(0,40)); pjaDismissModal(); return { success: false, reason: 'unknown_buttons', btns }; }
+    const advanceLabel = btns.includes('Review') ? 'Review'
+      : btns.includes('Next') ? 'Next'
+      : btns.includes('Continue to next step') ? 'Continue to next step'
+      : null;
+    if (!advanceLabel) { pjaTrace('result=unknown_buttons btns=' + btns.join(',').slice(0,40)); pjaDismissModal(); return { success: false, reason: 'unknown_buttons', btns }; }
+    if (!await pjaTrustedClickInModal(advanceLabel)) {
+      pjaTrace('result=trusted_click_failed action=' + advanceLabel);
+      await pjaRecordEasyApplyStepDiagnostics('trusted-click-failed', heading, { action: advanceLabel });
+      pjaDismissModal();
+      return { success: false, reason: 'trusted_click_failed', heading, action: advanceLabel };
+    }
 
     await pjaAutoWait(1200);
   }
