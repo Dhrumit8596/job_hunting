@@ -133,6 +133,7 @@ module.exports = async (t) => {
   'ranked dispatch: supply audit uses the description-free whole-corpus projection');
 
   t.ok(source.includes("'pja_discovery_scan_tabs'") &&
+    source.includes('chrome.tabs.remove(priorId, () => createOwned())') &&
     source.includes('window.__pjaStartIndeedScan(scanOptions || {})') &&
     source.includes('window.__pjaStartScan({ ...(scanOptions || {}), fast })') &&
     source.includes('pja_linkedin_scan') &&

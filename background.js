@@ -1739,7 +1739,11 @@ if (DEV_MODE) {
                   if (priorId == null) { createOwned(); return; }
                   chrome.tabs.get(priorId, prior => {
                     if (chrome.runtime.lastError || !prior) { createOwned(); return; }
-                    chrome.tabs.update(priorId, { url: scanUrl, active: false }, updated => callback(updated || prior));
+                    // LinkedIn search-to-search navigation can remain inside its SPA. After an
+                    // extension reload that leaves the old page without a live content script.
+                    // Replace only our owned discovery tab so every query gets a fresh document
+                    // and manifest content-script injection; user-created tabs are never touched.
+                    chrome.tabs.remove(priorId, () => createOwned());
                   });
                 });
               };
