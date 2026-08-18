@@ -589,7 +589,10 @@
         if (atBottom && stable >= 2) break;
       }
 
-      if (!(await goToNextPage())) break;   // no more results pages
+      // Do not navigate after the final bounded page: navigation can destroy this execution
+      // context before coverage and collected jobs are persisted, making a successful scan look
+      // like a timeout. Multi-page scans advance only when another iteration is actually allowed.
+      if (page + 1 >= maxPages || !(await goToNextPage())) break;
     }
 
     const total = cardMeta.size;

@@ -60,6 +60,9 @@ function render(w, cards) {
 }
 
 module.exports = (t) => {
+  const scraperSource = fs.readFileSync(path.resolve(ROOT, 'content/job-scraper.js'), 'utf8');
+  t.ok(scraperSource.includes('if (page + 1 >= maxPages || !(await goToNextPage())) break;'),
+    'LinkedIn bounded discovery persists final-page coverage without navigating away');
   const w = load();
   t.ok(typeof w.pjaAccumulateRenderedCards === 'function', 'collect: accumulate exported');
   t.ok(typeof w.pjaExtractCardMeta === 'function', 'collect: extractCardMeta exported');
