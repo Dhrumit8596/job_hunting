@@ -45,10 +45,13 @@ module.exports = (t) => {
     autoApplySource.includes("isWorkdayPhoneCode ? 'phoneCountryCode'") &&
     autoApplySource.includes("val = 'LinkedIn'"),
   'EA/shared fallback: Workday phone-code and referral-source comboboxes use site-specific safe keys');
-  t.ok(autoApplySource.includes('function pjaCloseOpenModalPopups') &&
-    autoApplySource.includes("key: 'Escape'") &&
+  const closePopupSource = autoApplySource.slice(
+    autoApplySource.indexOf('function pjaCloseOpenModalPopups'),
+    autoApplySource.indexOf('const PJA_TRUSTED_ACTIVATIONS'));
+  t.ok(closePopupSource.includes('active.blur') &&
+    !closePopupSource.includes('new KeyboardEvent') &&
     autoApplySource.includes('pjaCloseOpenModalPopups();'),
-  'EA step clicks close open select/combobox popups before trusted Next/Review clicks');
+  'EA step clicks commit the active control without sending dialog-dismiss Escape events');
   t.ok(autoApplySource.includes("activation === 'keyboard' ? 'LINKEDIN_TRUSTED_KEY_ACTIVATE'") &&
     autoApplySource.includes("sameStepCount === 1 ? 'keyboard' : 'mouse'") &&
     autoApplySource.includes('same-step recovery: trusted keyboard') &&
@@ -258,6 +261,8 @@ module.exports = (t) => {
   </body></html>`);
   let trustedMessage = null;
   wBlur.chrome.runtime.sendMessage = (msg, cb) => { trustedMessage = msg; cb?.({ ok: true }); };
+  let dismissEscapes = 0;
+  wBlur.document.addEventListener('keydown', event => { if (event.key === 'Escape') dismissEscapes++; });
   const phone = wBlur.document.getElementById('phone');
   phone.addEventListener('blur', () => {
     const old = wBlur.document.getElementById('old-next');
@@ -277,5 +282,6 @@ module.exports = (t) => {
     t.eq(activation?.commandOk, true, 'EA trusted-action diagnostics distinguish successful CDP transport');
     t.eq(activation?.landed, false, 'EA trusted-action diagnostics separately record missing DOM landing acknowledgement');
     t.eq(activation?.targetId, 'new-next', 'EA trusted-action diagnostics identify the sanitized replacement target');
+    t.eq(dismissEscapes, 0, 'EA trusted action never opens LinkedIn save/discard overlay with Escape');
   });
 };

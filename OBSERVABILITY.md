@@ -84,7 +84,7 @@ Loopback transport errors name the internal endpoint and explicit timeout. The b
 | `no_apply_path`, `apply_btn_no_form`, dead posting | source apply URL, router signals, external preflight/navigation branch |
 | `submit_unclear`, unverified confirmation | channel submit detector, `application-ledger.js`, confirmation rules |
 | `trusted_click_failed` | LinkedIn CDP transport (`background.js`); diagnostic includes the exact modal heading and action |
-| LinkedIn `stuck` | `content/auto-apply.js`; terminal only after contact-control blur settle, trusted mouse, and one trusted-keyboard recovery; the ledger diagnostic includes populated/invalid controls, action disabled state, CDP transport, DOM landing acknowledgement, and bounded hit-target metadata |
+| LinkedIn `stuck` | `content/auto-apply.js`; terminal only after contact-control blur settle (never dialog-level Escape), trusted mouse, and one trusted-keyboard recovery; the ledger diagnostic includes populated/invalid controls, action disabled state, CDP transport, DOM landing acknowledgement, and bounded hit-target metadata |
 | `stuck_watchdog`, handler timeout | handler lifecycle first; watchdog only reports/advances |
 | CAPTCHA, daily limit, checkpoint, account lock | external-service/manual blocker; do not attempt bypass code |
 

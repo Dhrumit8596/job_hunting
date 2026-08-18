@@ -250,8 +250,9 @@ These classifications are important when deciding whether a file can be removed.
   serialized detach/reattach retry. If an enabled action remains on the same fingerprint, the
   handler tries one trusted Enter activation before terminal `stuck`; transport failure is terminal
   `trusted_click_failed`, never a synthetic click fallback. Before either activation, the content
-  script blurs open contact controls, waits one bounded React render beat, and re-resolves the modal
-  action so CDP never targets the stale pre-commit footer node. Both terminal paths attach a sanitized
+  script blurs open contact controls without sending Escape to the dialog, waits one bounded React
+  render beat, and re-resolves the modal action so CDP never targets the stale pre-commit footer node
+  or LinkedIn's save/discard overlay. Both terminal paths attach a sanitized
   step diagnostic, including action disabled state and a bounded split between CDP command success,
   DOM landing acknowledgement, and the hit-tested target, to the ledger event and exact-run report.
 - `runId`/job ownership checks must remain around result writes and queue advancement.

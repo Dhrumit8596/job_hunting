@@ -374,13 +374,11 @@ function pjaCloseOpenModalPopups() {
     const root = m?.root || document;
     const active = document.activeElement;
     if (active && root.contains(active)) active.blur?.();
-    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', code: 'Escape', keyCode: 27, which: 27, bubbles: true }));
-    document.dispatchEvent(new KeyboardEvent('keyup', { key: 'Escape', code: 'Escape', keyCode: 27, which: 27, bubbles: true }));
-    const escTargets = [root, document.body].filter(Boolean);
-    for (const t of escTargets) {
-      t.dispatchEvent?.(new KeyboardEvent('keydown', { key: 'Escape', code: 'Escape', keyCode: 27, which: 27, bubbles: true }));
-      t.dispatchEvent?.(new KeyboardEvent('keyup', { key: 'Escape', code: 'Escape', keyCode: 27, which: 27, bubbles: true }));
-    }
+    // Never send Escape to the Easy Apply dialog. LinkedIn treats it as a request to dismiss the
+    // application and mounts a "Save this application?" overlay above Next/Review. A real cycle
+    // then hit-tested that overlay while the intended action remained enabled behind it
+    // (apply-1787026754359). Blurring the active field is sufficient to commit contact values;
+    // combobox helpers own their own option-menu lifecycle.
   } catch (_) {}
 }
 
