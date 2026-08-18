@@ -52,11 +52,12 @@
 
   function mergeUnique(a, b) { return Array.from(new Set([...(a || []), ...(b || [])].filter(Boolean))); }
   function sourceRef(job, modality) {
-    return { modality: modality || 'unknown', platform: job.sourcePlatform || job.ats || '',
+    return { modality: modality || 'unknown', sourceBoard: job.sourceBoard || '', platform: job.sourcePlatform || job.ats || '',
       sourceJobId: String(job.sourceJobId || job.id || ''), listingUrl: job.listingUrl || job.applyUrl || '',
       applyUrl: job.applyUrl || '', channel: job.channel || '', detectedAts: job.detectedAts || '',
       isEasyApply: !!job.isEasyApply, indeedApply: !!job.indeedApply,
-      query: job.query || '', discoveredAt: job.discoveredAt || job.scrapedAt || '' };
+      query: job.query || '', matchedQueries: Array.isArray(job.matchedQueries) ? job.matchedQueries.slice(0, 20) : [],
+      discoveredAt: job.discoveredAt || job.scrapedAt || '' };
   }
   function refKey(r) { return [r.modality, r.platform, r.sourceJobId, r.listingUrl].join('|'); }
 
@@ -86,6 +87,7 @@
     const incomingRoute = routeFrom(incoming);
     if (shouldReplaceRoute(out, incomingRoute)) Object.assign(out, incomingRoute);
     for (const k of ['query', 'discoveredAt', 'postedAt']) if (!out[k] && incoming[k]) out[k] = incoming[k];
+    out.matchedQueries = mergeUnique(out.matchedQueries, incoming.matchedQueries).slice(0, 20);
     out.modalities = mergeUnique(out.modalities || [out.modality], incoming.modalities || [modality || incoming.modality]);
     out.channels = mergeUnique(out.channels || [out.channel], incoming.channels || [incoming.channel]);
     const refs = Array.isArray(out.sourceRefs) ? out.sourceRefs.slice() : [];
@@ -126,8 +128,10 @@
       description: String(job.description || '').slice(0, 20000),
       descriptionStatus: job.descriptionStatus || (job.description ? 'complete' : 'needs_description'),
       sourcePlatform: job.sourcePlatform || '', sourceJobId: String(job.sourceJobId || job.id || ''),
+      sourceBoard: job.sourceBoard || '',
       listingUrl: job.listingUrl || '', channel: job.channel || '', channels: job.channel ? [job.channel] : [],
       query: job.query || '', discoveredAt: job.discoveredAt || job.scrapedAt || '',
+      matchedQueries: Array.isArray(job.matchedQueries) ? job.matchedQueries.slice(0, 20) : [],
       isEasyApply: !!job.isEasyApply, indeedApply: !!job.indeedApply,
       sourceRefs: Array.isArray(job.sourceRefs) && job.sourceRefs.length ? job.sourceRefs : [sourceRef(job, modality)],
     };
@@ -154,9 +158,11 @@
       id: posting.id, title: posting.title, company: posting.company, location: posting.location,
       remote: !!posting.remote, applyUrl: posting.applyUrl || '', listingUrl: posting.listingUrl || '',
       ats: posting.ats || '', detectedAts: posting.detectedAts || '',
-      sourcePlatform: posting.sourcePlatform || '', sourceJobId: posting.sourceJobId || '',
+      sourcePlatform: posting.sourcePlatform || '', sourceJobId: posting.sourceJobId || '', sourceBoard: posting.sourceBoard || '',
       channel: posting.channel || '', isEasyApply: !!posting.isEasyApply, indeedApply: !!posting.indeedApply,
-      discoveredAt: posting.discoveredAt || '',
+      discoveredAt: posting.discoveredAt || '', postedAt: posting.postedAt || '', query: posting.query || '',
+      matchedQueries: Array.isArray(posting.matchedQueries) ? posting.matchedQueries.slice(0, 20) : [],
+      modalities: Array.isArray(posting.modalities) ? posting.modalities.slice(0, 8) : [],
       descriptionStatus: posting.descriptionStatus || '',
       descriptionReady: descriptionReady(posting),
       descriptionLength: String(posting.description || '').length,

@@ -163,9 +163,13 @@ async function sourceAll(opts = {}) {
     locationStrictness: opts.locationStrictness, remotePolicy: opts.remotePolicy };
   const aEligible = autonomousApplyFilter(filterJobs(a.jobs, filterOpts), opts.autonomousApplyOnly === true);
   const aRes = upsert(store, aEligible, 'api-registry', stateFor);
+  for (const board of a.stats) {
+    board.newlyImported = Object.values(store.index).filter(p => p.sourceBoard === board.source).length;
+  }
   report.modalityA = { fetched: a.jobs.length, eligible: aEligible.length, added: aRes.added,
     dupById: aRes.dupById, dupByRole: aRes.dupByRole, enriched: aRes.enriched,
-    deadSources: a.stats.filter(s => s.count === 0).length };
+    deadSources: a.stats.filter(s => s.jobsDiscovered === 0).length,
+    boards: a.stats };
 
   // --- Modality B: discovery (keyword search) ---
   let bFetched = 0, bEligible = 0;

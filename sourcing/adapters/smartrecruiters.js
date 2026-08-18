@@ -35,6 +35,8 @@ function normalize(raw, source) {
   job.descriptionStatus = job.description ? 'complete' : 'needs_description';
   job.hydrationStatus = raw._hydrationStatus || (job.description ? 'hydration_success' : 'hydration_missing_detail');
   job.hydrationReason = raw._hydrationReason || '';
+  job.matchedQueries = Array.isArray(raw._matchedQueries) ? raw._matchedQueries.slice() : [];
+  job.query = job.matchedQueries[0] || '';
   return job;
 }
 
@@ -149,7 +151,17 @@ async function fetchJobs(source, { timeoutMs = 15000, max = 200, detailConcurren
         } finally { clearTimeout(t); }
         const page = (data && data.content) || [];
         if (!page.length) break;
-        for (const row of page) if (row && (row.id || row.uuid)) byId.set(String(row.id || row.uuid), row);
+        for (const row of page) if (row && (row.id || row.uuid)) {
+          const id = String(row.id || row.uuid);
+          const existing = byId.get(id);
+          if (existing) {
+            existing._matchedQueries = Array.isArray(existing._matchedQueries) ? existing._matchedQueries : [];
+            if (query && !existing._matchedQueries.includes(query)) existing._matchedQueries.push(query);
+          } else {
+            row._matchedQueries = query ? [query] : [];
+            byId.set(id, row);
+          }
+        }
         const total = data.totalFound || 0;
         if (offset + 100 >= total) break;
       }

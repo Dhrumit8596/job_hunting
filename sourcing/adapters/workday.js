@@ -25,6 +25,8 @@ function normalize(raw, source) {
   job.descriptionStatus = job.description ? 'complete' : 'needs_description';
   job.hydrationStatus = raw._hydrationStatus || (job.description ? 'hydration_success' : 'hydration_missing_detail');
   job.hydrationReason = raw._hydrationReason || '';
+  job.matchedQueries = Array.isArray(raw._matchedQueries) ? raw._matchedQueries.slice() : [];
+  job.query = job.matchedQueries[0] || '';
   return job;
 }
 
@@ -107,7 +109,7 @@ async function fetchJobs(source, { timeoutMs = 15000, max = 100, detailConcurren
   nationwideUS = false, targetLocation, targetRadiusMiles, locationStrictness, remotePolicy } = {}) {
   if (!source.apiUrl) return [];
   const rows = [];
-  const seen = new Set();
+  const seen = new Map();
   // Large Workday tenants can have thousands of openings, and the default API ordering can hide
   // a highly relevant role beyond the first `max` rows. Optional source-specific search terms pull
   // those roles to the front while the empty search preserves the existing broad collection.
@@ -138,8 +140,13 @@ async function fetchJobs(source, { timeoutMs = 15000, max = 100, detailConcurren
         if (!page.length) break;
         for (const row of page) {
           const key = String(row.externalPath || row.bulletFields && row.bulletFields[0] || `${row.title}|${row.locationsText}`);
-          if (seen.has(key)) continue;
-          seen.add(key);
+          if (seen.has(key)) {
+            const existing = seen.get(key);
+            if (searchText && !existing._matchedQueries.includes(searchText)) existing._matchedQueries.push(searchText);
+            continue;
+          }
+          row._matchedQueries = searchText ? [searchText] : [];
+          seen.set(key, row);
           rows.push(row);
         }
         if (page.length < 20) break;

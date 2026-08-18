@@ -47,6 +47,8 @@ module.exports = async t => {
       'smartrecruiters: eligible rows beyond the historical first-100 cap receive full details');
     t.eq(jobs.filter(job => job.hydrationStatus === 'hydration_success').length, 102,
       'smartrecruiters: successful detail hydration carries an observable status');
+    t.eq(jobs.find(job => job.id === 'Q-1').matchedQueries, ['process engineer'],
+      'smartrecruiters: exact primary-source query provenance survives normalization');
   } finally {
     global.fetch = originalFetch;
   }

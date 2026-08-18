@@ -128,6 +128,10 @@ module.exports = async (t) => {
     source.includes(".slice(0, 10)") && source.includes("getApplyDescriptions(ids)"),
   'ranked dispatch: description hydration is enforced as capped ten-job batches');
 
+  t.ok(source.includes("msg.cmd === 'getSupplyAuditCorpus'") &&
+    source.includes("getApplyPlanningCorpus()") && source.includes("supplyAuditCorpusReply"),
+  'ranked dispatch: supply audit uses the description-free whole-corpus projection');
+
   t.ok(source.includes('const count = await self.PJAIdb.count()') &&
     !source.includes('const s = await self.PJAIdb.corpusSummary({ topN: 0 })'),
   'corpus import: post-import bookkeeping uses a native count instead of another full diagnostic scan');

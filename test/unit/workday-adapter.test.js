@@ -54,6 +54,8 @@ module.exports = async t => {
       'workday: every eligible returned row is explicitly marked description-complete');
     t.eq(jobs.filter(job => job.hydrationStatus === 'hydration_success').length, 121,
       'workday: successful detail hydration carries an observable status');
+    t.eq(jobs.find(job => job.id === 'Q-1').matchedQueries, ['process engineer'],
+      'workday: exact primary-source query provenance survives normalization');
   } finally {
     global.fetch = originalFetch;
   }

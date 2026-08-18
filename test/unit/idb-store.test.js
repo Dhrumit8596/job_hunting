@@ -78,6 +78,9 @@ module.exports = async (t) => {
   t.eq(projected7.descriptionLength > 0, true, 'idb apply planning: projection carries JD length metadata');
   t.eq(projected7.descriptionFingerprint, (await idb.getJob('greenhouse:7')).descriptionFingerprint,
     'idb apply planning: projection carries posting JD fingerprint');
+  t.ok(Object.prototype.hasOwnProperty.call(projected7, 'postedAt') &&
+    Object.prototype.hasOwnProperty.call(projected7, 'query'),
+  'idb apply planning: projection carries description-free freshness and query provenance');
   t.eq(planning.state['greenhouse:7'].fitScore, 60, 'idb apply planning: projection carries mutable score state');
   t.eq(JSON.stringify(planning).includes('Process control, SPC, metrology, and root-cause requirements.'), false,
     'idb apply planning: serialized projection does not leak repeated JD bodies');

@@ -2845,8 +2845,11 @@ ${(description || '').slice(0, 6000)}`;
         const { prefs, targetLocation, targetRadiusMiles, locationStrictness, remotePolicy } = deriveTargetLocationOptions(o, st);
         const prefQueries = Array.isArray(prefs.searchTitles) ? prefs.searchTitles
           : String(prefs.searchTitles || '').split(/[\n,]+/);
-        const queries = Array.isArray(o.queries) && o.queries.length
-          ? o.queries.map(q => String(q || '').trim()).filter(Boolean)
+        const familyQueries = Array.isArray(o.queryFamilies) ? o.queryFamilies
+          .flatMap(family => Array.isArray(family && family.queries) ? family.queries : []) : [];
+        const queries = (Array.isArray(o.queries) && o.queries.length ? o.queries : familyQueries).length
+          ? (Array.isArray(o.queries) && o.queries.length ? o.queries : familyQueries)
+            .map(q => String(q || '').trim()).filter(Boolean)
           : prefQueries.map(q => String(q || '').trim()).filter(Boolean);
         const requiredChannels = Array.isArray(o.requiredChannels) ? o.requiredChannels
           .map(x => String(x || '').trim()).filter(Boolean) : [];
@@ -2897,6 +2900,39 @@ ${(description || '').slice(0, 6000)}`;
         res.end(JSON.stringify({ success: true, wrote, report }));
       } catch (e) {
         console.error('[PJA] /source-v2 error:', e.message);
+        res.writeHead(500, CORS);
+        res.end(JSON.stringify({ success: false, error: e.message }));
+      }
+    });
+    return;
+  }
+
+  // Description-free evidence supply audit. The extension returns only its compact planning
+  // projection; no profile values or job descriptions are serialized into the report.
+  if (req.method === 'POST' && req.url === '/supply-audit') {
+    let body = '';
+    req.on('data', d => body += d);
+    req.on('end', async () => {
+      try {
+        const o = body ? JSON.parse(body) : {};
+        const control = await getStorageFromExtension(['pja_profile', 'pja_prefs']);
+        const targetFilter = deriveTargetLocationOptions(o, control);
+        const corpus = await wsAsk('getSupplyAuditCorpus', {}, 'supplyAuditCorpusReply', 60000);
+        if (corpus.error) throw new Error('getSupplyAuditCorpus: ' + corpus.error);
+        const { summarizeSupply } = require('./sourcing/supply-audit');
+        const hardLocation = /^hard$/i.test(String(targetFilter.locationStrictness || '')) &&
+          (targetFilter.targetLocation.city || targetFilter.targetLocation.state || targetFilter.targetLocation.zip);
+        const audit = summarizeSupply(corpus, {
+          threshold: o.threshold != null ? Number(o.threshold) : 75,
+          candidateFingerprint: runtimeCandidateFingerprint,
+          queryFamilies: Array.isArray(o.queryFamilies) ? o.queryFamilies : [],
+          isLocationEligible: hardLocation
+            ? posting => isEligibleTargetLocation(posting.location, posting.remote, targetFilter)
+            : () => true,
+        });
+        res.writeHead(200, CORS);
+        res.end(JSON.stringify({ success: true, audit }));
+      } catch (e) {
         res.writeHead(500, CORS);
         res.end(JSON.stringify({ success: false, error: e.message }));
       }

@@ -5,7 +5,7 @@ const R = d => require(path.resolve(__dirname, '../../sourcing', d));
 const { makeJob, isRemote, cleanDescription } = R('normalize');
 const { isEligibleTitle, isEligibleLocation, isEligibleUSLocation, isEligibleTargetLocation, isWithinTargetRadius, isItarExcluded, filterJobs, tnAdjustScore } = R('filter');
 const { jobKey, appliedKeySet, appliedIdentity, dedupe, pjaMergeAppliedLog, pjaCollectAppliedRecords } = R('dedupe');
-const { routeJobs } = R('pipeline');
+const { routeJobs, sourceYieldStats } = R('pipeline');
 const gh = R('adapters/greenhouse');
 const lever = R('adapters/lever');
 
@@ -71,6 +71,11 @@ module.exports = (t) => {
     makeJob({ id: 6, title: 'Quality Engineer', company: 'Cerebras Systems', location: 'Sunnyvale, CA' }),
   ];
   t.eq(filterJobs(raw).map(x => x.id), ['1', '4'], 'filterJobs: keeps eligible CA/remote eng, drops export-controlled company (6)');
+  const yieldStats = sourceYieldStats('Synthetic Board', 'greenhouse', raw, {});
+  t.eq({ discovered: yieldStats.jobsDiscovered, eligible: yieldStats.deterministicallyEligible,
+    hydrated: yieldStats.successfullyHydrated }, { discovered: 6, eligible: 2, hydrated: 0 },
+  'source yield: each board reports discovered, deterministic-filter, and hydration stages');
+  t.eq(yieldStats.modelCalls, 0, 'source yield: board sourcing does not claim AI calls');
   const hardTargeted = filterJobs(raw.concat([
     makeJob({ id: 7, title: 'Quality Engineer', company: 'E', location: 'Irvine, CA' }),
   ]), { locationStrictness: 'hard', targetLocation: bayTarget, targetRadiusMiles: 60, remotePolicy: 'us_or_ca_remote_allowed' });

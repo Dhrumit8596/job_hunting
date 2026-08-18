@@ -1300,6 +1300,17 @@ if (DEV_MODE) {
                 try { data = await pjaBuildApplySet(msg); } catch (e) { data = { jobs: [], error: e.message }; }
                 _wsReloadSocket.send(JSON.stringify({ cmd: 'applySetReply', reqId: msg.reqId, data }));
               })();
+            } else if (msg.cmd === 'getSupplyAuditCorpus') {
+              // Description-free whole-corpus snapshot for deterministic supply diagnostics.
+              // This intentionally bypasses apply selection so below-threshold and terminal rows
+              // remain visible, while the IndexedDB projection guarantees JD bodies are absent.
+              (async () => {
+                let data = { index: {}, state: {}, total: 0 };
+                try {
+                  if (self.PJAIdb) data = await self.PJAIdb.getApplyPlanningCorpus();
+                } catch (e) { data = { index: {}, state: {}, total: 0, error: e.message }; }
+                _wsReloadSocket.send(JSON.stringify({ cmd: 'supplyAuditCorpusReply', reqId: msg.reqId, data }));
+              })();
             } else if (msg.cmd === 'getApplyDescriptions') {
               // Hydrate only one scoring batch. Keeping the cap in the service worker makes the
               // memory/WS boundary enforceable even if a caller accidentally sends a huge list.

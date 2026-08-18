@@ -32,6 +32,7 @@ function descriptionFingerprint(text) {
 function sourceRef(job, modality) {
   return {
     modality: modality || 'unknown',
+    sourceBoard: job.sourceBoard || '',
     platform: job.sourcePlatform || job.ats || '',
     sourceJobId: String(job.sourceJobId || job.id || ''),
     listingUrl: job.listingUrl || job.applyUrl || '',
@@ -41,6 +42,7 @@ function sourceRef(job, modality) {
     isEasyApply: !!job.isEasyApply,
     indeedApply: !!job.indeedApply,
     query: job.query || '',
+    matchedQueries: Array.isArray(job.matchedQueries) ? job.matchedQueries.slice(0, 20) : [],
     discoveredAt: job.discoveredAt || job.scrapedAt || '',
   };
 }
@@ -82,6 +84,8 @@ function mergePosting(existing, job, modality) {
   for (const k of ['query', 'discoveredAt', 'postedAt']) {
     if (!existing[k] && job[k]) existing[k] = job[k];
   }
+  existing.matchedQueries = Array.from(new Set([...(existing.matchedQueries || []),
+    ...(job.matchedQueries || [])])).slice(0, 20);
   const modalities = new Set([...(existing.modalities || [existing.modality].filter(Boolean)), modality || 'unknown']);
   existing.modalities = Array.from(modalities);
   const channels = new Set([...(existing.channels || [existing.channel].filter(Boolean)), job.channel].filter(Boolean));
@@ -103,8 +107,10 @@ function buildPosting(id, rk, mk, job, modality) {
     mirrorKey: mk, description: String(job.description || '').slice(0, 20000),
     descriptionStatus: job.descriptionStatus || (job.description ? 'complete' : 'needs_description'),
     sourcePlatform: job.sourcePlatform || '', sourceJobId: String(job.sourceJobId || job.id || ''),
+    sourceBoard: job.sourceBoard || '',
     listingUrl: job.listingUrl || '', channel: job.channel || '', channels: job.channel ? [job.channel] : [],
     query: job.query || '', discoveredAt: job.discoveredAt || job.scrapedAt || '',
+    matchedQueries: Array.isArray(job.matchedQueries) ? job.matchedQueries.slice(0, 20) : [],
     isEasyApply: !!job.isEasyApply, indeedApply: !!job.indeedApply,
     sourceRefs: [sourceRef(job, modality)],
   };
