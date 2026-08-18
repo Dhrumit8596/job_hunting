@@ -8,6 +8,13 @@ function isWorkdayHost(hostname) {
   return HOST_RE.test(hostname || location.hostname || '');
 }
 
+function duplicateRecordRecoveryAction(input = {}) {
+  if (!input.hasError || !/\/apply\/applyManually(?:\/|$)/i.test(String(input.pathname || ''))) return 'none';
+  let markedDraftRetry = false;
+  try { markedDraftRetry = new URLSearchParams(String(input.search || '')).get('pja_wd_draft_retry') === '1'; } catch (_) {}
+  return input.retryUsed || markedDraftRetry ? 'terminal' : 'reroute';
+}
+
 function visible(el) {
   if (!el) return false;
   if (el.offsetParent !== null) return true;
@@ -221,6 +228,7 @@ function snapshot(root = document) {
 window.PJAWorkdayEngine = {
   version: 1,
   isWorkdayHost,
+  duplicateRecordRecoveryAction,
   visible,
   findEmailInput,
   findEmailSignInButton,

@@ -245,6 +245,9 @@ These classifications are important when deciding whether a file can be removed.
 - Never fabricate profile, qualification, legal, work-authorization, citizenship, or export-control
   answers. Missing facts become `needs_manual`/missing-question diagnostics.
 - CAPTCHA, anti-bot, and account locks are terminal/manual states, not bypass targets.
+- A Workday duplicate Previous Worker/Address validation gets at most one draft `/apply` recovery.
+  If the marked retry returns to `applyManually` with the same page evidence, the handler records
+  `workday_duplicate_record` before refilling; it must not fall through to the ranked watchdog.
 - React-controlled fields must use native setters/events, Fiber callbacks, or trusted CDP paths.
 - LinkedIn modal advance/submit actions must remain trusted CDP clicks. A detached session gets one
   serialized detach/reattach retry. If an enabled action remains on the same fingerprint, the

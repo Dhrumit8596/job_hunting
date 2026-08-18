@@ -80,7 +80,7 @@ Loopback transport errors name the internal endpoint and explicit timeout. The b
 | `rescore_*`, weak evidence, conflicts, missing descriptions | `scoring-context.js`, score gate, source hydration/adapters |
 | no route / unsupported strategy / wrong ATS | `detect-ats.js`, `apply-router.js`, `apply-select.js` |
 | missing required / select / radio / combobox | `autofill.js`, then the ATS-specific branch |
-| Workday auth/account/verification | `workday-auth.js`, `workday-engine.js`, Workday branch in external engine |
+| Workday auth/account/verification | `workday-auth.js`, `workday-engine.js`, Workday branch in external engine; marked duplicate-record draft retries terminalize before refill as `workday_duplicate_record` |
 | `no_apply_path`, `apply_btn_no_form`, dead posting | source apply URL, router signals, external preflight/navigation branch |
 | `submit_unclear`, unverified confirmation | channel submit detector, `application-ledger.js`, confirmation rules |
 | `trusted_click_failed` | LinkedIn CDP transport (`background.js`); diagnostic includes the exact modal heading and action |

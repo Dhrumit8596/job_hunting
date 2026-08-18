@@ -73,6 +73,9 @@ adjacent country picker after the initial pass.
   instead of blindly filling Google's OAuth page.
 - **BLOCKER 9 — Workday "Save and Continue" variants:** the multi-step loop matches
   `bottomNavigationNext` / `pageFooterNextButton` / Workday `click_filter` next buttons.
+- **Workday duplicate draft records:** a Previous Worker/Address duplicate gets one draft `/apply`
+  recovery. If the marked retry returns with the same validation, it records
+  `workday_duplicate_record` before another full fill pass instead of timing out in the ranked watchdog.
 - **Dead / closed postings:** detected via `pjaIsClosedPosting` → recorded as `posting_not_found`
   (previously misread as `no_apply_btn`).
 - **Chatbot-apply pages:** short-circuit to `chatbot_apply_manual` rather than failing opaquely.

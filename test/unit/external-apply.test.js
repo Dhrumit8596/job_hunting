@@ -345,6 +345,7 @@ module.exports = (t) => {
     externalSource.includes('rerouteWorkdayDuplicateDraft') &&
     externalSource.includes("'on applyManually'") &&
     externalSource.includes("'after Enter'") &&
+    externalSource.includes('duplicate record persisted on marked draft retry; recording workday_duplicate_record before fill') &&
     externalSource.includes('duplicate record validation cannot be auto-cleared; recording workday_duplicate_record') &&
     externalSource.includes('workday_duplicate_record'),
   'external-apply: Workday duplicate-record validation reroutes applyManually drafts and is separately classified');

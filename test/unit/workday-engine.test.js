@@ -46,6 +46,18 @@ module.exports = (t) => {
     'workday engine: field model includes required phone text input');
   t.ok(snap.fields.some(f => f.id === 'source--source' && f.kind === 'buttonPrompt' && f.invalid),
     'workday engine: field model includes invalid button prompt');
+  t.eq(application.PJAWorkdayEngine.duplicateRecordRecoveryAction({
+    hasError: true, pathname: '/en-US/Careers/job/Foo/apply/applyManually', search: '', retryUsed: false,
+  }), 'reroute', 'workday engine: first duplicate-record validation gets one draft-route recovery');
+  t.eq(application.PJAWorkdayEngine.duplicateRecordRecoveryAction({
+    hasError: true, pathname: '/en-US/Careers/job/Foo/apply/applyManually', search: '?pja_wd_draft_retry=1', retryUsed: false,
+  }), 'terminal', 'workday engine: marked duplicate draft retry terminalizes even if session state was lost');
+  t.eq(application.PJAWorkdayEngine.duplicateRecordRecoveryAction({
+    hasError: true, pathname: '/en-US/Careers/job/Foo/apply/applyManually', search: '', retryUsed: true,
+  }), 'terminal', 'workday engine: used duplicate retry terminalizes before another fill pass');
+  t.eq(application.PJAWorkdayEngine.duplicateRecordRecoveryAction({
+    hasError: false, pathname: '/en-US/Careers/job/Foo/apply/applyManually', search: '?pja_wd_draft_retry=1', retryUsed: true,
+  }), 'none', 'workday engine: retry markers never create a duplicate blocker without page evidence');
 
   const nonWd = loadEngine('<body><button>Apply</button></body>', 'https://example.com/jobs/1');
   t.eq(nonWd.PJAWorkdayEngine.detectState(nonWd.document), 'not_workday',

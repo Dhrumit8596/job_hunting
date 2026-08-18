@@ -2646,10 +2646,26 @@
     };
     const workdayDuplicateRetryKey = () => 'pja_wd_duplicate_draft_retry_' +
       (job.runId || 'norun') + '_' + (job.id || job.jobId || job.applyUrl || '');
+    const workdayDuplicateRecoveryAction = () => {
+      const input = {
+        hasError: hasWorkdayDuplicateRecordError(),
+        pathname: location.pathname,
+        search: location.search,
+        retryUsed: sessionStorage.getItem(workdayDuplicateRetryKey()) === '1',
+      };
+      return window.PJAWorkdayEngine?.duplicateRecordRecoveryAction
+        ? window.PJAWorkdayEngine.duplicateRecordRecoveryAction(input)
+        : !input.hasError || !/\/apply\/applyManually(?:\/|$)/i.test(input.pathname)
+          ? 'none'
+          : input.retryUsed || /(?:^|[?&])pja_wd_draft_retry=1(?:&|$)/.test(input.search)
+            ? 'terminal'
+            : 'reroute';
+    };
     const rerouteWorkdayDuplicateDraft = async (phaseLabel) => {
-      if (!hasWorkdayDuplicateRecordError() || !/\/apply\/applyManually(?:\/|$)/i.test(location.pathname)) return false;
+      const recoveryAction = workdayDuplicateRecoveryAction();
+      if (recoveryAction === 'none') return false;
       const duplicateRetryKey = workdayDuplicateRetryKey();
-      if (sessionStorage.getItem(duplicateRetryKey) === '1') {
+      if (recoveryAction === 'terminal') {
         await addDbg('[WD] duplicate record validation still present after draft retry; manual deferral');
         return false;
       }
@@ -2659,6 +2675,21 @@
       location.assign(draftUrl);
       return true;
     };
+    // A marked draft recovery that returns to applyManually with the same duplicate validation is
+    // already exhausted. Terminalize before the expensive Workday fill chain can consume the
+    // ranked watchdog and obscure this known manual blocker as ranked_watchdog_timeout.
+    if (workdayDuplicateRecoveryAction() === 'terminal') {
+      const fields = ['workday_duplicate_previous_worker_or_address'];
+      await addDbg('[WD] duplicate record persisted on marked draft retry; recording workday_duplicate_record before fill');
+      sessionStorage.setItem('pja_last_action', 'recordResult:workday_duplicate_record:' + job.company);
+      await maybeRequestApplyHelp('workday_duplicate_record', {
+        missingRequired: fields,
+        formSummary: 'Workday duplicate Previous Worker or Address draft record blocked step advance',
+      });
+      await recordResult(job, { success: false, reason: 'workday_duplicate_record', fields });
+      navigateBack(job);
+      return;
+    }
     const retryWorkdayBlockedAdvance = async (reasonHint) => {
       if (!/workday\.com|myworkdayjobs\.com/i.test(location.hostname)) return { advanced: false };
       const stepBefore = document.body.innerText.match(/current step (\d+)/i)?.[1] || '';
