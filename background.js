@@ -2664,30 +2664,16 @@ function pjaWithCdpTabLock(tabId, work) {
 // (isTrusted=true) advances the step. Unlike cdpTrustedClick (Workday), this sends
 // ONLY a mouse click (no Space key) to avoid double-advancing, and has no click_filter
 // logic. The Easy Apply modal is in regular DOM, so coordinates are directly hittable.
-async function cdpLinkedInClick(tabId, x, y) {
-  await activateTab(tabId);
-  if (typeof x !== 'number' || typeof y !== 'number') throw new Error('no coords for LinkedIn click');
-  const xr = Math.round(x), yr = Math.round(y);
-
+async function pjaWithCdpDetachedRetry(tabId, where, command) {
   // A service-worker/reload race can detach CDP between a successful attach and the first
   // command. Retry that specific transport failure once under the existing per-tab lock. Never
   // replace this with a synthetic DOM click: LinkedIn rejects untrusted step-advance events.
   for (let attempt = 0; attempt < 2; attempt++) {
-    const attachedC = await cdpAttachDiag(tabId, attempt ? 'click-retry' : 'click');
+    const attachedC = await cdpAttachDiag(tabId, attempt ? where + '-retry' : where);
     if (!attachedC) throw new Error('cdp-attach-failed');
     try {
-      await chrome.debugger.sendCommand({ tabId }, 'Input.dispatchMouseEvent', {
-        type: 'mouseMoved', x: xr, y: yr, button: 'none', buttons: 0, clickCount: 0, modifiers: 0
-      });
-      await new Promise(r => setTimeout(r, 40));
-      await chrome.debugger.sendCommand({ tabId }, 'Input.dispatchMouseEvent', {
-        type: 'mousePressed', x: xr, y: yr, button: 'left', buttons: 1, clickCount: 1, modifiers: 0
-      });
-      await new Promise(r => setTimeout(r, 70));
-      await chrome.debugger.sendCommand({ tabId }, 'Input.dispatchMouseEvent', {
-        type: 'mouseReleased', x: xr, y: yr, button: 'left', buttons: 0, clickCount: 1, modifiers: 0
-      });
-      if (attempt) await cdpDbg('LinkedIn click recovered after detached debugger');
+      await command();
+      if (attempt) await cdpDbg('LinkedIn ' + where + ' recovered after detached debugger');
       return { recovered: attempt > 0 };
     } catch (e) {
       const message = String(e && e.message || e);
@@ -2702,6 +2688,40 @@ async function cdpLinkedInClick(tabId, x, y) {
       try { await chrome.debugger.detach({ tabId }); } catch (_) {}
     }
   }
+}
+
+async function cdpLinkedInClick(tabId, x, y) {
+  await activateTab(tabId);
+  if (typeof x !== 'number' || typeof y !== 'number') throw new Error('no coords for LinkedIn click');
+  const xr = Math.round(x), yr = Math.round(y);
+  return pjaWithCdpDetachedRetry(tabId, 'click', async () => {
+    await chrome.debugger.sendCommand({ tabId }, 'Input.dispatchMouseEvent', {
+      type: 'mouseMoved', x: xr, y: yr, button: 'none', buttons: 0, clickCount: 0, modifiers: 0
+    });
+    await new Promise(r => setTimeout(r, 40));
+    await chrome.debugger.sendCommand({ tabId }, 'Input.dispatchMouseEvent', {
+      type: 'mousePressed', x: xr, y: yr, button: 'left', buttons: 1, clickCount: 1, modifiers: 0
+    });
+    await new Promise(r => setTimeout(r, 70));
+    await chrome.debugger.sendCommand({ tabId }, 'Input.dispatchMouseEvent', {
+      type: 'mouseReleased', x: xr, y: yr, button: 'left', buttons: 0, clickCount: 1, modifiers: 0
+    });
+  });
+}
+
+// Recovery for an enabled LinkedIn action that accepted trusted mouse events but did not advance.
+// The content script focuses the exact modal button; CDP supplies the trusted Enter key event.
+async function cdpLinkedInKeyActivate(tabId) {
+  await activateTab(tabId);
+  return pjaWithCdpDetachedRetry(tabId, 'key-activate', async () => {
+    await chrome.debugger.sendCommand({ tabId }, 'Input.dispatchKeyEvent', {
+      type: 'keyDown', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13, nativeVirtualKeyCode: 13
+    });
+    await new Promise(r => setTimeout(r, 70));
+    await chrome.debugger.sendCommand({ tabId }, 'Input.dispatchKeyEvent', {
+      type: 'keyUp', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13, nativeVirtualKeyCode: 13
+    });
+  });
 }
 
 // ── CDP trusted type: click at coords to focus, then type text via real key events ──
@@ -3200,6 +3220,16 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
       .then(result => sendResponse({ ok: true, recovered: !!result?.recovered }))
       .catch(e => {
         try { chrome.storage.local.get('pja_dbg', d => { const a=(d.pja_dbg||[]).slice(-40); a.push(new Date().toISOString().slice(11,19)+' [EA] CDP_ERROR: '+(e.message||e)); chrome.storage.local.set({pja_dbg:a}); }); } catch(_){}
+        sendResponse({ error: e.message });
+      });
+    return true;
+  }
+
+  if (msg.type === 'LINKEDIN_TRUSTED_KEY_ACTIVATE') {
+    pjaWithCdpTabLock(_sender.tab.id, () => cdpLinkedInKeyActivate(_sender.tab.id))
+      .then(result => sendResponse({ ok: true, recovered: !!result?.recovered }))
+      .catch(e => {
+        try { chrome.storage.local.get('pja_dbg', d => { const a=(d.pja_dbg||[]).slice(-40); a.push(new Date().toISOString().slice(11,19)+' [EA] CDP_KEY_ERROR: '+(e.message||e)); chrome.storage.local.set({pja_dbg:a}); }); } catch(_){}
         sendResponse({ error: e.message });
       });
     return true;

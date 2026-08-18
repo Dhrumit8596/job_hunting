@@ -295,8 +295,37 @@ async function pjaRecordEasyApplyStepDiagnostics(label, heading, extra = {}) {
       textTail: safeText(root.innerText || root.textContent || '').slice(-1800),
       extra,
     };
-    chrome.storage.local.set({ pja_ea_diag: diag });
-  } catch (_) {}
+    await new Promise(resolve => chrome.storage.local.set({ pja_ea_diag: diag }, resolve));
+    return diag;
+  } catch (_) { return null; }
+}
+
+function pjaEasyApplyResultDiagnostic(diag, reason) {
+  if (!diag) return null;
+  const controls = Array.isArray(diag.controls) ? diag.controls : [];
+  return {
+    phase: diag.label || 'easy-apply-step',
+    reason: reason || '',
+    ats: 'linkedin',
+    strategy: 'linkedin_ea',
+    url: diag.url || location.href,
+    missingRequired: (diag.collectedRequiredEmpty || []).map(x => x && x.label).filter(Boolean),
+    visibleErrors: diag.visibleErrors || [],
+    formSummary: [diag.heading, 'actions=' + (diag.buttons || []).join(','),
+      'controls=' + controls.map(x => [x.tag, x.type || x.role, x.required ? 'required' : 'optional', x.label].filter(Boolean).join(':')).join('|')]
+      .filter(Boolean).join('; ').slice(0, 600),
+    controlCounts: {
+      total: controls.length,
+      required: controls.filter(x => x.required).length,
+      invalid: controls.filter(x => String(x.invalid || '').toLowerCase() === 'true').length,
+      populated: controls.filter(x => x.hasValue).length,
+    },
+    submitButtons: diag.buttons || [],
+    likelyCause: reason === 'stuck'
+      ? 'Enabled action accepted trusted mouse and keyboard activation but the step fingerprint did not change'
+      : '',
+    capturedAt: diag.ts || Date.now(),
+  };
 }
 
 async function pjaWaitForEasyApplyConfirmation(timeoutMs = 20000) {
@@ -345,7 +374,7 @@ function pjaCloseOpenModalPopups() {
 // (.click()/dispatchEvent) makes the page reload. Route step clicks through the
 // background CDP trusted-click (real isTrusted=true mouse event). A transport failure returns
 // false; it must never fall back to a synthetic step click because LinkedIn rejects it.
-function pjaTrustedClickInModal(label) {
+function pjaTrustedClickInModal(label, activation = 'mouse') {
   const m = pjaGetCurrentModal();
   if (!m) return Promise.resolve(false);
   const btns = pjaModalButtonEls(); // robust scope (incl footer / shadow), not just m.root
@@ -357,25 +386,29 @@ function pjaTrustedClickInModal(label) {
   // the background just performs a trusted CDP mouse click at those coords.
   pjaCloseOpenModalPopups();
   btn.scrollIntoView({ block: 'center', behavior: 'instant' });
+  if (activation === 'keyboard') {
+    try { btn.focus({ preventScroll: true }); } catch (_) { try { btn.focus(); } catch (_) {} }
+  }
   const r = btn.getBoundingClientRect();
   const x = r.left + r.width / 2, y = r.top + r.height / 2;
+  const messageType = activation === 'keyboard' ? 'LINKEDIN_TRUSTED_KEY_ACTIVATE' : 'LINKEDIN_TRUSTED_CLICK';
   return new Promise(resolve => {
     let done = false;
-    const t = setTimeout(() => { if (!done) { done = true; pjaTrace('CDP timeout; trusted click failed ' + label); resolve(false); } }, 6000);
+    const t = setTimeout(() => { if (!done) { done = true; pjaTrace('CDP timeout; trusted ' + activation + ' failed ' + label); resolve(false); } }, 6000);
     try {
-      chrome.runtime.sendMessage({ type: 'LINKEDIN_TRUSTED_CLICK', x, y }, (resp) => {
+      chrome.runtime.sendMessage({ type: messageType, x, y }, (resp) => {
         if (done) return;
         done = true; clearTimeout(t);
         if (chrome.runtime.lastError || resp?.error) {
-          pjaTrace('CDP trusted click failed ' + label + ' err=' + (resp?.error || chrome.runtime.lastError?.message || ''));
+          pjaTrace('CDP trusted ' + activation + ' failed ' + label + ' err=' + (resp?.error || chrome.runtime.lastError?.message || ''));
           resolve(false);
         } else {
-          pjaTrace('CDP click ok ' + label + (resp?.recovered ? ' (reattached)' : ''));
+          pjaTrace('CDP ' + activation + ' ok ' + label + (resp?.recovered ? ' (reattached)' : ''));
           resolve(true);
         }
       });
     } catch (e) {
-      if (!done) { done = true; clearTimeout(t); pjaTrace('CDP trusted click threw ' + label + ' err=' + (e?.message || e || '')); resolve(false); }
+      if (!done) { done = true; clearTimeout(t); pjaTrace('CDP trusted ' + activation + ' threw ' + label + ' err=' + (e?.message || e || '')); resolve(false); }
     }
   });
 }
@@ -870,12 +903,15 @@ async function pjaAutoApplyOne(job, profile, answers, onStatus) {
       sameStepCount++;
       if (sameStepCount >= 2) {
         const emptyFields = pjaEmptyRequiredFields();
+        const diag = await pjaRecordEasyApplyStepDiagnostics('same-step-stuck', heading,
+          { sameStepCount, stepFingerprint: stepFingerprint.slice(0, 1200) });
         pjaDismissModal();
         return {
           success: false,
           reason: 'stuck',
           heading,
-          fields: emptyFields
+          fields: emptyFields,
+          diagnostic: pjaEasyApplyResultDiagnostic(diag, 'stuck')
         };
       }
     } else {
@@ -950,9 +986,12 @@ async function pjaAutoApplyOne(job, profile, answers, onStatus) {
       pjaDismissModal();
       return { success: false, reason: 'unknown_buttons', btns };
     }
-    if (!await pjaTrustedClickInModal(advanceLabel)) {
+    if (!await pjaTrustedClickInModal(advanceLabel, sameStepCount === 1 ? 'keyboard' : 'mouse')) {
+      const diag = await pjaRecordEasyApplyStepDiagnostics('trusted-activation-failed', heading,
+        { action: advanceLabel, activation: sameStepCount === 1 ? 'keyboard' : 'mouse' });
       pjaDismissModal();
-      return { success: false, reason: 'trusted_click_failed', heading, action: advanceLabel };
+      return { success: false, reason: 'trusted_click_failed', heading, action: advanceLabel,
+        diagnostic: pjaEasyApplyResultDiagnostic(diag, 'trusted_click_failed') };
     }
 
     await pjaAutoWait(1200);
@@ -1272,10 +1311,11 @@ async function pjaApplyOnCurrentPage(job, profile, answers, onStatus) {
       sameStepCount++;
       if (sameStepCount >= 2) {
         const emptyFields = pjaEmptyRequiredFields();
-        await pjaRecordEasyApplyStepDiagnostics('same-step-stuck', heading,
+        const diag = await pjaRecordEasyApplyStepDiagnostics('same-step-stuck', heading,
           { sameStepCount, stepFingerprint: stepFingerprint.slice(0, 1200) });
         pjaDismissModal();
-        return { success: false, reason: 'stuck', heading, fields: emptyFields };
+        return { success: false, reason: 'stuck', heading, fields: emptyFields,
+          diagnostic: pjaEasyApplyResultDiagnostic(diag, 'stuck') };
       }
     } else {
       sameStepCount = 0;
@@ -1335,9 +1375,10 @@ async function pjaApplyOnCurrentPage(job, profile, answers, onStatus) {
       }
       pjaTrace('clicking Submit application');
       if (!await pjaTrustedClickInModal('Submit application')) {
-        await pjaRecordEasyApplyStepDiagnostics('trusted-click-failed', heading, { action: 'Submit application' });
+        const diag = await pjaRecordEasyApplyStepDiagnostics('trusted-click-failed', heading, { action: 'Submit application' });
         pjaDismissModal();
-        return { success: false, reason: 'trusted_click_failed', heading, action: 'Submit application' };
+        return { success: false, reason: 'trusted_click_failed', heading, action: 'Submit application',
+          diagnostic: pjaEasyApplyResultDiagnostic(diag, 'trusted_click_failed') };
       }
       const confirmed = await pjaWaitForEasyApplyConfirmation();
       // Dismiss post-apply dialog only after explicit confirmation.
@@ -1385,11 +1426,14 @@ async function pjaApplyOnCurrentPage(job, profile, answers, onStatus) {
       : btns.includes('Continue to next step') ? 'Continue to next step'
       : null;
     if (!advanceLabel) { pjaTrace('result=unknown_buttons btns=' + btns.join(',').slice(0,40)); pjaDismissModal(); return { success: false, reason: 'unknown_buttons', btns }; }
-    if (!await pjaTrustedClickInModal(advanceLabel)) {
-      pjaTrace('result=trusted_click_failed action=' + advanceLabel);
-      await pjaRecordEasyApplyStepDiagnostics('trusted-click-failed', heading, { action: advanceLabel });
+    const activation = sameStepCount === 1 ? 'keyboard' : 'mouse';
+    if (activation === 'keyboard') pjaTrace('same-step recovery: trusted keyboard ' + advanceLabel);
+    if (!await pjaTrustedClickInModal(advanceLabel, activation)) {
+      pjaTrace('result=trusted_click_failed action=' + advanceLabel + ' activation=' + activation);
+      const diag = await pjaRecordEasyApplyStepDiagnostics('trusted-activation-failed', heading, { action: advanceLabel, activation });
       pjaDismissModal();
-      return { success: false, reason: 'trusted_click_failed', heading, action: advanceLabel };
+      return { success: false, reason: 'trusted_click_failed', heading, action: advanceLabel,
+        diagnostic: pjaEasyApplyResultDiagnostic(diag, 'trusted_click_failed') };
     }
 
     await pjaAutoWait(1200);

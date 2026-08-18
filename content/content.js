@@ -831,6 +831,7 @@ select.pcw-input{cursor:pointer}
           status: result && result.success ? 'applied' : uncertain ? 'submitted' : 'failed',
           success: result && result.success ? true : (uncertain ? null : false),
           reason: result && result.reason || '', confirmationSource: result && result.success ? 'page' : null,
+          diagnostic: result && result.diagnostic || null,
           confirmedAt: result && result.success ? Date.now() : null,
           applicationAt: job.applicationAt || queue.startedAt || Date.now(), occurredAt: Date.now()
         };

@@ -49,10 +49,16 @@ module.exports = (t) => {
     autoApplySource.includes("key: 'Escape'") &&
     autoApplySource.includes('pjaCloseOpenModalPopups();'),
   'EA step clicks close open select/combobox popups before trusted Next/Review clicks');
-  t.ok(autoApplySource.includes('CDP timeout; trusted click failed') &&
+  t.ok(autoApplySource.includes("activation === 'keyboard' ? 'LINKEDIN_TRUSTED_KEY_ACTIVATE'") &&
+    autoApplySource.includes("sameStepCount === 1 ? 'keyboard' : 'mouse'") &&
+    autoApplySource.includes('same-step recovery: trusted keyboard') &&
     autoApplySource.includes("reason: 'trusted_click_failed'") &&
     !trustedClickSource.includes('pjaClickInModal(label)'),
-  'EA step clicks fail explicitly instead of using LinkedIn-rejected synthetic fallback');
+  'EA step actions use one trusted-keyboard recovery and never use LinkedIn-rejected synthetic fallback');
+  const contentSource = fs.readFileSync(path.resolve(ROOT, 'content/content.js'), 'utf8');
+  t.ok(autoApplySource.includes('pjaEasyApplyResultDiagnostic(diag') &&
+    contentSource.includes('diagnostic: result && result.diagnostic || null'),
+  'EA terminal results carry sanitized step diagnostics into the application ledger');
 
   const w = load(MODAL_HTML);
 
