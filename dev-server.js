@@ -27,6 +27,7 @@ const { normalizeEnginePreference, parseEngine, codexModel, codexReasoningEffort
 const { scoringExcerpt } = require('./scoring-context');
 const ApplyProgress = require('./apply-progress');
 const ApplyRunControl = require('./apply-run-control');
+const ApplyReportHealth = require('./apply-report-health');
 const LocalJsonClient = require('./local-json-client');
 const ScoringFrontier = require('./scoring-frontier');
 const { decideRecovery } = require('./apply-recovery-policy');
@@ -963,7 +964,7 @@ function developerRecommendation(row = {}) {
   const ats = String(row.ats || '').toLowerCase();
   const channel = String(row.channel || '').toLowerCase();
   if (/workday_duplicate_record/.test(reason)) {
-    return 'Manual/profile-state blocker: inspect Workday existing-draft subrecords; suppress same tenant until duplicate-record recovery is implemented.';
+    return 'Manual Workday draft-data blocker: do not refill or resubmit; inspect the existing Previous Worker/Address records before any targeted retry.';
   }
   if (/workday_captcha|captcha/.test(reason) && ats === 'workday') {
     return 'External auth/anti-bot blocker: keep tenant suppressed; retry only after manual captcha/account reset.';
@@ -974,7 +975,7 @@ function developerRecommendation(row = {}) {
   if (/captcha|checkpoint|daily_limit/.test(reason)) {
     return 'External anti-bot/account-limit blocker: record and pause that channel; retry only after account state clears.';
   }
-  if (/ranked_watchdog_timeout|stuck_watchdog|watchdog_timeout|submit_unclear|submit_unconfirmed/.test(reason)) {
+  if (/ranked_watchdog_timeout|stuck_watchdog|watchdog_timeout|submit_unclear|submit_unconfirmed|submit_observation_timeout|workday_transport_failure/.test(reason)) {
     return 'Automation/confirmation gap: inspect page/debug tail; improve submit success detection or form-specific recovery.';
   }
   if (/missing_required|wd_selectinput_blocked|no_submit_after_spa/.test(reason)) {
@@ -1079,9 +1080,9 @@ function renderApplyRunReport(storage, options = {}) {
   ));
   const lastFailure = compactReportJob(rawFailureOwned ? rawLastFailure
     : ranked && ranked.error ? { runId, reason: ranked.error } : null, 'last_failure');
-  const profileFieldCount = storage && storage.pja_profile && typeof storage.pja_profile === 'object'
-    ? Object.entries(storage.pja_profile).filter(([k, v]) => k !== 'savedAt' && v != null && String(v).trim()).length : null;
-  const resumeConfigured = !!(storage && storage.pja_resume_filename);
+  const reportHealth = ApplyReportHealth.resolveReportHealth(storage || {}, runControl);
+  const profileFieldCount = reportHealth.profileFieldCount;
+  const resumeConfigured = reportHealth.resumeConfigured;
   const count = name => Array.isArray(results[name]) ? results[name].length
     : ranked && ranked.counts && ranked.counts[name] != null ? Number(ranked.counts[name]) || 0
     : ranked && ranked[name] != null ? Number(ranked[name]) || 0
@@ -1130,8 +1131,9 @@ function renderApplyRunReport(storage, options = {}) {
   lines.push('## Run health');
   lines.push('');
   lines.push(`- Extension clients: ${wsClients.size}`);
-  lines.push(`- Profile configured: ${profileFieldCount == null ? 'unknown' : profileFieldCount >= 3 ? 'yes' : 'no'}${profileFieldCount == null ? '' : ` (${profileFieldCount} non-empty fields)`}`);
-  lines.push(`- Resume configured: ${resumeConfigured ? 'yes' : 'no'}`);
+  lines.push(`- Profile configured: ${reportHealth.profileConfigured == null ? 'unknown' : reportHealth.profileConfigured ? 'yes' : 'no'}${profileFieldCount == null ? '' : ` (${profileFieldCount} non-empty fields)`}`);
+  lines.push(`- Resume configured: ${resumeConfigured == null ? 'unknown' : resumeConfigured ? 'yes' : 'no'}`);
+  if (reportHealth.source === 'preflight') lines.push('- Profile/resume health source: successful admission preflight');
   lines.push(`- Active/in-flight: ${ranked && ranked.status === 'applying' ? 'yes' : 'no'} / ${ranked && ranked.inFlightIndex != null ? 'yes' : 'no'}`);
   lines.push(`- Job tab cleanup: ${ranked && (ranked.tabCleanup || ranked.lastTabCleanup) ? safeReportText(JSON.stringify(ranked.tabCleanup || ranked.lastTabCleanup)) : 'not recorded'}`);
   if (storage && storage.pja_profile_restored_from_backup) lines.push('- Profile backup recovery: yes');
@@ -2601,19 +2603,26 @@ ${(description || '').slice(0, 6000)}`;
       try {
         const o = body ? JSON.parse(body) : {};
         requestedRunId = safeReportId(o.runId || `apply-${Date.now()}`);
+        let admissionPreflight = null;
         if (o.preflight !== false) {
-          const preflight = await oneClickPreflight(o);
-          if (!preflight.ok) {
+          admissionPreflight = await oneClickPreflight(o);
+          if (!admissionPreflight.ok) {
             res.writeHead(409, CORS);
-            res.end(JSON.stringify({ success: false, stage: 'preflight', preflight,
-              error: 'one-click preflight failed: ' + preflight.problems.join(', ') }));
+            res.end(JSON.stringify({ success: false, stage: 'preflight', preflight: admissionPreflight,
+              error: 'one-click preflight failed: ' + admissionPreflight.problems.join(', ') }));
             return;
           }
         }
         const targetConfirmed = o.targetConfirmed != null ? Math.max(1, Number(o.targetConfirmed) || 1) : 20;
         await persistApplyRunControl({ runId: requestedRunId, status: 'planning', phase: 'sourcing',
           initialPhase: 'preflight', targetConfirmed, category: String(o.category || '').trim().toLowerCase(),
-          terminalReason: null, error: null }, { create: true });
+          terminalReason: null, error: null,
+          preflightHealth: admissionPreflight ? {
+            profileConfigured: admissionPreflight.candidate && admissionPreflight.candidate.configured === true,
+            resumeConfigured: admissionPreflight.candidate && admissionPreflight.candidate.resume === true,
+            profileFieldCount: admissionPreflight.candidate && admissionPreflight.candidate.fields,
+            verifiedAt: Date.now(),
+          } : null }, { create: true });
         const accepted = { success: true, accepted: true, status: 'planning', phase: 'sourcing',
           runId: requestedRunId,
           statusUrl: `/apply-runs/${encodeURIComponent(requestedRunId)}`,

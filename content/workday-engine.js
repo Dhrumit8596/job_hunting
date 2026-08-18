@@ -9,10 +9,49 @@ function isWorkdayHost(hostname) {
 }
 
 function duplicateRecordRecoveryAction(input = {}) {
-  if (!input.hasError || !/\/apply\/applyManually(?:\/|$)/i.test(String(input.pathname || ''))) return 'none';
+  if (!/\/apply\/applyManually(?:\/|$)/i.test(String(input.pathname || ''))) return 'none';
   let markedDraftRetry = false;
   try { markedDraftRetry = new URLSearchParams(String(input.search || '')).get('pja_wd_draft_retry') === '1'; } catch (_) {}
-  return input.retryUsed || markedDraftRetry ? 'terminal' : 'reroute';
+  // The marker is written only after the duplicate Previous Worker/Address validation was
+  // observed. Workday can restore applyManually before re-rendering that error text, so requiring
+  // hasError here races React hydration and can restart the entire fill chain.
+  if (input.retryUsed || markedDraftRetry) return 'terminal';
+  return input.hasError ? 'reroute' : 'none';
+}
+
+function classifySubmissionObservation(input = {}) {
+  const pathname = String(input.pathname || '');
+  const text = String(input.text || '');
+  const hasActiveForm = input.hasSubmitButton === true || input.hasFormFields === true;
+  const explicitSuccess = input.explicitSuccess === true || (!hasActiveForm && (
+    /\/(?:completed|confirmation)(?:\/|$)/i.test(pathname) ||
+    /view my applications|your application (?:has been|was) submitted|thank you for applying|application received|you have applied/i.test(text)
+  ));
+  if (input.duplicateRecord === true) {
+    return { kind: 'duplicate_record', reason: 'workday_duplicate_record', retrySafe: false };
+  }
+  if (explicitSuccess) return { kind: 'confirmed', reason: 'applied', retrySafe: false };
+  if (input.captcha === true || /captcha|verify you are human|unusual activity/i.test(text)) {
+    return { kind: 'captcha', reason: 'workday_captcha', retrySafe: false };
+  }
+  if (input.accountBlocker === true || /account (?:is )?(?:locked|disabled)|too many unsuccessful|sign.?in attempts exceeded/i.test(text)) {
+    return { kind: 'account_blocker', reason: 'workday_account_locked', retrySafe: false };
+  }
+  if (input.validationError === true) {
+    return { kind: 'validation_failure', reason: 'missing_required', retrySafe: true };
+  }
+  if (input.transportError === true) {
+    return { kind: 'transport_failure', reason: 'workday_transport_failure', retrySafe: false };
+  }
+  if (input.watchdog === true) {
+    return input.submitAttempted === true
+      ? { kind: 'submitted_unverified', reason: 'submit_observation_timeout', retrySafe: false }
+      : { kind: 'watchdog_failure', reason: 'ranked_watchdog_timeout', retrySafe: false };
+  }
+  if (input.submitAttempted === true) {
+    return { kind: 'submitted_unverified', reason: 'submit_unclear', retrySafe: false };
+  }
+  return { kind: 'none', reason: '', retrySafe: false };
 }
 
 function visible(el) {
@@ -226,9 +265,10 @@ function snapshot(root = document) {
 }
 
 window.PJAWorkdayEngine = {
-  version: 1,
+  version: 2,
   isWorkdayHost,
   duplicateRecordRecoveryAction,
+  classifySubmissionObservation,
   visible,
   findEmailInput,
   findEmailSignInButton,

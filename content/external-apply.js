@@ -3715,8 +3715,16 @@
     // If the step-loop already clicked the final Submit (on Workday the review-page Submit
     // IS the pageFooterNextButton), we're now on the confirmation page → record as applied.
     {
-      const alreadySubmitted = /\/completed\/|\/confirmation/i.test(location.pathname) ||
-        /view my applications|your application (has been|was) submitted|thank you for applying|application received|you have applied/i.test(document.body?.innerText || '');
+      const alreadySubmitted = pjaIsSubmitSuccess({
+        text: document.body?.innerText || '',
+        title: document.title,
+        url: location.href,
+        preSubmitUrl: job._preSubmitUrl || job.applyUrl || '',
+        hasSubmitButton: !!document.querySelector('[data-automation-id="bottomNavigationSubmit"]') ||
+          !!findButton(/submit.*application|submit.*app|apply now|send application|complete application|^submit$|^submit application$/i),
+        hasFormFields: pjaQueryAllExt('form input, form select, form textarea')
+          .some(el => el.type !== 'hidden'),
+      });
       if (alreadySubmitted) {
         await addDbg('[ext] post-submit confirmation detected → applied: ' + job.company);
         sessionStorage.setItem('pja_last_action', 'recordResult:applied:' + job.company);
@@ -3870,12 +3878,19 @@
 
     console.log('PJA ext-apply: clicking submit:', submitBtn.textContent.trim().slice(0,40));
     sessionStorage.setItem('pja_last_action', 'submit_clicked:' + job.company);
+    let workdaySubmitDelivery = '';
     if (/workday\.com|myworkdayjobs\.com/i.test(location.hostname)) {
       const clicked = await Promise.race([
         trustedWorkdayClick(submitBtn, 'submit'),
         sleep(10000).then(async () => { await addDbg('[WD] trusted click submit TIMEOUT 10000ms'); return false; })
       ]);
-      if (!clicked) submitBtn.click();
+      workdaySubmitDelivery = clicked ? 'trusted' : 'transport_failed';
+      if (!clicked) {
+        try {
+          submitBtn.click();
+          workdaySubmitDelivery = 'dom_fallback';
+        } catch (_) {}
+      }
     } else if (/greenhouse\.io|ashbyhq\.com/i.test(location.hostname)) {
       // Several Remix tenants accept synthetic field events but reject a synthetic final click:
       // the page simply reloads with zero validation errors and no confirmation. Deliver the final
@@ -3992,6 +4007,39 @@
         await recordResult(job, { success: false, reason: 'captcha' });
         navigateBack(job);
         return;
+      }
+      const isWorkdayPostSubmit = /workday\.com|myworkdayjobs\.com/i.test(location.hostname);
+      if (isWorkdayPostSubmit && window.PJAWorkdayEngine?.classifySubmissionObservation) {
+        const accountBlocker = /account (?:is )?(?:locked|disabled)|too many unsuccessful|sign.?in attempts exceeded/i.test(postSubmitText);
+        const observation = window.PJAWorkdayEngine.classifySubmissionObservation({
+          pathname: location.pathname,
+          text: postSubmitText,
+          duplicateRecord: hasWorkdayDuplicateRecordError(),
+          validationError: errElsBeforeCaptcha.length > 0,
+          accountBlocker,
+          captcha: captchaWidgetVisible,
+          transportError: workdaySubmitDelivery === 'transport_failed',
+          submitAttempted: workdaySubmitDelivery !== 'transport_failed',
+          hasSubmitButton: !!findButton(/submit.*application|submit.*app|apply now|send application|complete application|^submit$|^submit application$/i),
+          hasFormFields: pjaQueryAllExt('form input, form select, form textarea').some(el => el.type !== 'hidden'),
+        });
+        if (observation.kind === 'duplicate_record' || observation.kind === 'account_blocker' ||
+            observation.kind === 'transport_failure' || observation.kind === 'submitted_unverified') {
+          await addDbg('[WD] post-submit observation=' + observation.kind + ' reason=' + observation.reason +
+            ' delivery=' + (workdaySubmitDelivery || 'unknown'));
+          await capturePostClickDiagnostic(observation.reason, {
+            workdayObservation: observation.kind,
+            submitDelivery: workdaySubmitDelivery || 'unknown',
+          });
+          sessionStorage.setItem('pja_last_action', 'recordResult:' + observation.reason + ':' + job.company);
+          await recordResult(job, { success: false, reason: observation.reason,
+            fields: ['workday_observation:' + observation.kind] });
+          navigateBack(job);
+          return;
+        }
+        // Only explicit validation evidence makes a Workday correction/re-submit safe. All
+        // ambiguous submit attempts returned above as submitted/unverified.
+        await addDbg('[WD] post-submit observation=' + observation.kind + ' retrySafe=' + observation.retrySafe);
       }
     }
     // DIAGNOSTIC: on submit_unclear, dump Greenhouse/ATS validation errors so we can see WHICH
@@ -6388,7 +6436,7 @@
     if (/posting_not_found|no_apply|apply_btn_no_form/.test(r)) return 'preflight';
     if (/missing_required|selectinput|needs_manual/.test(r)) return 'required_field_check';
     if (/resume/.test(r)) return 'resume_upload';
-    if (/submit|captcha|email_verification/.test(r)) return 'post_submit_confirmation';
+    if (/submit|captcha|email_verification|transport/.test(r)) return 'post_submit_confirmation';
     if (/watchdog|stuck/.test(r)) return 'watchdog';
     return 'fill';
   }

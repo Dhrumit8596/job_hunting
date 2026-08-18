@@ -57,7 +57,30 @@ module.exports = (t) => {
   }), 'terminal', 'workday engine: used duplicate retry terminalizes before another fill pass');
   t.eq(application.PJAWorkdayEngine.duplicateRecordRecoveryAction({
     hasError: false, pathname: '/en-US/Careers/job/Foo/apply/applyManually', search: '?pja_wd_draft_retry=1', retryUsed: true,
-  }), 'none', 'workday engine: retry markers never create a duplicate blocker without page evidence');
+  }), 'terminal', 'workday engine: durable retry evidence terminalizes before delayed error text re-renders');
+  t.eq(application.PJAWorkdayEngine.duplicateRecordRecoveryAction({
+    hasError: false, pathname: '/en-US/Careers/job/Foo/apply', search: '?pja_wd_draft_retry=1', retryUsed: true,
+  }), 'none', 'workday engine: marked draft landing may proceed until control returns to applyManually');
+
+  const classify = application.PJAWorkdayEngine.classifySubmissionObservation;
+  t.eq(classify({ duplicateRecord: true, submitAttempted: true }).kind, 'duplicate_record',
+    'workday observation: duplicate-record evidence wins and is terminal');
+  t.eq(classify({ explicitSuccess: true, submitAttempted: true }).kind, 'confirmed',
+    'workday observation: explicit confirmation is an actual submission');
+  t.eq(classify({ validationError: true, submitAttempted: true }).retrySafe, true,
+    'workday observation: explicit validation failure is the only retry-safe post-submit state');
+  t.eq(classify({ accountBlocker: true, submitAttempted: true }).kind, 'account_blocker',
+    'workday observation: account blockers are distinguished from validation failures');
+  t.eq(classify({ captcha: true, submitAttempted: true }).kind, 'captcha',
+    'workday observation: CAPTCHA is a terminal manual state');
+  t.eq(classify({ transportError: true, submitAttempted: false }).reason, 'workday_transport_failure',
+    'workday observation: failed submit delivery is a transport failure');
+  t.eq(classify({ watchdog: true, submitAttempted: false }).kind, 'watchdog_failure',
+    'workday observation: pre-submit watchdog remains a failure');
+  t.eq(classify({ watchdog: true, submitAttempted: true }).reason, 'submit_observation_timeout',
+    'workday observation: post-submit watchdog is unverified and must never be retried');
+  t.eq(classify({ submitAttempted: true }).kind, 'submitted_unverified',
+    'workday observation: ambiguous post-submit state remains submitted/unverified');
 
   const nonWd = loadEngine('<body><button>Apply</button></body>', 'https://example.com/jobs/1');
   t.eq(nonWd.PJAWorkdayEngine.detectState(nonWd.document), 'not_workday',

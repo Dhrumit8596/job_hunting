@@ -431,9 +431,12 @@
     // burns the batch budget; defer for manual review and let the queue advance immediately.
     'no_apply_btn_on_description', 'no_apply_path', 'no_submit_btn', 'wd_selectinput_blocked',
     'workday_auth_sign_in_error', 'workday_create_rejected_no_visible_error',
-    'workday_account_exists_wrong_password', 'workday_duplicate_record']);
+    'workday_account_exists_wrong_password', 'workday_duplicate_record',
+    // Submit was attempted but acceptance could not be observed. Never retry an application that
+    // may already exist; keep it visible for evidence reconciliation instead.
+    'submit_unclear', 'submit_observation_timeout', 'workday_transport_failure']);
 
-  // Everything else (missing_required, submit_unclear, apply_btn_no_form,
+  // Everything else (missing_required, apply_btn_no_form,
   // watchdog_timeout, no_apply_btn_on_description, no_submit_after_spa, workday_auth_*) is TRANSIENT:
   // retry until maxAttempts, then defer to needs_manual.
   function resultToState(reason, attempts, maxAttempts = 3) {

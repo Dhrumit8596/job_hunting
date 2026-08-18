@@ -3,6 +3,7 @@
 // Pure pre-queue lifecycle rules. The dev server owns orchestration and the extension owns durable
 // storage, but neither should invent merge/ownership semantics independently.
 const RunState = require('./apply-run-state');
+const ReportHealth = require('./apply-report-health');
 
 function compactPlanningDrops(value, options = {}) {
   if (!value || typeof value !== 'object') return null;
@@ -49,6 +50,9 @@ function build(current, patch, options = {}) {
   }, sameRun, patch, { updatedAt: now, lastTransitionAt: now });
   if (Object.prototype.hasOwnProperty.call(patch, 'planningDrops')) {
     next.planningDrops = compactPlanningDrops(patch.planningDrops);
+  }
+  if (Object.prototype.hasOwnProperty.call(patch, 'preflightHealth')) {
+    next.preflightHealth = ReportHealth.compactPreflightHealth(patch.preflightHealth);
   }
   if (RunState.isTerminalStatus(next.status)) {
     next.phase = 'terminal';

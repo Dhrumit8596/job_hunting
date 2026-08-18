@@ -105,6 +105,13 @@ module.exports = async (t) => {
     source.includes('master = await pjaRecoverRankedLastFailure(master)'),
   'ranked dispatch: resume recovers SuccessFactors landing-page no-submit failures as terminal no_apply_path events');
 
+  t.ok(source.includes("chrome.storage.local.get('pja_ext_current'") &&
+    source.includes('current._submitPending') &&
+    source.includes("submitPending ? 'submit_observation_timeout' : 'ranked_watchdog_timeout'") &&
+    source.includes("status: submitPending ? 'submitted' : 'failed'") &&
+    source.includes('success: submitPending ? null : false'),
+  'ranked watchdog: a Workday submit-pending timeout remains unverified and is never converted to a retryable failure');
+
   t.ok(source.includes('function pjaMergeProfileWrite(previous, incoming') &&
     source.includes('rejected_empty_profile_overwrite') &&
     source.includes('rejected_required_profile_field_deletion') &&
@@ -127,6 +134,11 @@ module.exports = async (t) => {
 
   t.ok(dev.includes('transientStorageRead: true') && dev.includes('if (!storageReadObserved && runtimeHasCandidateProfile)'),
   'candidate preflight: a transient extension reconnect timeout cannot erase a previously verified runtime profile');
+
+  t.ok(dev.includes('preflightHealth: admissionPreflight ? {') &&
+    dev.includes('ApplyReportHealth.resolveReportHealth(storage || {}, runControl)') &&
+    dev.includes('Profile/resume health source: successful admission preflight'),
+  'exact-run report: successful admission health survives a sparse terminal storage export');
 
   t.ok(source.includes('Acknowledge the durable run install before network/tab launch work') &&
     source.includes('setTimeout(() => {') && source.includes('pjaDispatchRankedCurrent(msg.master).catch'),
@@ -158,7 +170,7 @@ module.exports = async (t) => {
   t.ok(source.includes('function pjaCompactApplyDiagnostic(value)') &&
     source.includes('const diagnostic = pjaCompactApplyDiagnostic(event.diagnostic || job.diagnostic || null)') &&
     source.includes('diagnostic: pjaCompactApplyDiagnostic(failure)') &&
-    source.includes('submit_unclear|missing_required|needs_manual'),
+    source.includes('submit_unclear|submit_observation_timeout|workday_transport_failure|missing_required|needs_manual'),
   'ranked dispatch: per-job diagnostics survive ledger reconciliation, resume recovery, and completed-run snapshots');
 
   t.ok(source.includes("chrome.tabs.create({ url: 'about:blank', active: true }") &&

@@ -3,11 +3,15 @@
 const Control = require('../../apply-run-control');
 
 module.exports = t => {
-  const created = Control.build(null, { runId: 'apply-1', phase: 'sourcing', targetConfirmed: 20 },
+  const created = Control.build(null, { runId: 'apply-1', phase: 'sourcing', targetConfirmed: 20,
+    preflightHealth: { profileConfigured: true, resumeConfigured: true, profileFieldCount: 12, verifiedAt: 900 } },
     { create: true, now: 1000 });
   t.eq(created.status, 'planning', 'run control: admission creates active planning state');
   t.eq(created.phase, 'sourcing', 'run control: admission phase is observable');
   t.ok(Control.ownsPlanning(created, 'apply-1'), 'run control: matching planner owns queue installation');
+  t.eq(created.preflightHealth, {
+    profileConfigured: true, resumeConfigured: true, profileFieldCount: 12, verifiedAt: 900,
+  }, 'run control: compact successful preflight health remains available to exact-run reports');
 
   const failed = Control.build(created, { runId: 'apply-1', status: 'failed', error: 'source fetch failed' },
     { now: 2000 });

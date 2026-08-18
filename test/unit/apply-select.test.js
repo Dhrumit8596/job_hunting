@@ -224,7 +224,12 @@ module.exports = (t) => {
   t.eq(resultToState('missing_required', 0).retry, true, 'transient marks retry');
   t.eq(resultToState('missing_required', 0, 1).status, 'needs_manual', 'E2E-safe maxAttempts=1 defers transient first fail');
   t.eq(resultToState('missing_required', 2, 3).status, 'needs_manual', 'transient at maxAttempts → needs_manual');
-  t.eq(resultToState('submit_unclear', 1, 3).attempts, 2, 'attempts increments');
+  t.eq(resultToState('submit_unclear', 1, 3).status, 'needs_manual',
+    'ambiguous submit is never retried because an application may already exist');
+  t.eq(resultToState('submit_observation_timeout', 0, 3).status, 'needs_manual',
+    'post-submit watchdog uncertainty is terminal/manual');
+  t.eq(resultToState('workday_transport_failure', 0, 3).status, 'needs_manual',
+    'explicit Workday submit transport failure is terminal/manual');
 
   // --- exceededBudget (cross-reload stall guard) ---
   t.eq(exceededBudget(null, 1000), false, 'no entry → not exceeded');

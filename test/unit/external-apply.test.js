@@ -349,6 +349,13 @@ module.exports = (t) => {
     externalSource.includes('duplicate record validation cannot be auto-cleared; recording workday_duplicate_record') &&
     externalSource.includes('workday_duplicate_record'),
   'external-apply: Workday duplicate-record validation reroutes applyManually drafts and is separately classified');
+  t.ok(externalSource.includes('pjaIsSubmitSuccess({') &&
+    externalSource.includes("workdaySubmitDelivery = clicked ? 'trusted' : 'transport_failed'") &&
+    externalSource.includes('classifySubmissionObservation({') &&
+    externalSource.includes("observation.kind === 'submitted_unverified'") &&
+    externalSource.includes("'workday_observation:' + observation.kind") &&
+    externalSource.includes('Only explicit validation evidence makes a Workday correction/re-submit safe'),
+  'external-apply: Workday observation distinguishes confirmation, blockers, validation, transport, and ambiguity without retrying a possible submission');
   t.ok(externalSource.includes("reasonHint === 'resume'") &&
     externalSource.includes('blocked advance retry: retrying resume upload') &&
     externalSource.includes("withTimeout(tryInjectResume(profile, answers), 90000, 'wd-resume-blocked-retry')"),

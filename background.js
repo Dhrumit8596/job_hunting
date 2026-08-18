@@ -836,8 +836,8 @@ async function pjaRecoverRankedLastFailure(master) {
   const reason = String(failure.reason || '');
   const isSuccessFactors = /successfactors|talentcommunity/i.test(String(job.ats || job.channel || '') + ' ' + String(job.applyUrl || ''));
   const recoveredReason = isSuccessFactors && reason === 'no_submit_btn' ? 'no_apply_path' : reason;
-  if (!/^(no_apply_path|no_submit_btn|posting_not_found|apply_btn_no_form|no_apply_btn_on_description|submit_unclear|missing_required|needs_manual|captcha|captcha_or_antibot|email_verification_required|auth_blocked|wd_selectinput_blocked|workday_duplicate_record|workday_account_locked|workday_account_exists_wrong_password|workday_captcha|workday_auth_sign_in_error|unsupported_strategy|unsupported_apply_strategy|stuck_budget|handler_timeout|watchdog_timeout|stuck_watchdog|ranked_watchdog_timeout|success_unverified|no_submit_after_spa)$/.test(reason)) return master;
-  const uncertain = /submit_unclear/i.test(reason);
+  if (!/^(no_apply_path|no_submit_btn|posting_not_found|apply_btn_no_form|no_apply_btn_on_description|submit_unclear|submit_observation_timeout|workday_transport_failure|missing_required|needs_manual|captcha|captcha_or_antibot|email_verification_required|auth_blocked|wd_selectinput_blocked|workday_duplicate_record|workday_account_locked|workday_account_exists_wrong_password|workday_captcha|workday_auth_sign_in_error|unsupported_strategy|unsupported_apply_strategy|stuck_budget|handler_timeout|watchdog_timeout|stuck_watchdog|ranked_watchdog_timeout|success_unverified|no_submit_after_spa)$/.test(reason)) return master;
+  const uncertain = /submit_unclear|submit_observation_timeout/i.test(reason);
   const skipped = /captcha|ready_to_submit/i.test(reason);
   const event = {
     runId: master.runId,
@@ -1068,11 +1068,16 @@ async function pjaApplyWatchdogTick() {
       Date.now() - (ranked.inFlightAt || Date.now()) > rankedCapMs) {
     const stuck = ranked.jobs[ranked.currentIndex];
     if (stuck) {
+      const extState = await new Promise(r => chrome.storage.local.get('pja_ext_current', r));
+      const current = extState.pja_ext_current;
+      const submitPending = !!(rankedIsWorkday && current && pjaSameRankedJob(current, stuck) && current._submitPending);
+      const timeoutReason = submitPending ? 'submit_observation_timeout' : 'ranked_watchdog_timeout';
       await pjaCloseRankedTab(ranked.inFlightTabId);
-      await pjaRestoreRankedFailureState(stuck, 'ranked_watchdog_timeout', ranked);
+      await pjaRestoreRankedFailureState(stuck, timeoutReason, ranked);
       await pjaAppendApplicationEvent({ runId: ranked.runId,
         jobId: stuck.jobId || stuck.id, applyUrl: stuck.applyUrl, company: stuck.company, title: stuck.title,
-        channel: stuck.channel, status: 'failed', success: false, reason: 'ranked_watchdog_timeout',
+        channel: stuck.channel, status: submitPending ? 'submitted' : 'failed', success: submitPending ? null : false,
+        reason: timeoutReason,
         applicationAt: stuck.applicationAt || ranked.inFlightAt, occurredAt: Date.now() });
     }
     return;
