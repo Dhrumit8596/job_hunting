@@ -1763,7 +1763,7 @@ if (DEV_MODE) {
                   chrome.tabs.onUpdated.removeListener(onUpd);
                   // `complete` means document-idle content scripts are available. Launch now so an
                   // MV3 worker suspension cannot erase a delayed timer before the page scan starts.
-                  chrome.scripting.executeScript({
+                  const invokeScanner = () => chrome.scripting.executeScript({
                     target: { tabId: tab.id },
                     func: (fast, source, scanOptions) => {
                       if (source === 'indeed') {
@@ -1782,8 +1782,20 @@ if (DEV_MODE) {
                       else { if (typeof window.__pjaStartScan === 'function') { window.__pjaStartScan({ ...(scanOptions || {}), fast }); return { ok: true, started: true }; } return { ok: false, error: 'scanner_not_loaded' }; }
                     },
                     args: [!!msg.fast, msg.source || '', msg.scanOptions || {}],
-                  }).then(result => {
-                    const state = result && result[0] && result[0].result;
+                  });
+                  invokeScanner().then(async result => {
+                    let state = result && result[0] && result[0].result;
+                    if (isLinkedIn && state && state.ok === false && state.error === 'scanner_not_loaded') {
+                      // Background LinkedIn tabs can complete without manifest scripts after an
+                      // extension reload. Inject only our scanner once, then retry the same bounded
+                      // invocation; no site protection or user page is modified.
+                      await chrome.scripting.executeScript({ target: { tabId: tab.id }, func: () => {
+                        if (typeof window.__pjaStartScan !== 'function') delete window.__pjaScraperLoaded;
+                      } });
+                      await chrome.scripting.executeScript({ target: { tabId: tab.id }, files: ['content/job-scraper.js'] });
+                      result = await invokeScanner();
+                      state = result && result[0] && result[0].result;
+                    }
                     if (isIndeed && state && state.ok === false) chrome.storage.local.set({ pja_indeed_scan: {
                       status: 'failed', reason: 'launcher_error', error: state.error || 'unknown', url: scanUrl, tabId: tab.id, ts: Date.now() } });
                     if (isLinkedIn) chrome.storage.local.set({ pja_linkedin_scan: {
