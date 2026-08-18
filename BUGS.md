@@ -25,6 +25,7 @@ what the bug was, where the fix now lives, and (where present) the test that pin
 | 8 | test-apply-form.html | `name="zip"` (L64) | Medium | ✅ Fixed |
 | 9 | content.js | listener guard `__pjaMsgListenerAdded` (L5) | Medium | ✅ Fixed |
 | 10 | content.js | `STATUS_COLORS` removed | Low | ✅ Fixed |
+| 11 | background.js | `pjaBuildApplySet` ambiguous-ledger blocker | Critical | ✅ Fixed |
 
 ---
 
@@ -80,3 +81,12 @@ call `sendResponse` synchronously and the handler falls through (no dangling asy
 
 ## BUG 10 — Dead `STATUS_COLORS` in content.js — ✅ FIXED
 Removed from `content/content.js`. The canonical `STATUS_COLORS` lives in `popup/popup.js`.
+
+## BUG 11 — Ambiguous historical submissions could re-enter the apply plan — ✅ FIXED
+**Was:** a sourcing refresh could restore a corpus row to `sourced` while its application-ledger
+event retained `ranked_watchdog_timeout` or another ambiguous post-submit outcome. The planner's
+manual-blocker filter did not recognize those older reasons, so the requisition could be selected
+again even though it might already have been submitted.
+**Fix:** `pjaBuildApplySet` treats `submit_unclear`, `submit_observation_timeout`,
+`workday_transport_failure`, and historical `ranked_watchdog_timeout` ledger records as terminal
+blocked records. They require manual reconciliation and cannot be retried implicitly.

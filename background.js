@@ -84,7 +84,11 @@ async function pjaBuildApplySet(opts) {
   ]);
   const recs = [...(st.pja_applied_log || []).filter(x => !x || !x.status || /^(applied|submitted|submitting|success|confirmed)$/i.test(String(x.status))),
     ...(st.pja_jobs || []).filter(x => x && /^(applied|submitted|success|confirmed)$/i.test(String(x.status || x.result || '')))];
-  const manualBlockerRe = /captcha|daily_limit|checkpoint|email_verification_required|workday_duplicate_record|workday_account_locked|workday_account_exists_wrong_password|workday_captcha|google_sso_only|ready_to_submit_review|chatbot_apply_manual|unsupported_|no_apply_path/i;
+  // Ledger outcomes that are manual-only or could follow a submit attempt must remain terminal
+  // even when a later sourcing import refreshes the corpus row back to `sourced`. Historical
+  // ranked watchdog failures predate the explicit submit-observation classifier, so retrying one
+  // could duplicate an application whose confirmation was merely lost.
+  const manualBlockerRe = /captcha|daily_limit|checkpoint|email_verification_required|workday_duplicate_record|workday_account_locked|workday_account_exists_wrong_password|workday_captcha|google_sso_only|ready_to_submit_review|chatbot_apply_manual|unsupported_|no_apply_path|submit_unclear|submit_observation_timeout|workday_transport_failure|ranked_watchdog_timeout/i;
   const ledgerEvents = st.pja_application_ledger && st.pja_application_ledger.events
     ? Object.values(st.pja_application_ledger.events) : [];
   const hostOf = url => { try { return new URL(String(url || '')).hostname.toLowerCase(); } catch (_) { return ''; } };

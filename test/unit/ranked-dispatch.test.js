@@ -112,6 +112,10 @@ module.exports = async (t) => {
     source.includes('success: submitPending ? null : false'),
   'ranked watchdog: a Workday submit-pending timeout remains unverified and is never converted to a retryable failure');
 
+  t.ok(source.includes('const manualBlockerRe =') &&
+    source.includes('submit_unclear|submit_observation_timeout|workday_transport_failure|ranked_watchdog_timeout'),
+  'apply planning: historical and current ambiguous submission outcomes remain blocked from retry');
+
   t.ok(source.includes('function pjaMergeProfileWrite(previous, incoming') &&
     source.includes('rejected_empty_profile_overwrite') &&
     source.includes('rejected_required_profile_field_deletion') &&
