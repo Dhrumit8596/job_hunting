@@ -410,7 +410,7 @@ async function runBrowserDiscoveryQueries(options = {}) {
   const plan = BrowserDiscovery.buildBrowserDiscoveryPlan(options);
   // One page per source/title is intentionally cheap. LinkedIn and Indeed run as a pair for each
   // title, so the full configured title set still fits inside the normal sourcing admission window.
-  const timeoutMs = Math.max(15000, Math.min(60000, Number(options.perQueryTimeoutMs) || 40000));
+  const timeoutMs = Math.max(30000, Math.min(150000, Number(options.perQueryTimeoutMs) || 120000));
   const byQuery = [], blockedSources = new Set();
   const runItem = async item => {
     const startedAt = Date.now();
@@ -449,7 +449,11 @@ async function runBrowserDiscoveryQueries(options = {}) {
     const active = plan.filter(item => item.query === query && !blockedSources.has(item.source));
     const skipped = plan.filter(item => item.query === query && blockedSources.has(item.source))
       .map(item => ({ source: item.source, query: item.query, status: 'skipped_source_blocked' }));
-    const rows = await Promise.all(active.map(runItem));
+    // Chrome heavily throttles inactive search tabs. Run the two platforms serially (Indeed first
+    // so a challenge blocks it once), leaving the owned LinkedIn tab active for its bounded scan.
+    active.sort((a, b) => (a.source === 'indeed' ? -1 : 1) - (b.source === 'indeed' ? -1 : 1));
+    const rows = [];
+    for (const item of active) rows.push(await runItem(item));
     byQuery.push(...rows, ...skipped);
     for (const row of rows) {
       if (row.source === 'indeed' && /^(paused|failed)$/i.test(String(row.status || '')) &&
@@ -2855,7 +2859,8 @@ ${(description || '').slice(0, 6000)}`;
 
         let sourceResp = { ok: true, skipped: true, status: 200, data: { note: 'source:false' } };
         if (o.source !== false) {
-          sourceResp = await postLocalJson('/source-v2', sourceBody, Number(o.sourceTimeoutMs) || 15 * 60 * 1000);
+          sourceResp = await postLocalJson('/source-v2', sourceBody, Number(o.sourceTimeoutMs) ||
+            (sourceBody.browserDiscovery ? 35 * 60 * 1000 : 15 * 60 * 1000));
           if (!sourceResp.ok || sourceResp.data && sourceResp.data.success === false) {
             res.writeHead(sourceResp.status || 502, CORS);
             res.end(JSON.stringify({ success: false, stage: 'source-v2', sourceOptions: sourceBody,
@@ -2945,7 +2950,7 @@ ${(description || '').slice(0, 6000)}`;
             maxQueries: o.browserDiscoveryMaxQueries != null ? Number(o.browserDiscoveryMaxQueries) : 20,
             maxPages: o.browserDiscoveryMaxPages != null ? Number(o.browserDiscoveryMaxPages) : 1,
             perQueryTimeoutMs: o.browserDiscoveryPerQueryTimeoutMs != null
-              ? Number(o.browserDiscoveryPerQueryTimeoutMs) : 40000 }) : null;
+              ? Number(o.browserDiscoveryPerQueryTimeoutMs) : 120000 }) : null;
         const browserScan = o.coverage === true && requiredChannels.some(c => /^(linkedin_easy_apply|indeed_apply)$/.test(c))
           ? await waitForBrowserChannelCoverage(requiredChannels.filter(c => /^(linkedin_easy_apply|indeed_apply)$/.test(c)), {
             queries,

@@ -166,6 +166,8 @@ module.exports = (t) => {
     dev.includes('SUPPORTED_ADJACENT_SEARCH_TITLES') &&
     dev.includes('extension_disconnected_or_launch_rejected') &&
     dev.includes('reconnectDeadline') &&
+    dev.includes('35 * 60 * 1000') &&
+    dev.includes('120000') &&
     dev.includes('browserScan') &&
     dev.includes("await launch('linkedin'") &&
     dev.includes("{ fast: false }") &&

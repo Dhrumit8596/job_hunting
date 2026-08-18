@@ -1728,7 +1728,7 @@ if (DEV_MODE) {
                 chrome.storage.local.get('pja_discovery_scan_tabs', d => {
                   const owned = d.pja_discovery_scan_tabs || {};
                   const priorId = owned[msg.source];
-                  const createOwned = () => chrome.tabs.create({ url: scanUrl, active: false }, tab => {
+                  const createOwned = () => chrome.tabs.create({ url: scanUrl, active: true }, tab => {
                     if (tab && tab.id != null) chrome.storage.local.get('pja_discovery_scan_tabs', latest => {
                       chrome.storage.local.set({ pja_discovery_scan_tabs: {
                         ...(latest.pja_discovery_scan_tabs || {}), [msg.source]: tab.id
