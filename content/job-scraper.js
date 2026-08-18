@@ -514,6 +514,7 @@
     setStatus('Loading + scanning jobs…');
     const cardMeta = new Map();          // jobId → { jobId,title,company,location,applyUrl,isEasyApply }
     const jobsToScore = [];
+    const hydratedCacheIds = await loadHydratedCacheIds();
     let scoredCount = 0;
 
     for (let page = 0; page < maxPages; page++) {
@@ -530,7 +531,7 @@
           if (scannedThisSession.has(meta.jobId)) continue;   // score each job once
           scannedThisSession.add(meta.jobId);
           setStatus(`Scanning… ${cardMeta.size} found · ${scoredCount} scored`);
-          if (await checkCache(meta.jobId)) continue;
+          if (hydratedCacheIds.has(String(meta.jobId))) continue;
 
           let description = '';
           let externalApplyUrl = null;
@@ -648,15 +649,21 @@
     scanning = false;
   }
 
-  function checkCache(jobId) {
+  function loadHydratedCacheIds() {
     return new Promise(resolve => {
+      let done = false;
+      const finish = list => {
+        if (done) return;
+        done = true; clearTimeout(timer);
+        resolve(new Set((list || []).filter(j => j && j.pipelineStatus !== 'needs_hydration' &&
+          !/^(missing|stale|needs_description)$/i.test(String(j.descriptionStatus || '')))
+          .map(j => String(j.id || ''))));
+      };
+      const timer = setTimeout(() => finish([]), 5000);
       chrome.storage.local.get('pja_shortlist', r => {
-        const list = r.pja_shortlist || [];
-        // A fast card-only capture is not terminal cache state: a later detail scan must be
-        // allowed to hydrate the same canonical browser job.
-        const prior = list.find(j => j.id === jobId);
-        resolve(!!prior && prior.pipelineStatus !== 'needs_hydration' &&
-          !/^(missing|stale|needs_description)$/i.test(String(prior.descriptionStatus || '')));
+        // Snapshot once per query. Reading the full shortlist once per card made a 25-card scan
+        // perform 25 large storage reads and routinely overrun the source observation window.
+        finish(r.pja_shortlist || []);
       });
     });
   }
