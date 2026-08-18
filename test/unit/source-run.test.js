@@ -1,11 +1,15 @@
 'use strict';
 
-const { sourceAll, postingAgeDays } = require('../../sourcing/source-run');
+const { sourceAll, postingAgeDays, autonomousApplyFilter } = require('../../sourcing/source-run');
 const { makeJob } = require('../../sourcing/normalize');
 
 module.exports = async (t) => {
   t.eq(postingAgeDays('Posted 30+ Days Ago'), 31,
     'source-run freshness: Workday 30+ label is not overstated as within 30 days');
+  const pendingLead = { title: 'Process Engineer', sourcePlatform: 'indeed', ats: 'indeed',
+    applyUrl: 'https://www.indeed.com/viewjob?jk=pending', needsAtsResolution: true };
+  t.eq(autonomousApplyFilter([pendingLead], true), [pendingLead],
+    'source-run: unresolved browser offsite lead stays in corpus for later routing resolution');
   const discoveryAdapters = {
     mock: {
       async fetchJobs(_source, opts = {}) {

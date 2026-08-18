@@ -50,6 +50,11 @@ let applyRunAdmission = false;
 const DEFAULT_COVERAGE_CHANNELS = ['linkedin_easy_apply', 'indeed_apply'];
 const DEFAULT_COVERAGE_STRATEGIES = ['greenhouse', 'workday', 'ashby', 'lever', 'smartrecruiters'];
 const REPORT_ONLY_COVERAGE_STRATEGIES = ['eightfold', 'successfactors', 'jobicy', 'remotive'];
+// Adjacent titles already supported by the configured candidate's evidence-backed sourcing policy.
+// These supplement (never replace) saved titles; qualification still requires resume/JD evidence.
+const SUPPORTED_ADJACENT_SEARCH_TITLES = [
+  'manufacturing engineer', 'reliability engineer', 'product development engineer',
+];
 
 // Candidate-specific analyzer prompt is loaded from candidate.local.txt (gitignored) so no
 // personal profile data ships in the repo. Falls back to a generic prompt if absent.
@@ -398,6 +403,58 @@ async function waitForBrowserChannelCoverage(channels, options = {}) {
   }
   return { requested: Array.from(wanted), launches, counts: lastCounts, terminal,
     elapsedMs: Date.now() - startedAt };
+}
+
+async function runBrowserDiscoveryQueries(options = {}) {
+  const BrowserDiscovery = require('./sourcing/browser-discovery');
+  const plan = BrowserDiscovery.buildBrowserDiscoveryPlan(options);
+  // One page per source/title is intentionally cheap. LinkedIn and Indeed run as a pair for each
+  // title, so the full configured title set still fits inside the normal sourcing admission window.
+  const timeoutMs = Math.max(15000, Math.min(60000, Number(options.perQueryTimeoutMs) || 40000));
+  const byQuery = [], blockedSources = new Set();
+  const runItem = async item => {
+    const startedAt = Date.now();
+    const launch = await postLocalJson('/start-scan', {
+      source: item.source, url: item.url, fast: item.fast, discovery: true,
+      scanOptions: item.scanOptions,
+    }, 15000);
+    let terminal = { terminal: false, status: 'launch_failed' };
+    if (launch.ok && launch.data && launch.data.ok !== false && launch.data.pushed > 0) {
+      while (Date.now() - startedAt < timeoutMs) {
+        const storage = await getStorageFromExtension(['pja_scan_coverage', 'pja_indeed_scan'], 5000);
+        terminal = BrowserDiscovery.scanTerminal(storage, item, startedAt);
+        if (terminal.terminal) break;
+        await new Promise(r => setTimeout(r, 3000));
+      }
+      if (!terminal.terminal) terminal = { terminal: true, status: 'timeout', reason: 'per_query_timeout' };
+    }
+    const coverage = terminal.coverage || {};
+    return { source: item.source, query: item.query, status: terminal.status,
+      reason: terminal.reason || '', collected: Number(coverage.collected || terminal.scan && terminal.scan.total || 0),
+      easyApply: Number(coverage.easyApply || coverage.indeedApply || terminal.scan && terminal.scan.indeedApply || 0),
+      external: Number(coverage.external || 0), elapsedMs: Date.now() - startedAt };
+  };
+  const queries = Array.from(new Set(plan.map(item => item.query)));
+  for (const query of queries) {
+    const active = plan.filter(item => item.query === query && !blockedSources.has(item.source));
+    const skipped = plan.filter(item => item.query === query && blockedSources.has(item.source))
+      .map(item => ({ source: item.source, query: item.query, status: 'skipped_source_blocked' }));
+    const rows = await Promise.all(active.map(runItem));
+    byQuery.push(...rows, ...skipped);
+    for (const row of rows) {
+      if (row.source === 'indeed' && /^(paused|failed)$/i.test(String(row.status || '')) &&
+          /challenge|captcha|verification/i.test(String(row.reason || ''))) blockedSources.add(row.source);
+    }
+  }
+  return { requestedQueries: queries, scans: byQuery,
+    blockedSources: Array.from(blockedSources), totals: byQuery.reduce((acc, row) => {
+      acc.collected += Number(row.collected || 0);
+      acc.easyApply += Number(row.easyApply || 0);
+      acc.external += Number(row.external || 0);
+      if (row.status === 'done') acc.completed++;
+      else acc.incomplete++;
+      return acc;
+    }, { collected: 0, easyApply: 0, external: 0, completed: 0, incomplete: 0 }) };
 }
 
 // Push storage to the extension (returns count of clients written).
@@ -1866,11 +1923,12 @@ async function handleRequest(req, res) {
     let body = '';
     req.on('data', d => body += d);
     req.on('end', () => {
-      let url = null, fast = false, source = null;
-      try { const b = JSON.parse(body || '{}'); url = b.url || null; fast = !!b.fast; source = b.source || null; } catch (_) {}
+      let url = null, fast = false, source = null, discovery = false, scanOptions = {};
+      try { const b = JSON.parse(body || '{}'); url = b.url || null; fast = !!b.fast; source = b.source || null;
+        discovery = b.discovery === true; scanOptions = b.scanOptions && typeof b.scanOptions === 'object' ? b.scanOptions : {}; } catch (_) {}
       let pushed = 0;
       for (const client of wsClients) {
-        if (client.readyState === 1) { client.send(JSON.stringify({ cmd: 'startScan', url, fast, source })); pushed++; }
+        if (client.readyState === 1) { client.send(JSON.stringify({ cmd: 'startScan', url, fast, source, discovery, scanOptions })); pushed++; }
       }
       res.writeHead(200, CORS);
       res.end(JSON.stringify({ ok: true, pushed }));
@@ -2725,6 +2783,10 @@ ${(description || '').slice(0, 6000)}`;
           target: sourceTarget,
           write: o.sourceWrite !== false,
           autonomousApplyOnly: o.autonomousApplyOnly !== false,
+          browserDiscovery: o.browserDiscovery !== false,
+          browserDiscoveryMaxQueries: o.browserDiscoveryMaxQueries,
+          browserDiscoveryMaxPages: o.browserDiscoveryMaxPages,
+          browserDiscoveryPerQueryTimeoutMs: o.browserDiscoveryPerQueryTimeoutMs,
         };
         if (o.targetLocation && typeof o.targetLocation === 'object') sourceBody.targetLocation = o.targetLocation;
         if (o.targetRadiusMiles != null) sourceBody.targetRadiusMiles = Number(o.targetRadiusMiles);
@@ -2733,6 +2795,7 @@ ${(description || '').slice(0, 6000)}`;
         if (Array.isArray(o.queries) && o.queries.length) {
           sourceBody.queries = o.queries.map(q => String(q || '').trim()).filter(Boolean);
         }
+        if (Array.isArray(o.queryFamilies) && o.queryFamilies.length) sourceBody.queryFamilies = o.queryFamilies;
         if (coverageMode) {
           sourceBody.coverage = true;
           sourceBody.requiredChannels = Array.from(new Set(coverageChannels.map(x => String(x || '').trim()).filter(Boolean)));
@@ -2774,6 +2837,11 @@ ${(description || '').slice(0, 6000)}`;
         delete applyBody.autonomousApplyOnly;
         delete applyBody.maxBrowserAgeMs;
         delete applyBody.queries;
+        delete applyBody.browserDiscovery;
+        delete applyBody.browserDiscoveryMaxQueries;
+        delete applyBody.browserDiscoveryMaxPages;
+        delete applyBody.browserDiscoveryPerQueryTimeoutMs;
+        delete applyBody.queryFamilies;
 
         let sourceResp = { ok: true, skipped: true, status: 200, data: { note: 'source:false' } };
         if (o.source !== false) {
@@ -2852,12 +2920,22 @@ ${(description || '').slice(0, 6000)}`;
           : String(prefs.searchTitles || '').split(/[\n,]+/);
         const familyQueries = Array.isArray(o.queryFamilies) ? o.queryFamilies
           .flatMap(family => Array.isArray(family && family.queries) ? family.queries : []) : [];
-        const queries = (Array.isArray(o.queries) && o.queries.length ? o.queries : familyQueries).length
-          ? (Array.isArray(o.queries) && o.queries.length ? o.queries : familyQueries)
+        const explicitQueries = Array.isArray(o.queries) && o.queries.length ? o.queries : familyQueries;
+        const queryInputs = explicitQueries.length ? explicitQueries
+          : [...prefQueries, ...SUPPORTED_ADJACENT_SEARCH_TITLES];
+        const queries = queryInputs.length
+          ? queryInputs
             .map(q => String(q || '').trim()).filter(Boolean)
-          : prefQueries.map(q => String(q || '').trim()).filter(Boolean);
+          : [];
         const requiredChannels = Array.isArray(o.requiredChannels) ? o.requiredChannels
           .map(x => String(x || '').trim()).filter(Boolean) : [];
+        const browserDiscovery = o.browserDiscovery === true
+          ? await runBrowserDiscoveryQueries({ queries,
+            targetLocation, targetRadiusMiles,
+            maxQueries: o.browserDiscoveryMaxQueries != null ? Number(o.browserDiscoveryMaxQueries) : 20,
+            maxPages: o.browserDiscoveryMaxPages != null ? Number(o.browserDiscoveryMaxPages) : 1,
+            perQueryTimeoutMs: o.browserDiscoveryPerQueryTimeoutMs != null
+              ? Number(o.browserDiscoveryPerQueryTimeoutMs) : 40000 }) : null;
         const browserScan = o.coverage === true && requiredChannels.some(c => /^(linkedin_easy_apply|indeed_apply)$/.test(c))
           ? await waitForBrowserChannelCoverage(requiredChannels.filter(c => /^(linkedin_easy_apply|indeed_apply)$/.test(c)), {
             queries,
@@ -2880,6 +2958,7 @@ ${(description || '').slice(0, 6000)}`;
           discoveryAdapters,
           maxBrowserAgeMs: o.maxBrowserAgeMs != null ? Number(o.maxBrowserAgeMs) : 48 * 60 * 60 * 1000 });
         if (browserScan) report.browserScan = browserScan;
+        if (browserDiscovery) report.browserDiscovery = browserDiscovery;
 
         let wrote = 0;
         if (write) {

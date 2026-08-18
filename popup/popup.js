@@ -50,6 +50,9 @@ const DEFAULT_SEARCH_TITLES = [
   'wafer process engineer',
   'thin film process engineer',
   'yield engineer',
+  'manufacturing engineer',
+  'reliability engineer',
+  'product development engineer',
 ];
 
 // ── State ─────────────────────────────────────────────────────────────────────

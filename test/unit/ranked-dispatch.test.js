@@ -132,6 +132,11 @@ module.exports = async (t) => {
     source.includes("getApplyPlanningCorpus()") && source.includes("supplyAuditCorpusReply"),
   'ranked dispatch: supply audit uses the description-free whole-corpus projection');
 
+  t.ok(source.includes("'pja_discovery_scan_tabs'") &&
+    source.includes('window.__pjaStartIndeedScan(scanOptions || {})') &&
+    source.includes('window.__pjaStartScan({ ...(scanOptions || {}), fast })'),
+  'browser discovery: owned tabs are reused and bounded scan options reach both platform scrapers');
+
   t.ok(source.includes('const count = await self.PJAIdb.count()') &&
     !source.includes('const s = await self.PJAIdb.corpusSummary({ topN: 0 })'),
   'corpus import: post-import bookkeeping uses a native count instead of another full diagnostic scan');

@@ -48,6 +48,7 @@ module.exports = (t) => {
   const c2 = w.document.querySelectorAll('.job_seen_beacon')[1];
   const m2 = w.pjaExtractIndeedCardMeta(c2);
   t.eq(m2.indeedApply, false, 'indeed: no "Easily apply" → external (indeedApply=false)');
+  t.eq(m2.needsAtsResolution, true, 'indeed: offsite card is retained for later ATS resolution');
   t.ok(/sunnyvale/i.test(m2.location) && !/min/i.test(m2.location), 'indeed: location strips the "N min" commute prefix');
 
   // anti-bot challenge detector

@@ -84,6 +84,12 @@ module.exports = (t) => {
   t.eq(indeedExternal.id, 'outside-9', 'browser-import: Indeed id extracted from URL');
   t.eq(indeedExternal.channel, 'external', 'browser-import: Indeed offsite job routes external');
   t.eq(indeedExternal.detectedAts, 'lever', 'browser-import: Indeed offsite ATS detected');
+  const indeedUnresolved = normalizeBrowserJob({
+    sourcePlatform: 'indeed', jobId: 'pending-ats', listingUrl: 'https://www.indeed.com/viewjob?jk=pending-ats',
+    title: 'Process Engineer', company: 'Pending Co', location: 'San Jose, CA', needsAtsResolution: true,
+  });
+  t.eq(indeedUnresolved.needsAtsResolution, true,
+    'browser-import: unresolved Indeed offsite lead remains explicit for later routing');
 
   const glassdoor = normalizeBrowserJob({
     url: 'https://www.glassdoor.com/job-listing/process-engineer-acme-JV.htm?jobListingId=100234&src=GD_JOB_AD',

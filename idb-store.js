@@ -56,6 +56,7 @@
       sourceJobId: String(job.sourceJobId || job.id || ''), listingUrl: job.listingUrl || job.applyUrl || '',
       applyUrl: job.applyUrl || '', channel: job.channel || '', detectedAts: job.detectedAts || '',
       isEasyApply: !!job.isEasyApply, indeedApply: !!job.indeedApply,
+      needsAtsResolution: !!job.needsAtsResolution,
       query: job.query || '', matchedQueries: Array.isArray(job.matchedQueries) ? job.matchedQueries.slice(0, 20) : [],
       discoveredAt: job.discoveredAt || job.scrapedAt || '' };
   }
@@ -65,7 +66,8 @@
     return { applyUrl: job.applyUrl || '', listingUrl: job.listingUrl || '',
       sourcePlatform: job.sourcePlatform || '', sourceJobId: String(job.sourceJobId || job.id || ''),
       channel: job.channel || '', detectedAts: job.detectedAts || '',
-      isEasyApply: !!job.isEasyApply, indeedApply: !!job.indeedApply };
+      isEasyApply: !!job.isEasyApply, indeedApply: !!job.indeedApply,
+      needsAtsResolution: !!job.needsAtsResolution };
   }
 
   function shouldReplaceRoute(existing, incoming) {
@@ -133,6 +135,7 @@
       query: job.query || '', discoveredAt: job.discoveredAt || job.scrapedAt || '',
       matchedQueries: Array.isArray(job.matchedQueries) ? job.matchedQueries.slice(0, 20) : [],
       isEasyApply: !!job.isEasyApply, indeedApply: !!job.indeedApply,
+      needsAtsResolution: !!job.needsAtsResolution,
       sourceRefs: Array.isArray(job.sourceRefs) && job.sourceRefs.length ? job.sourceRefs : [sourceRef(job, modality)],
     };
     out.descriptionFingerprint = descriptionFingerprint(out.description);
@@ -149,6 +152,8 @@
       applyUrl: ref.applyUrl || '', listingUrl: ref.listingUrl || '',
       channel: ref.channel || '', detectedAts: ref.detectedAts || '',
       isEasyApply: !!ref.isEasyApply, indeedApply: !!ref.indeedApply,
+      needsAtsResolution: !!ref.needsAtsResolution,
+      query: ref.query || '', matchedQueries: Array.isArray(ref.matchedQueries) ? ref.matchedQueries.slice(0, 20) : [],
     };
   }
 
@@ -160,6 +165,7 @@
       ats: posting.ats || '', detectedAts: posting.detectedAts || '',
       sourcePlatform: posting.sourcePlatform || '', sourceJobId: posting.sourceJobId || '', sourceBoard: posting.sourceBoard || '',
       channel: posting.channel || '', isEasyApply: !!posting.isEasyApply, indeedApply: !!posting.indeedApply,
+      needsAtsResolution: !!posting.needsAtsResolution,
       discoveredAt: posting.discoveredAt || '', postedAt: posting.postedAt || '', query: posting.query || '',
       matchedQueries: Array.isArray(posting.matchedQueries) ? posting.matchedQueries.slice(0, 20) : [],
       modalities: Array.isArray(posting.modalities) ? posting.modalities.slice(0, 8) : [],

@@ -118,6 +118,16 @@ module.exports = (t) => {
   t.eq(linkedInEaPlan.jobs.length, 1, 'LinkedIn Easy Apply is eligible when channel marks it native-supported');
   t.eq(linkedInEaPlan.jobs[0].strategy, 'linkedin_ea', 'LinkedIn Easy Apply is stamped with linkedin_ea strategy');
   t.eq(linkedInEaPlan.dropCounts.unknown_apply_strategy || 0, 0, 'LinkedIn Easy Apply is not dropped as unknown strategy');
+  const unresolvedBrowserCorpus = corpus([
+    { id: 'indeed:offsite1', company: 'Pending ATS', title: 'Process Engineer',
+      applyUrl: 'https://www.indeed.com/viewjob?jk=offsite1', fit: 85, channel: 'external', ats: 'indeed' },
+  ]);
+  unresolvedBrowserCorpus.index['indeed:offsite1'].needsAtsResolution = true;
+  const unresolvedPlan = buildApplyPlan(unresolvedBrowserCorpus, { threshold: 70 });
+  t.eq(unresolvedPlan.jobs.length, 0,
+    'unresolved LinkedIn/Indeed offsite leads cannot enter an application queue');
+  t.eq(unresolvedPlan.dropCounts.aggregator_without_apply_destination, 1,
+    'unresolved browser lead reports the explicit missing ATS destination gate');
 
   // per-company cap → batch spans multiple employers (no stacking one company)
   const conc = corpus([

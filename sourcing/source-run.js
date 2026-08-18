@@ -137,6 +137,10 @@ function autonomousApplyStrategy(job) {
 function autonomousApplyFilter(jobs, enabled) {
   if (!enabled) return jobs;
   return (jobs || []).filter(job => {
+    // LinkedIn/Indeed offsite cards are valid discovery leads even before their final ATS redirect
+    // is resolved. Retain them in the corpus for later hydration/routing; apply-select still blocks
+    // aggregator-only destinations, so this cannot weaken the live supported-channel gate.
+    if (job && job.needsAtsResolution === true && /^(linkedin|indeed)$/i.test(String(job.sourcePlatform || job.ats || ''))) return true;
     const ats = String(job && job.ats || '').toLowerCase();
     const strategy = autonomousApplyStrategy(job);
     if (!strategy || AUTONOMOUS_UNSUPPORTED_ATS.has(ats) || AUTONOMOUS_UNSUPPORTED_ATS.has(strategy)) return false;
@@ -251,4 +255,4 @@ if (require.main === module) {
 }
 
 module.exports = { sourceAll, printReport, normalizeBrowserJob: require('./browser-import').normalizeBrowserJob,
-  DEFAULT_QUERIES, postingAgeDays, qualitySummary };
+  DEFAULT_QUERIES, postingAgeDays, qualitySummary, autonomousApplyFilter };

@@ -497,6 +497,7 @@
     // per-card detail-panel click. Lets one run walk all pages across many query variants without
     // hammering the account. External ATS URLs are resolved later, only for the top candidates.
     const FAST = !!(opts && opts.fast);
+    const maxPages = Math.max(1, Math.min(SCROLL_MAX_PAGES, Number(opts && opts.maxPages) || SCROLL_MAX_PAGES));
 
     const btn = document.getElementById('pja-scan-btn');
     if (btn) { btn.disabled = true; btn.textContent = 'Scanning…'; }
@@ -510,7 +511,7 @@
     const jobsToScore = [];
     let scoredCount = 0;
 
-    for (let page = 0; page < SCROLL_MAX_PAGES; page++) {
+    for (let page = 0; page < maxPages; page++) {
       const listContainer = findListContainer();
       const scroller = listContainer || document.scrollingElement || document.documentElement;
       if (listContainer) { listContainer.scrollTo({ top: 0, behavior: 'instant' }); await delay(SCROLL_SETTLE_MS); }
@@ -565,6 +566,7 @@
             hydrationReason: description ? '' : (FAST ? 'fast_scan_skipped_detail' : 'detail_panel_description_missing'),
             hydratedAt: description ? Date.now() : null,
             query: new URLSearchParams(location.search).get('keywords') || '',
+            matchedQueries: [new URLSearchParams(location.search).get('keywords') || ''].filter(Boolean),
             discoveredAt: Date.now(), scrapedAt: Date.now(),
             // FAST collection intentionally has no detail panel. Preserve that truth so the
             // unified pipeline schedules hydration before evidence scoring.

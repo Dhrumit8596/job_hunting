@@ -255,6 +255,8 @@ function normalizeBrowserJob(raw, opts = {}) {
   });
   const detected = lower(raw.detectedAts) || detectAts(applyUrl);
   const query = clean(raw.query || raw.searchQuery || (raw.search && raw.search.query) || opts.query || '');
+  const matchedQueries = Array.from(new Set([...(Array.isArray(raw.matchedQueries) ? raw.matchedQueries : []), query]
+    .map(clean).filter(Boolean))).slice(0, 20);
   const discoveredAt = discoveryTime(raw, opts);
   const modality = 'browser-' + sourcePlatform;
   const sourceRef = {
@@ -267,6 +269,7 @@ function normalizeBrowserJob(raw, opts = {}) {
     channel,
     detectedAts: detected,
     query,
+    matchedQueries,
     discoveredAt,
     descriptionStatus: desc.descriptionStatus,
     hydrationStatus: hydration.hydrationStatus,
@@ -286,6 +289,8 @@ function normalizeBrowserJob(raw, opts = {}) {
     channel,
     isEasyApply: channel === 'linkedin_easy_apply',
     indeedApply: channel === 'indeed_apply',
+    needsAtsResolution: raw.needsAtsResolution === true ||
+      (channel === 'external' && !detected && /^(linkedin|indeed)$/.test(sourcePlatform)),
     descriptionStatus: desc.descriptionStatus,
     hydrationStatus: hydration.hydrationStatus,
     hydrationMethod: hydration.hydrationMethod,
@@ -295,9 +300,10 @@ function normalizeBrowserJob(raw, opts = {}) {
     // but it cannot enter evidence-backed ranking until a portal-specific hydrator obtains its JD.
     pipelineStatus: /^(full|partial)$/i.test(desc.descriptionStatus) ? 'score_pending' : 'needs_hydration',
     query,
+    matchedQueries,
     discoveredAt,
     provenance: {
-      kind: 'browser', modality, sourcePlatform, query, discoveredAt,
+      kind: 'browser', modality, sourcePlatform, query, matchedQueries, discoveredAt,
       hydrationStatus: hydration.hydrationStatus,
       hydrationMethod: hydration.hydrationMethod,
       hydrationReason: hydration.hydrationReason,

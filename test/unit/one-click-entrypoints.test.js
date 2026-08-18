@@ -160,6 +160,10 @@ module.exports = (t) => {
     dev.includes('if (o.category && o.scoreCandidateLimit == null)') &&
     dev.includes('Math.max(20, coverageAttemptCount * 4') &&
     dev.includes('waitForBrowserChannelCoverage') &&
+    dev.includes('browserDiscovery: o.browserDiscovery !== false') &&
+    dev.includes('runBrowserDiscoveryQueries') &&
+    dev.includes('browserDiscoveryMaxQueries') &&
+    dev.includes('SUPPORTED_ADJACENT_SEARCH_TITLES') &&
     dev.includes('browserScan') &&
     dev.includes("await launch('linkedin'") &&
     dev.includes("{ fast: false }") &&

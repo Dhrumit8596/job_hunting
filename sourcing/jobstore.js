@@ -41,6 +41,7 @@ function sourceRef(job, modality) {
     detectedAts: job.detectedAts || '',
     isEasyApply: !!job.isEasyApply,
     indeedApply: !!job.indeedApply,
+    needsAtsResolution: !!job.needsAtsResolution,
     query: job.query || '',
     matchedQueries: Array.isArray(job.matchedQueries) ? job.matchedQueries.slice(0, 20) : [],
     discoveredAt: job.discoveredAt || job.scrapedAt || '',
@@ -62,6 +63,7 @@ function routeFrom(job) {
     sourcePlatform: job.sourcePlatform || '', sourceJobId: String(job.sourceJobId || job.id || ''),
     channel: job.channel || '', detectedAts: job.detectedAts || '',
     isEasyApply: !!job.isEasyApply, indeedApply: !!job.indeedApply,
+    needsAtsResolution: !!job.needsAtsResolution,
   };
 }
 
@@ -112,6 +114,7 @@ function buildPosting(id, rk, mk, job, modality) {
     query: job.query || '', discoveredAt: job.discoveredAt || job.scrapedAt || '',
     matchedQueries: Array.isArray(job.matchedQueries) ? job.matchedQueries.slice(0, 20) : [],
     isEasyApply: !!job.isEasyApply, indeedApply: !!job.indeedApply,
+    needsAtsResolution: !!job.needsAtsResolution,
     sourceRefs: [sourceRef(job, modality)],
   };
   posting.descriptionFingerprint = descriptionFingerprint(posting.description);

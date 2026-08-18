@@ -1722,7 +1722,27 @@ if (DEV_MODE) {
                 : isGlassdoor
                   ? 'https://www.glassdoor.com/Jobs/process-engineer-jobs-SRCH_KO0,16.htm?location=California'
                   : 'https://www.linkedin.com/jobs/search/?f_AL=true&keywords=quality%20engineer&location=California');
-              chrome.tabs.create({ url: scanUrl, active: true }, tab => {
+              const withScanTab = callback => {
+                if (!msg.discovery) { chrome.tabs.create({ url: scanUrl, active: true }, callback); return; }
+                chrome.storage.local.get('pja_discovery_scan_tabs', d => {
+                  const owned = d.pja_discovery_scan_tabs || {};
+                  const priorId = owned[msg.source];
+                  const createOwned = () => chrome.tabs.create({ url: scanUrl, active: false }, tab => {
+                    if (tab && tab.id != null) chrome.storage.local.get('pja_discovery_scan_tabs', latest => {
+                      chrome.storage.local.set({ pja_discovery_scan_tabs: {
+                        ...(latest.pja_discovery_scan_tabs || {}), [msg.source]: tab.id
+                      } });
+                    });
+                    callback(tab);
+                  });
+                  if (priorId == null) { createOwned(); return; }
+                  chrome.tabs.get(priorId, prior => {
+                    if (chrome.runtime.lastError || !prior) { createOwned(); return; }
+                    chrome.tabs.update(priorId, { url: scanUrl, active: false }, updated => callback(updated || prior));
+                  });
+                });
+              };
+              withScanTab(tab => {
                 if (isIndeed) chrome.storage.local.set({ pja_indeed_scan: {
                   status: 'launcher_opened', reason: '', url: scanUrl, tabId: tab && tab.id, ts: Date.now()
                 } });
@@ -1734,11 +1754,11 @@ if (DEV_MODE) {
                   setTimeout(() => {
                     chrome.scripting.executeScript({
                       target: { tabId: tab.id },
-                      func: (fast, source) => {
+                      func: (fast, source, scanOptions) => {
                         if (source === 'indeed') {
                           if (typeof window.__pjaStartIndeedScan !== 'function') return { ok: false, error: 'indeed_scanner_not_loaded' };
                           try {
-                            Promise.resolve(window.__pjaStartIndeedScan({})).catch(e => {
+                            Promise.resolve(window.__pjaStartIndeedScan(scanOptions || {})).catch(e => {
                               try { chrome.storage.local.set({ pja_indeed_scan: {
                                 status: 'failed', reason: 'start_error',
                                 error: String(e && e.message || e), url: location.href, ts: Date.now()
@@ -1747,10 +1767,10 @@ if (DEV_MODE) {
                             return { ok: true, started: true };
                           } catch (e) { return { ok: false, error: String(e && e.message || e) }; }
                         }
-                        else if (source === 'glassdoor') { if (typeof window.__pjaStartGlassdoorScan === 'function') window.__pjaStartGlassdoorScan({}); return { ok: true, started: true }; }
-                        else { if (typeof window.__pjaStartScan === 'function') { window.__pjaStartScan({ fast }); return { ok: true, started: true }; } return { ok: false, error: 'scanner_not_loaded' }; }
+                        else if (source === 'glassdoor') { if (typeof window.__pjaStartGlassdoorScan === 'function') window.__pjaStartGlassdoorScan(scanOptions || {}); return { ok: true, started: true }; }
+                        else { if (typeof window.__pjaStartScan === 'function') { window.__pjaStartScan({ ...(scanOptions || {}), fast }); return { ok: true, started: true }; } return { ok: false, error: 'scanner_not_loaded' }; }
                       },
-                      args: [!!msg.fast, msg.source || ''],
+                      args: [!!msg.fast, msg.source || '', msg.scanOptions || {}],
                     }).then(result => {
                       const state = result && result[0] && result[0].result;
                       if (isIndeed && state && state.ok === false) chrome.storage.local.set({ pja_indeed_scan: {
@@ -3933,8 +3953,12 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
               /^(missing|stale|needs_description)$/i.test(String(prior.descriptionStatus || ''));
           })
             .map(j => {
+              const prior = existingById.get(j.id) || {};
               const hydrated = !!String(j.description || '').trim() && !/^(missing|stale|needs_description)$/i.test(String(j.descriptionStatus || ''));
-              return { ...j, status: hydrated ? 'score_pending' : 'needs_hydration',
+              const matchedQueries = Array.from(new Set([...(prior.matchedQueries || []), prior.query,
+                ...(j.matchedQueries || []), j.query].map(x => String(x || '').trim()).filter(Boolean))).slice(0, 20);
+              return { ...prior, ...j, query: prior.query || j.query || '', matchedQueries,
+                status: hydrated ? 'score_pending' : 'needs_hydration',
                 pipelineStatus: hydrated ? 'score_pending' : 'needs_hydration', fitScore: null };
             });
           toScore = fresh; // expose to outer scope

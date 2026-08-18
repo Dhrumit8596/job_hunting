@@ -75,6 +75,7 @@
       isEasyApply: false,                                  // not LinkedIn EA; router keys off platform
       listingUrl: 'https://www.indeed.com/viewjob?jk=' + jk,
       applyUrl: 'https://www.indeed.com/viewjob?jk=' + jk, // Indeed job view (external ATS resolved later)
+      needsAtsResolution: !indeedApply,
     };
   }
 
@@ -255,6 +256,7 @@
           hydrationReason: description ? '' : 'indeed_detail_description_missing_or_timeout',
           hydratedAt: description ? Date.now() : null,
           query: scan.q, discoveredAt: Date.now(), scrapedAt: Date.now(),
+          matchedQueries: [scan.q].filter(Boolean),
           pipelineStatus: description ? 'score_pending' : 'needs_hydration',
           status: description ? 'score_pending' : 'needs_hydration' });
         if (pending.length >= 3) await flushPending();
