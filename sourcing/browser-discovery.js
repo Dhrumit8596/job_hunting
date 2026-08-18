@@ -58,6 +58,13 @@ function matchingCoverage(storage, item, startedAt) {
 function scanTerminal(storage, item, startedAt) {
   const coverage = matchingCoverage(storage, item, startedAt);
   if (coverage) return { terminal: true, status: 'done', coverage };
+  if (item && item.source === 'linkedin') {
+    const scan = storage && storage.pja_linkedin_scan;
+    if (scan && String(scan.q || '').trim().toLowerCase() === String(item.query || '').trim().toLowerCase() &&
+        Number(scan.ts || 0) >= Number(startedAt || 0) && /^(done|failed|paused)$/i.test(String(scan.status || ''))) {
+      return { terminal: true, status: scan.status, reason: scan.reason || '', scan };
+    }
+  }
   if (item && item.source === 'indeed') {
     const scan = storage && storage.pja_indeed_scan;
     if (scan && String(scan.q || '').trim().toLowerCase() === String(item.query || '').trim().toLowerCase() &&

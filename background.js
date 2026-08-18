@@ -1717,6 +1717,7 @@ if (DEV_MODE) {
               // runs the platform's start-scan in the tab.
               const isIndeed = msg.source === 'indeed';
               const isGlassdoor = msg.source === 'glassdoor';
+              const isLinkedIn = !isIndeed && !isGlassdoor;
               const scanUrl = msg.url || (isIndeed
                 ? 'https://www.indeed.com/jobs?q=process+engineer&l=California'
                 : isGlassdoor
@@ -1745,6 +1746,11 @@ if (DEV_MODE) {
               withScanTab(tab => {
                 if (isIndeed) chrome.storage.local.set({ pja_indeed_scan: {
                   status: 'launcher_opened', reason: '', url: scanUrl, tabId: tab && tab.id, ts: Date.now()
+                } });
+                if (isLinkedIn) chrome.storage.local.set({ pja_linkedin_scan: {
+                  status: 'launcher_opened', reason: '', url: scanUrl, tabId: tab && tab.id,
+                  q: (() => { try { return new URL(scanUrl).searchParams.get('keywords') || ''; } catch (_) { return ''; } })(),
+                  ts: Date.now()
                 } });
                 let launched = false;
                 const launchScanner = () => {
@@ -1776,8 +1782,19 @@ if (DEV_MODE) {
                     const state = result && result[0] && result[0].result;
                     if (isIndeed && state && state.ok === false) chrome.storage.local.set({ pja_indeed_scan: {
                       status: 'failed', reason: 'launcher_error', error: state.error || 'unknown', url: scanUrl, tabId: tab.id, ts: Date.now() } });
-                  }).catch(e => { if (isIndeed) chrome.storage.local.set({ pja_indeed_scan: {
-                    status: 'failed', reason: 'launcher_execute_error', error: String(e && e.message || e), url: scanUrl, tabId: tab.id, ts: Date.now() } }); });
+                    if (isLinkedIn) chrome.storage.local.set({ pja_linkedin_scan: {
+                      status: state && state.ok === false ? 'failed' : 'running',
+                      reason: state && state.ok === false ? 'launcher_error' : '', error: state && state.error || '',
+                      q: (() => { try { return new URL(scanUrl).searchParams.get('keywords') || ''; } catch (_) { return ''; } })(),
+                      url: scanUrl, tabId: tab.id, ts: Date.now() } });
+                  }).catch(e => {
+                    if (isIndeed) chrome.storage.local.set({ pja_indeed_scan: {
+                      status: 'failed', reason: 'launcher_execute_error', error: String(e && e.message || e), url: scanUrl, tabId: tab.id, ts: Date.now() } });
+                    if (isLinkedIn) chrome.storage.local.set({ pja_linkedin_scan: {
+                      status: 'failed', reason: 'launcher_execute_error', error: String(e && e.message || e),
+                      q: (() => { try { return new URL(scanUrl).searchParams.get('keywords') || ''; } catch (_) { return ''; } })(),
+                      url: scanUrl, tabId: tab.id, ts: Date.now() } });
+                  });
                 };
                 const onUpd = (tid, info) => {
                   if (tid === tab.id && info.status === 'complete') {

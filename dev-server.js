@@ -431,7 +431,7 @@ async function runBrowserDiscoveryQueries(options = {}) {
     let terminal = { terminal: false, status: 'launch_failed', reason: 'extension_disconnected_or_launch_rejected' };
     if (launch.ok && launch.data && launch.data.ok !== false && launch.data.pushed > 0) {
       while (Date.now() - startedAt < timeoutMs) {
-        const storage = await getStorageFromExtension(['pja_scan_coverage', 'pja_indeed_scan'], 5000);
+        const storage = await getStorageFromExtension(['pja_scan_coverage', 'pja_linkedin_scan', 'pja_indeed_scan'], 5000);
         terminal = BrowserDiscovery.scanTerminal(storage, item, startedAt);
         if (terminal.terminal) break;
         await new Promise(r => setTimeout(r, 3000));

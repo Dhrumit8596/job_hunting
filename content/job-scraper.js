@@ -498,6 +498,11 @@
     // hammering the account. External ATS URLs are resolved later, only for the top candidates.
     const FAST = !!(opts && opts.fast);
     const maxPages = Math.max(1, Math.min(SCROLL_MAX_PAGES, Number(opts && opts.maxPages) || SCROLL_MAX_PAGES));
+    const scanParams = new URLSearchParams(location.search);
+    const scanQuery = scanParams.get('keywords') || '';
+    try { chrome.storage.local.set({ pja_linkedin_scan: {
+      status: 'running', reason: '', q: scanQuery, url: location.href, maxPages, ts: Date.now()
+    } }); } catch (_) {}
 
     const btn = document.getElementById('pja-scan-btn');
     if (btn) { btn.disabled = true; btn.textContent = 'Scanning…'; }
@@ -598,6 +603,9 @@
     const total = cardMeta.size;
     if (total === 0) {
       setStatus('No job cards found. Try scrolling down first.');
+      try { chrome.storage.local.set({ pja_linkedin_scan: {
+        status: 'failed', reason: 'no_job_cards', q: scanQuery, url: location.href, maxPages, ts: Date.now()
+      } }); } catch (_) {}
       scanning = false;
       if (btn) { btn.disabled = false; btn.textContent = 'Scan Jobs'; }
       return;
@@ -625,7 +633,10 @@
       chrome.storage.local.get('pja_scan_coverage', r => {
         const arr = Array.isArray(r.pja_scan_coverage) ? r.pja_scan_coverage : [];
         arr.push(coverage);
-        chrome.storage.local.set({ pja_scan_coverage: arr.slice(-50) });
+        chrome.storage.local.set({ pja_scan_coverage: arr.slice(-50), pja_linkedin_scan: {
+          status: 'done', reason: '', q: coverage.query, url: location.href, maxPages,
+          total, easyApply: easyCount, external: total - easyCount, ts: coverage.ts
+        } });
       });
     } catch (_) {}
 
@@ -652,6 +663,9 @@
 
   function sendBatchToBackground(jobs, collectOnly) {
     return new Promise(resolve => {
+      let done = false;
+      const finish = value => { if (!done) { done = true; clearTimeout(timer); resolve(value); } };
+      const timer = setTimeout(() => finish(undefined), 8000);
       // chrome.runtime.sendMessage throws synchronously (not via callback) when
       // the extension context is invalidated (e.g. after an extension update).
       // Without a try/catch the Promise never settles and the scan hangs forever.
@@ -660,11 +674,11 @@
           if (chrome.runtime.lastError) {
             console.warn('PJA batch error:', chrome.runtime.lastError.message);
           }
-          resolve(resp);
+          finish(resp);
         });
       } catch (err) {
         console.warn('PJA sendMessage failed (extension context invalidated?):', err.message);
-        resolve(undefined);
+        finish(undefined);
       }
     });
   }

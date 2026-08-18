@@ -30,6 +30,11 @@ module.exports = async t => {
   t.eq({ terminal: done.terminal, status: done.status, collected: done.coverage.collected },
     { terminal: true, status: 'done', collected: 25 },
   'browser discovery: completion is correlated to source, query, and launch time');
+  const linkedinFailed = scanTerminal({ pja_linkedin_scan: { q: 'Process Engineer', status: 'failed',
+    reason: 'no_job_cards', ts: 210 } }, linkedin, 100);
+  t.eq({ terminal: linkedinFailed.terminal, status: linkedinFailed.status, reason: linkedinFailed.reason },
+    { terminal: true, status: 'failed', reason: 'no_job_cards' },
+  'browser discovery: LinkedIn scanner failures terminalize explicitly instead of timing out');
   const paused = scanTerminal({ pja_indeed_scan: { q: 'Process Engineer', status: 'paused',
     reason: 'challenge', ts: 220 } }, indeed, 100);
   t.eq({ terminal: paused.terminal, status: paused.status, reason: paused.reason },
