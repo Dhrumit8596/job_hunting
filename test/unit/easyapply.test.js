@@ -246,4 +246,32 @@ module.exports = (t) => {
   wRef.__pjaFillRequiredRadioFallback({});
   const checkedRef = Array.from(wRef.document.querySelectorAll('input[name=ref]')).find(r => r.checked);
   t.ok(checkedRef && /no/i.test(checkedRef.value), 'EA: referral radio answers No');
+
+  // Real-run regression (apply-1787024777101): LinkedIn's Contact Info phone field commits on
+  // blur and React replaces the footer action. The trusted helper must wait one render beat and
+  // target the replacement button, not the stale pre-blur coordinates.
+  const wBlur = load(`<!DOCTYPE html><html><body>
+    <div class="jobs-easy-apply-modal" role="dialog"><h3>Contact info</h3>
+      <label for="phone">Mobile phone number</label><input id="phone" required value="5555555555">
+      <footer><button id="old-next">Next</button></footer>
+    </div>
+  </body></html>`);
+  let trustedMessage = null;
+  wBlur.chrome.runtime.sendMessage = (msg, cb) => { trustedMessage = msg; cb?.({ ok: true }); };
+  const phone = wBlur.document.getElementById('phone');
+  phone.addEventListener('blur', () => {
+    const old = wBlur.document.getElementById('old-next');
+    const replacement = wBlur.document.createElement('button');
+    replacement.id = 'new-next';
+    replacement.textContent = 'Next';
+    replacement.scrollIntoView = () => {};
+    replacement.getBoundingClientRect = () => ({ left: 200, top: 80, width: 100, height: 40 });
+    old.replaceWith(replacement);
+  });
+  phone.focus();
+  return wBlur.__pjaTrustedClickInModal('Next').then(ok => {
+    t.eq(ok, true, 'EA trusted action succeeds after the contact-field blur commit');
+    t.eq(trustedMessage?.x, 250, 'EA trusted action re-resolves replacement button coordinates after blur');
+    t.eq(trustedMessage?.y, 100, 'EA trusted action uses replacement button vertical coordinate');
+  });
 };

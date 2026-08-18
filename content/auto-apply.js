@@ -281,12 +281,18 @@ async function pjaRecordEasyApplyStepDiagnostics(label, heading, extra = {}) {
       })
       .map(summarizeControl)
       .slice(0, 40);
+    const actionStates = pjaModalButtonEls().slice(0, 12).map(el => ({
+      label: safeText(pjaButtonLabel(el)).slice(0, 80),
+      disabled: !!el.disabled,
+      ariaDisabled: el.getAttribute?.('aria-disabled') || '',
+    }));
     const diag = {
       ts: Date.now(),
       label: label || '',
       url: location.href,
       heading: safeText(heading || pjaModalHeading() || ''),
       buttons: pjaModalBtns(),
+      actionStates,
       easyApplyState: modal ? pjaEasyApplyState(modal) : { open: false },
       submitErrors: pjaLinkedInSubmitErrors(),
       collectedRequiredEmpty: collected,
@@ -321,6 +327,7 @@ function pjaEasyApplyResultDiagnostic(diag, reason) {
       populated: controls.filter(x => x.hasValue).length,
     },
     submitButtons: diag.buttons || [],
+    actionStates: diag.actionStates || [],
     likelyCause: reason === 'stuck'
       ? 'Enabled action accepted trusted mouse and keyboard activation but the step fingerprint did not change'
       : '',
@@ -374,17 +381,29 @@ function pjaCloseOpenModalPopups() {
 // (.click()/dispatchEvent) makes the page reload. Route step clicks through the
 // background CDP trusted-click (real isTrusted=true mouse event). A transport failure returns
 // false; it must never fall back to a synthetic step click because LinkedIn rejects it.
-function pjaTrustedClickInModal(label, activation = 'mouse') {
-  const m = pjaGetCurrentModal();
+async function pjaTrustedClickInModal(label, activation = 'mouse') {
+  let m = pjaGetCurrentModal();
   if (!m) return Promise.resolve(false);
-  const btns = pjaModalButtonEls(); // robust scope (incl footer / shadow), not just m.root
-  const btn = btns.find(b => pjaButtonLabel(b) === label)
+  let btns = pjaModalButtonEls(); // robust scope (incl footer / shadow), not just m.root
+  let btn = btns.find(b => pjaButtonLabel(b) === label)
     || btns.find(b => (b.getAttribute('aria-label') || '').trim() === label)
     || btns.find(b => new RegExp('^' + label, 'i').test(pjaButtonLabel(b)));
   if (!btn) return Promise.resolve(false);
   // Compute the button's viewport-center coords HERE (content script sees shadow DOM);
   // the background just performs a trusted CDP mouse click at those coords.
   pjaCloseOpenModalPopups();
+  // LinkedIn commits the phone/contact step on blur. Give React one bounded render beat, then
+  // resolve the action again because that commit can replace the footer button. Clicking the
+  // pre-blur node immediately produced a transport-successful CDP event on a detached/disabled
+  // action while every required control was visibly populated (apply-1787024777101).
+  await pjaAutoWait(180);
+  m = pjaGetCurrentModal();
+  if (!m) return false;
+  btns = pjaModalButtonEls();
+  btn = btns.find(b => pjaButtonLabel(b) === label)
+    || btns.find(b => (b.getAttribute('aria-label') || '').trim() === label)
+    || btns.find(b => new RegExp('^' + label, 'i').test(pjaButtonLabel(b)));
+  if (!btn) return false;
   btn.scrollIntoView({ block: 'center', behavior: 'instant' });
   if (activation === 'keyboard') {
     try { btn.focus({ preventScroll: true }); } catch (_) { try { btn.focus(); } catch (_) {} }
@@ -1565,3 +1584,4 @@ window.__pjaSelfIdPick                 = pjaSelfIdPick;
 window.__pjaEmptyRequiredFields        = pjaEmptyRequiredFields;
 window.__pjaEasyApplyState             = pjaEasyApplyState;
 window.__pjaFindEasyApplyBtn           = pjaFindEasyApplyBtn;
+window.__pjaTrustedClickInModal        = pjaTrustedClickInModal;
