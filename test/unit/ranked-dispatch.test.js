@@ -144,6 +144,12 @@ module.exports = async (t) => {
     dev.includes('Profile/resume health source: successful admission preflight'),
   'exact-run report: successful admission health survives a sparse terminal storage export');
 
+  const exactStatus = dev.slice(dev.indexOf("if (req.method === 'GET' && runStatusMatch)"),
+    dev.indexOf("if (req.method === 'GET' && runEventsMatch)"));
+  t.ok(exactStatus.includes("'pja_profile'") && exactStatus.includes("'pja_resume_filename'") &&
+    exactStatus.includes('writeApplyRunReport(st || {}, { runId })'),
+  'exact-run report: terminal status polling cannot overwrite known profile/resume health');
+
   t.ok(source.includes('Acknowledge the durable run install before network/tab launch work') &&
     source.includes('setTimeout(() => {') && source.includes('pjaDispatchRankedCurrent(msg.master).catch'),
   'ranked dispatch: start acknowledgement is not held hostage by slow reachability/tab-launch work');

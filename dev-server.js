@@ -1676,6 +1676,11 @@ async function handleRequest(req, res) {
       const st = await getStorageFromExtension([
         'pja_ranked_apply', 'pja_last_completed_apply_run', 'pja_apply_run_control', 'pja_application_ledger',
         'pja_applied_log', 'pja_apply_diagnostics', 'pja_last_apply_failure', 'pja_dbg',
+        // Terminal exact-run reads auto-export the report. Include the same sanitized health
+        // inputs as /export-apply-report so a status poll cannot overwrite known-good preflight
+        // health with "unknown".
+        'pja_profile', 'pja_profile_restored_from_backup', 'pja_profile_write_rejected',
+        'pja_resume_filename',
       ], 8000);
       const selected = ApplyProgress.runFromStorage(st || {}, runId);
       if (!selected) {
