@@ -14,4 +14,12 @@ module.exports = t => {
   t.eq(frontier.deferred.map(j => j.id), ['new-b'], 'scoring frontier: stale candidates beyond the new-score budget are explicit');
   t.eq(Frontier.partition([reusable, staleA], { limit: 1, candidateFingerprint: 'candidate-1' }).reusable.length, 1,
     'scoring frontier: reusable scores do not consume the model-call limit');
+  const ordered = Frontier.sortForScoring([
+    { id: 'old-high', fitScore: 75, sourcePriority: 'unchanged' },
+    { id: 'new-mid', fitScore: 65, sourcePriority: 'newly_sourced' },
+    { id: 'hydrated-low', fitScore: 53, sourcePriority: 'newly_hydrated' },
+    { id: 'updated', fitScore: 70, sourcePriority: 'description_updated' },
+  ]);
+  t.eq(ordered.map(job => job.id), ['new-mid', 'hydrated-low', 'updated', 'old-high'],
+    'scoring frontier: new/hydrated evidence is fit-ordered before consuming the old frontier');
 };

@@ -20,4 +20,18 @@ function partition(jobs, options = {}) {
   return { reusable, needsScore, deferred };
 }
 
-module.exports = { partition };
+function sourcePriority(job) {
+  const value = String(job && job.sourcePriority || '').toLowerCase();
+  if (value === 'newly_hydrated' || value === 'newly_sourced') return 2;
+  if (value === 'description_updated') return 1;
+  return 0;
+}
+
+function sortForScoring(jobs) {
+  return (Array.isArray(jobs) ? jobs.slice() : []).sort((a, b) =>
+    sourcePriority(b) - sourcePriority(a) ||
+    (Number(b && b.fitScore) || 0) - (Number(a && a.fitScore) || 0) ||
+    String(a && a.id || '').localeCompare(String(b && b.id || '')));
+}
+
+module.exports = { partition, sourcePriority, sortForScoring };

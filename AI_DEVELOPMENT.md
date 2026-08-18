@@ -65,6 +65,8 @@ Runtime safeguards now in code:
 - The scoring window limits only new model evaluations. Matching cached JD/candidate evidence is
   reused without consuming that budget, so later runs advance into the deferred scoring frontier
   instead of repeatedly spending their cap on the same jobs.
+- Within that bounded budget, the immediately preceding source import prioritizes newly hydrated,
+  newly sourced, and description-updated rows ahead of unchanged unscored frontier rows.
 - `scoring-context.js` bounds each long posting to 7,000 characters while retaining its opening,
   requirement-bearing lines, nearby context, and closing.
 - Scoring evidence is cached by both job-description and candidate fingerprints.

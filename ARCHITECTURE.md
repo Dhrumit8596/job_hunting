@@ -151,8 +151,20 @@ flowchart LR
 Key rules:
 
 - `sourcing/source-run.js` is the current sourcing orchestrator for `/source-v2`.
+- Primary-source Workday and SmartRecruiters discovery receive the configured candidate search
+  titles as bounded official-API queries in addition to source-specific queries and the broad board
+  scan. They detail-hydrate every row that survives the existing title/company/location policy;
+  there is no implicit first-100 hydration cutoff. Detail failures retain the listing with an
+  explicit hydration status/reason.
 - `idb-store.js` is the browser-side corpus store. Descriptions stay in IndexedDB and are fetched
   only for the scoring batch that needs them.
+- Every source run reports posting freshness, full-description coverage, supported-ATS coverage,
+  deduplication, and heuristic-priority yield. The latter is explicitly not called genuine fit;
+  genuine-fit yield is measured after evidence-grounded scoring in the apply plan/run.
+- Corpus import labels posting deltas as `newly_hydrated`, `newly_sourced`,
+  `description_updated`, or `unchanged`. The bounded scoring frontier evaluates them in that order
+  before consuming unchanged unscored rows, while reusable fingerprint-matched evidence remains
+  free of the new-score budget.
 - Scores are reusable only when both the posting-description fingerprint and candidate fingerprint
   match. This prevents stale resume/JD evidence from driving autonomous submission.
 - A high score is not enough: the apply gate also checks direct evidence, conflicts, confidence,
@@ -194,7 +206,7 @@ extracted into independent files.
 | --- | --- | --- |
 | Entry | `popup/popup.js`, `scripts/pja-apply-all.js`, `shortlist/shortlist.js` | Start/preflight/status/report surfaces. |
 | HTTP/AI | `dev-server.js`, `ai-cli.js`, `scoring-context.js` | Endpoints, source/apply planning, bounded local model calls, report generation. |
-| Sourcing | `sourcing/source-run.js`, `sourcing/adapters/*`, `browser-import.js`, `filter.js`, `dedupe.js`, `jobstore.js` | Build normalized, hydrated, candidate-relevant corpus. |
+| Sourcing | `sourcing/source-run.js`, `sourcing/adapters/*`, `browser-import.js`, `filter.js`, `dedupe.js`, `jobstore.js` | Build and quality-measure the normalized, hydrated, candidate-relevant corpus. Workday CXS and SmartRecruiters use bounded profile queries plus complete eligible-row detail hydration. |
 | Browser store | `idb-store.js` | Description-rich IndexedDB corpus and compact planning reads. |
 | Orchestrator | `background.js` | WS bridge, storage guards, ranked queue, tab dispatch, CDP, watchdog, ledger serialization. |
 | Routing policy | `sourcing/detect-ats.js`, `sourcing/apply-select.js`, `content/apply-router.js` | ATS identification, apply eligibility/state mapping, executable strategy selection. |
@@ -208,7 +220,7 @@ extracted into independent files.
 
 | State | Owner | Meaning |
 | --- | --- | --- |
-| IndexedDB `jobs`/`jobState` | `idb-store.js` through service worker | Canonical sourced postings, descriptions, fit evidence, attempts, and state. |
+| IndexedDB `jobs`/`jobState` | `idb-store.js` through service worker | Canonical sourced postings, descriptions, fit evidence, attempts, state, and source-delta priority for the next bounded scoring frontier. |
 | `pja_apply_run_control` | `dev-server.js`, acknowledged by `background.js` | Compact durable pre-queue lifecycle (`preflight`/`sourcing`/`planning`) and terminal admission/planning failure. Also acts as the late-worker ownership token. |
 | `pja_ranked_apply` | `background.js` | One global ranked run, current index, in-flight tab, results, planning drops. |
 | `pja_application_ledger` | serialized writer in `background.js` | Evidence-bearing outcome events; used for confirmed counts and idempotency. |

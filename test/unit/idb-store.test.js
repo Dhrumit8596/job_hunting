@@ -153,6 +153,34 @@ module.exports = async (t) => {
   t.eq(changed.state.scoreKind, 'heuristic', 'idb: changed JD invalidates old LLM evidence');
   t.eq(changed.state.fitScore, 61, 'idb: changed JD receives fresh heuristic score pending rescore');
 
+  // Newly available descriptions are labeled for frontier priority, and a current shorter JD is
+  // authoritative instead of retaining longer stale evidence from an earlier source run.
+  await idb.importNormalized({
+    index: { 'workday:hydrate-1': { id: 'workday:hydrate-1', company: 'Hydrate Co', title: 'Process Engineer',
+      location: 'Santa Clara, CA', roleKey: 'hydrate co::process engineer', modality: 'api-registry',
+      description: '', descriptionStatus: 'needs_description' } },
+    state: { 'workday:hydrate-1': { fitScore: 75, scoreKind: 'heuristic', status: 'sourced' } },
+  });
+  const hydratedImport = await idb.importNormalized({
+    index: { 'workday:hydrate-1': { id: 'workday:hydrate-1', company: 'Hydrate Co', title: 'Process Engineer',
+      location: 'Santa Clara, CA', roleKey: 'hydrate co::process engineer', modality: 'api-registry',
+      description: 'Current full wafer process requirements.', descriptionStatus: 'complete' } },
+    state: { 'workday:hydrate-1': { fitScore: 75, scoreKind: 'heuristic', status: 'sourced' } },
+  });
+  t.eq(hydratedImport.newlyHydrated, 1, 'idb: import reports a newly hydrated posting');
+  const hydratedPlan = await idb.getApplyPlanningCorpus();
+  t.eq(hydratedPlan.state['workday:hydrate-1'].sourcePriority, 'newly_hydrated',
+    'idb: newly hydrated source priority reaches the compact scoring frontier');
+  const shorterImport = await idb.importNormalized({
+    index: { 'workday:hydrate-1': { id: 'workday:hydrate-1', company: 'Hydrate Co', title: 'Process Engineer',
+      location: 'Santa Clara, CA', roleKey: 'hydrate co::process engineer', modality: 'api-registry',
+      description: 'Short current requirements.', descriptionStatus: 'complete' } },
+    state: { 'workday:hydrate-1': { fitScore: 62, scoreKind: 'heuristic', status: 'sourced' } },
+  });
+  t.eq(shorterImport.descriptionUpdated, 1, 'idb: a shorter current primary-source JD is reported as updated');
+  t.eq((await idb.getJob('workday:hydrate-1')).description, 'Short current requirements.',
+    'idb: stale longer description does not override a populated current primary-source JD');
+
   // Phase E: corpusSummary status breakdown + matching count
   const sum = await idb.corpusSummary({ topN: 3, matchThreshold: 60 });
   t.ok(sum.statusCounts && sum.statusCounts.sourced > 0, 'corpusSummary: statusCounts.sourced present');

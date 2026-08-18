@@ -6,6 +6,7 @@
 //   location:{city,region,country,remote,fullLocation}, releasedDate, ... } ] }
 // Apply form lands at https://jobs.smartrecruiters.com/{slug}/{id}
 const { makeJob } = require('../normalize');
+const { filterJobs } = require('../filter');
 
 const ATS = 'smartrecruiters';
 
@@ -20,7 +21,7 @@ function normalize(raw, source) {
   const applyUrl = raw.applyUrl || (slug && raw.id
     ? `https://jobs.smartrecruiters.com/${slug}/${raw.id}`
     : '');
-  return makeJob({
+  const job = makeJob({
     id: raw.id,
     title: raw.name,
     company: source.name || (raw.company && raw.company.name) || slug,
@@ -31,6 +32,10 @@ function normalize(raw, source) {
     postedAt: raw.releasedDate || '',
     description: raw.description || descriptionFromDetail(raw),
   });
+  job.descriptionStatus = job.description ? 'complete' : 'needs_description';
+  job.hydrationStatus = raw._hydrationStatus || (job.description ? 'hydration_success' : 'hydration_missing_detail');
+  job.hydrationReason = raw._hydrationReason || '';
+  return job;
 }
 
 function detailUrl(source, raw) {
@@ -64,13 +69,28 @@ async function enrichDetails(rows, source, opts = {}) {
     while (next < rows.length) {
       const raw = rows[next++];
       const url = detailUrl(source, raw);
-      if (!url) continue;
+      if (!url) {
+        raw._hydrationStatus = 'hydration_missing_detail_url';
+        raw._hydrationReason = 'missing_posting_id';
+        continue;
+      }
       const ctrl = new AbortController();
       const timer = setTimeout(() => ctrl.abort(), timeoutMs);
       try {
         const resp = await fetch(url, { signal: ctrl.signal, headers: { Accept: 'application/json' } });
-        if (resp.ok) Object.assign(raw, await resp.json());
-      } catch (_) { /* retain listing metadata if one detail fails */ }
+        if (resp.ok) {
+          Object.assign(raw, await resp.json());
+          const description = descriptionFromDetail(raw);
+          raw._hydrationStatus = description ? 'hydration_success' : 'hydration_missing_detail';
+          raw._hydrationReason = description ? '' : 'detail_payload_missing_description';
+        } else {
+          raw._hydrationStatus = 'hydration_http_error';
+          raw._hydrationReason = 'detail_http_' + resp.status;
+        }
+      } catch (err) {
+        raw._hydrationStatus = err && err.name === 'AbortError' ? 'hydration_timeout' : 'hydration_fetch_error';
+        raw._hydrationReason = err && err.name === 'AbortError' ? 'detail_timeout' : 'detail_fetch_failed';
+      }
       finally { clearTimeout(timer); }
     }
   }
@@ -78,14 +98,47 @@ async function enrichDetails(rows, source, opts = {}) {
   return rows;
 }
 
-async function fetchJobs(source, { timeoutMs = 15000, max = 200, detailConcurrency = 6, detailMax = 100 } = {}) {
+function searchTerms(source, queries, profileQueryLimit = 10) {
+  const sourceTerms = Array.isArray(source && source.queries) && source.queries.length
+    ? source.queries : [source && source.query || ''];
+  const profileTerms = (Array.isArray(queries) ? queries : []).slice(0, Math.max(0, Number(profileQueryLimit) || 0));
+  const out = [], seen = new Set();
+  for (const value of [...sourceTerms, ...profileTerms, '']) {
+    const text = String(value || '').trim();
+    const key = text.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key); out.push(text);
+  }
+  return out;
+}
+
+function hydrationRows(rows, source, opts = {}) {
+  const filterOpts = {
+    nationwideUS: opts.nationwideUS === true,
+    targetLocation: opts.targetLocation,
+    targetRadiusMiles: opts.targetRadiusMiles,
+    locationStrictness: opts.locationStrictness,
+    remotePolicy: opts.remotePolicy,
+  };
+  const eligible = (rows || []).filter(raw => filterJobs([normalize(raw, source)], filterOpts).length > 0);
+  const cap = Number(opts.detailMax);
+  return Number.isFinite(cap) && cap > 0 ? eligible.slice(0, cap) : eligible;
+}
+
+async function fetchJobs(source, { timeoutMs = 15000, max = 200, detailConcurrency = 6, detailMax = 0,
+  queries = [], profileQueryLimit = 10, profileQueryMax = 100,
+  nationwideUS = false, targetLocation, targetRadiusMiles, locationStrictness, remotePolicy } = {}) {
   if (!source.slug) return [];
   const byId = new Map();
-  const queries = Array.isArray(source.queries) && source.queries.length ? source.queries : [source.query || ''];
-  for (const query of queries) {
+  const searches = searchTerms(source, queries, profileQueryLimit);
+  const sourceSearches = new Set((Array.isArray(source.queries) && source.queries.length
+    ? source.queries : [source.query || '']).map(q => String(q || '').trim().toLowerCase()).filter(Boolean));
+  for (const query of searches) {
     const requestSource = Object.assign({}, source, { query });
+    const queryMax = query && !sourceSearches.has(query.toLowerCase())
+      ? Math.max(100, Number(profileQueryMax) || 100) : max;
     try {
-      for (let offset = 0; offset < max; offset += 100) {
+      for (let offset = 0; offset < queryMax; offset += 100) {
         const ctrl = new AbortController();
         const t = setTimeout(() => ctrl.abort(), timeoutMs);
         let data;
@@ -103,9 +156,11 @@ async function fetchJobs(source, { timeoutMs = 15000, max = 200, detailConcurren
     } catch (_) { /* isolate each query: retain other query results */ }
   }
   const out = Array.from(byId.values());
-  const relevant = out.filter(j => /\b(engineer|engineering|scientist)\b/i.test(j.name || '')).slice(0, detailMax);
+  const relevant = hydrationRows(out, source, { detailMax, nationwideUS, targetLocation,
+    targetRadiusMiles, locationStrictness, remotePolicy });
   await enrichDetails(relevant, source, { timeoutMs, detailConcurrency });
   return out.map(j => normalize(j, source));
 }
 
-module.exports = { ATS, fetchJobs, normalize, detailUrl, descriptionFromDetail, listingUrl, enrichDetails };
+module.exports = { ATS, fetchJobs, normalize, detailUrl, descriptionFromDetail, listingUrl, enrichDetails,
+  searchTerms, hydrationRows };

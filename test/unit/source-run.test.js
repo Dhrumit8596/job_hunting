@@ -1,9 +1,11 @@
 'use strict';
 
-const { sourceAll } = require('../../sourcing/source-run');
+const { sourceAll, postingAgeDays } = require('../../sourcing/source-run');
 const { makeJob } = require('../../sourcing/normalize');
 
 module.exports = async (t) => {
+  t.eq(postingAgeDays('Posted 30+ Days Ago'), 31,
+    'source-run freshness: Workday 30+ label is not overstated as within 30 days');
   const discoveryAdapters = {
     mock: {
       async fetchJobs(_source, opts = {}) {
@@ -14,7 +16,7 @@ module.exports = async (t) => {
         return [makeJob({ id: 'ats-1', title: 'Process Engineer', company: 'Acme',
           location: 'Fremont, CA', ats: 'greenhouse',
           applyUrl: 'https://job-boards.greenhouse.io/acme/jobs/ats-1',
-          description: 'Short requirements.' })];
+          postedAt: '2026-08-15T00:00:00.000Z', description: 'Short requirements.' })];
       },
     },
   };
@@ -32,7 +34,8 @@ module.exports = async (t) => {
 
   const { store, report } = await sourceAll({ sources: [], discoveryAdapters, browserJobs, target: 1,
     queries: ['wafer process engineer', 'quality validation engineer'],
-    targetLocation: { city: 'Santa Clara', state: 'CA' }, targetRadiusMiles: 60 });
+    targetLocation: { city: 'Santa Clara', state: 'CA' }, targetRadiusMiles: 60,
+    now: Date.parse('2026-08-17T00:00:00.000Z') });
   const records = Object.values(store.index);
   t.eq(records.length, 2, 'source-run: browser captures enter the normalized corpus');
   const acme = records.find(j => j.company === 'Acme');
@@ -54,6 +57,19 @@ module.exports = async (t) => {
     'source-run: browser hydration status totals include successes');
   t.eq(report.modalityC.hydrationStatuses.hydration_missing_dom, 1,
     'source-run: browser hydration status totals include DOM misses');
+  t.eq({ ready: report.quality.descriptions.ready, missing: report.quality.descriptions.missing,
+    coverage: report.quality.descriptions.coverage }, { ready: 1, missing: 1, coverage: 0.5 },
+    'source-run quality: full-description coverage is measured after cross-source dedupe');
+  t.eq(report.quality.descriptions.examples.map(row => row.id), ['indeed:missing-2'],
+    'source-run quality: missing-description examples are bounded and description-free');
+  t.eq(report.quality.deduplication.duplicateMerges, 1,
+    'source-run quality: cross-source duplicate merges are measured');
+  t.eq(report.quality.supportedAts.coverage, 1,
+    'source-run quality: every retained route is covered by an autonomous ATS strategy');
+  t.eq(report.quality.freshness.fresh7d, 1,
+    'source-run quality: primary-source posting freshness is measured when published time is known');
+  t.eq(report.quality.fitYield.kind, 'heuristic_priority_only',
+    'source-run quality: heuristic priority is not mislabeled as genuine evidence-grounded fit');
   const states = Object.values(store.state);
   t.eq(states.every(s => s.scoreKind === 'heuristic' && !!s.descriptionFingerprint), true,
     'source-run: source scores are marked heuristic with JD fingerprint');

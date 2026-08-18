@@ -76,11 +76,20 @@ a ranked queue.
 Loopback transport errors name the internal endpoint and explicit timeout. The bare message
 `fetch failed` is not an acceptable terminal diagnostic because it hides Node's transport cause.
 
+`/source-v2` reports a sanitized `quality` object for every run: known/unknown posting freshness,
+7/30-day freshness counts, full-description coverage, supported-ATS coverage, deduplication merges,
+prior-application exclusions, and heuristic-priority candidates. Heuristic priority must never be
+reported as genuine fit. Description misses include at most 12 description-free job examples for
+adapter triage. The `import` object additionally reports newly sourced, newly hydrated,
+description-updated, unchanged, evidence-preserved, and retired row counts when `write` is enabled.
+Workday and SmartRecruiters detail misses carry normalized hydration statuses/reasons (`hydration_timeout`,
+`hydration_http_error`, `hydration_fetch_error`, or missing detail/payload) without response bodies.
+
 ## Reason-to-owner map
 
 | Failure family | Primary owner |
 | --- | --- |
-| `rescore_*`, weak evidence, conflicts, missing descriptions | `scoring-context.js`, score gate, source hydration/adapters |
+| `rescore_*`, weak evidence, conflicts, missing descriptions | `scoring-context.js`, score gate, source hydration/adapters; compare `/source-v2.report.quality.descriptions` and `.import.newlyHydrated` before spending more frontier budget |
 | no route / unsupported strategy / wrong ATS | `detect-ats.js`, `apply-router.js`, `apply-select.js` |
 | missing required / select / radio / combobox | `autofill.js`, then the ATS-specific branch |
 | Workday auth/account/verification | `workday-auth.js`, `workday-engine.js`, Workday branch in external engine; marked duplicate-record draft retries terminalize before refill as `workday_duplicate_record` |

@@ -63,6 +63,63 @@ function hydrationSummaryByChannel(jobs) {
   return { byChannel, overallStatuses };
 }
 
+function postingAgeDays(value, now = Date.now()) {
+  const text = String(value || '').trim();
+  if (!text) return null;
+  if (/posted\s+today/i.test(text)) return 0;
+  if (/posted\s+yesterday/i.test(text)) return 1;
+  const relative = text.match(/posted\s+(\d+)(\+)?\s+days?\s+ago/i);
+  if (relative) return Number(relative[1]) + (relative[2] ? 1 : 0);
+  const ts = Date.parse(text);
+  if (!Number.isFinite(ts)) return null;
+  return Math.max(0, Math.floor((Number(now) - ts) / (24 * 60 * 60 * 1000)));
+}
+
+function qualitySummary(store, sourcingReport, opts = {}) {
+  const ids = Object.keys(store && store.index || {});
+  const now = opts.now != null ? Number(opts.now) : Date.now();
+  const byAts = {};
+  let descriptionReady = 0, supported = 0, knownFreshness = 0, fresh7d = 0, fresh30d = 0, older30d = 0;
+  const missingDescriptionExamples = [];
+  for (const id of ids) {
+    const job = store.index[id] || {};
+    const ats = String(job.detectedAts || job.ats || autonomousApplyStrategy(job) || 'unknown').toLowerCase();
+    byAts[ats] = (byAts[ats] || 0) + 1;
+    if (job.description && !/^(missing|stale|needs_description)$/i.test(String(job.descriptionStatus || ''))) descriptionReady++;
+    else if (missingDescriptionExamples.length < 12) missingDescriptionExamples.push({
+      id, company: job.company || '', title: job.title || '', ats,
+      descriptionStatus: job.descriptionStatus || 'needs_description',
+    });
+    if (AUTONOMOUS_SUPPORTED_STRATEGIES.has(autonomousApplyStrategy(job))) supported++;
+    const age = postingAgeDays(job.postedAt || job.discoveredAt, now);
+    if (age == null) continue;
+    knownFreshness++;
+    if (age <= 7) fresh7d++;
+    if (age <= 30) fresh30d++;
+    else older30d++;
+  }
+  const duplicateMerges = ['modalityA', 'modalityB', 'modalityC'].reduce((sum, key) => {
+    const row = sourcingReport && sourcingReport[key] || {};
+    return sum + Number(row.dupById || 0) + Number(row.dupByRole || 0);
+  }, 0);
+  const inputEligible = Number(sourcingReport && sourcingReport.modalityA && sourcingReport.modalityA.eligible || 0) +
+    Number(sourcingReport && sourcingReport.modalityB && sourcingReport.modalityB.eligible || 0) +
+    Number(sourcingReport && sourcingReport.modalityC && sourcingReport.modalityC.eligible || 0);
+  const ratio = n => ids.length ? Number((n / ids.length).toFixed(4)) : 0;
+  return {
+    total: ids.length,
+    freshness: { known: knownFreshness, unknown: ids.length - knownFreshness, fresh7d, fresh30d, older30d,
+      fresh30dRate: knownFreshness ? Number((fresh30d / knownFreshness).toFixed(4)) : 0 },
+    descriptions: { ready: descriptionReady, missing: ids.length - descriptionReady,
+      coverage: ratio(descriptionReady), examples: missingDescriptionExamples },
+    supportedAts: { ready: supported, unsupported: ids.length - supported, coverage: ratio(supported), byAts },
+    deduplication: { inputEligible, duplicateMerges, excludedApplied: Number(sourcingReport && sourcingReport.excludedApplied || 0),
+      uniqueAfterApplied: ids.length, mergeRate: inputEligible ? Number((duplicateMerges / inputEligible).toFixed(4)) : 0 },
+    fitYield: { kind: 'heuristic_priority_only', candidatesAt70: ids.filter(id => Number(store.state[id] && store.state[id].fitScore || 0) >= 70).length,
+      note: 'Genuine fit is measured only after evidence-grounded scoring; sourcing does not label title heuristics as qualified.' },
+  };
+}
+
 function isAggregatorHost(url) {
   try { return /(^|\.)(linkedin|indeed|glassdoor)\.com$/i.test(new URL(String(url || '')).hostname); }
   catch (_) { return false; }
@@ -97,7 +154,10 @@ async function sourceAll(opts = {}) {
   const report = { modalityA: {}, modalityB: {} };
 
   // --- Modality A: API registry ---
-  const a = await fetchAll(sources, { concurrency: opts.concurrency || 8, timeoutMs: 12000 });
+  const a = await fetchAll(sources, { concurrency: opts.concurrency || 8, timeoutMs: 12000,
+    queries, nationwideUS: opts.nationwideUS === true,
+    targetLocation: opts.targetLocation, targetRadiusMiles: opts.targetRadiusMiles,
+    locationStrictness: opts.locationStrictness, remotePolicy: opts.remotePolicy });
   const filterOpts = { nationwideUS: opts.nationwideUS === true,
     targetLocation: opts.targetLocation, targetRadiusMiles: opts.targetRadiusMiles,
     locationStrictness: opts.locationStrictness, remotePolicy: opts.remotePolicy };
@@ -110,7 +170,7 @@ async function sourceAll(opts = {}) {
   // --- Modality B: discovery (keyword search) ---
   let bFetched = 0, bEligible = 0;
   const discoveryAdapters = opts.discoveryAdapters || DISCOVERY;
-  let bAdded = 0, bEnriched = 0;
+  let bAdded = 0, bEnriched = 0, bDupById = 0, bDupByRole = 0;
   const target = opts.targetLocation && typeof opts.targetLocation === 'object' ? opts.targetLocation : {};
   const locationQuery = [target.city, target.state].filter(Boolean).join(', ') || target.label || target.zip || undefined;
   for (const name of Object.keys(discoveryAdapters)) {
@@ -121,8 +181,10 @@ async function sourceAll(opts = {}) {
     bEligible += elig.length;
     const r = upsert(store, elig, 'discovery-' + name, stateFor);
     bAdded += r.added; bEnriched += r.enriched;
+    bDupById += r.dupById; bDupByRole += r.dupByRole;
   }
-  report.modalityB = { fetched: bFetched, eligible: bEligible, added: bAdded, enriched: bEnriched };
+  report.modalityB = { fetched: bFetched, eligible: bEligible, added: bAdded, enriched: bEnriched,
+    dupById: bDupById, dupByRole: bDupByRole };
 
   // --- Modality C: browser captures (LinkedIn / Indeed / Glassdoor) ---
   // Their content scripts write normalized-enough records into pja_shortlist. Folding them into
@@ -157,6 +219,7 @@ async function sourceAll(opts = {}) {
   const removed = excludeApplied(store, applied);
   report.excludedApplied = removed;
   report.gate = gateReport(store, { target: opts.target || 200 });
+  report.quality = qualitySummary(store, report, { now: opts.now });
   return { store, report };
 }
 
@@ -168,6 +231,7 @@ function printReport(report) {
   console.log('Modality B (discovery)   :', JSON.stringify(report.modalityB));
   console.log('Modality C (browser)     :', JSON.stringify(report.modalityC));
   console.log('excluded already-applied :', report.excludedApplied);
+  console.log('quality metrics          :', JSON.stringify(report.quality));
   console.log('\n--- GATE: Find 200+ ---');
   console.log('  unique job ids      :', g.uniqueIds, g.atLeastTarget ? '✅ (>=200)' : '❌ (<200)');
   console.log('  source classes      :', g.sourceClasses.join(', '), g.atLeast2Modalities ? '✅ (>=2)' : '❌');
@@ -182,4 +246,5 @@ if (require.main === module) {
     .catch(e => { console.error('source-run failed:', e); process.exit(1); });
 }
 
-module.exports = { sourceAll, printReport, normalizeBrowserJob: require('./browser-import').normalizeBrowserJob, DEFAULT_QUERIES };
+module.exports = { sourceAll, printReport, normalizeBrowserJob: require('./browser-import').normalizeBrowserJob,
+  DEFAULT_QUERIES, postingAgeDays, qualitySummary };

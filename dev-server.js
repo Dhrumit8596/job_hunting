@@ -2873,6 +2873,15 @@ ${(description || '').slice(0, 6000)}`;
               report.gate.atLeastTarget && report.gate.atLeast2Modalities && report.gate.hasDirectSource) }, 'importCorpusReply', 120000);
           if (!imported || imported.error || imported.ok === false) throw new Error('corpus import failed: ' + ((imported && imported.error) || 'no acknowledgement'));
           wrote = imported.imported != null ? imported.imported : Object.keys(store.index).length;
+          report.import = {
+            imported: wrote,
+            added: Number(imported.added || 0),
+            newlyHydrated: Number(imported.newlyHydrated || 0),
+            descriptionUpdated: Number(imported.descriptionUpdated || 0),
+            unchanged: Number(imported.unchanged || 0),
+            preservedEvidence: Number(imported.preservedEvidence || 0),
+            retired: Number(imported.retired || 0),
+          };
         }
         console.log(`[PJA] /source-v2: unique=${report.gate.uniqueIds} modalities=${report.gate.modalities.join('+')} gate=${report.gate.pass ? 'PASS' : 'FAIL'}`);
         res.writeHead(200, CORS);
@@ -3086,7 +3095,7 @@ ${(description || '').slice(0, 6000)}`;
             if (!hydrated) planningDrops = appendPlanningDrop(planningDrops, j, 'rescore_missing_description', planningDropLimit);
             return hydrated;
           });
-          jobs.sort((a, b) => (Number(b.fitScore) || 0) - (Number(a.fitScore) || 0));
+          jobs = ScoringFrontier.sortForScoring(jobs);
           const frontier = ScoringFrontier.partition(jobs,
             { limit: scoreCandidateLimit, candidateFingerprint: runtimeCandidateFingerprint });
           const { reusable, needsScore } = frontier;

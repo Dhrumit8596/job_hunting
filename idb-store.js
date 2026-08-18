@@ -102,7 +102,9 @@
   function refreshPosting(fresh, previous) {
     const out = Object.assign({}, fresh);
     if (!previous) { out.descriptionFingerprint = descriptionFingerprint(out.description); return out; }
-    if (String(previous.description || '').length > String(out.description || '').length) {
+    // A populated primary-source refresh is authoritative even when the employer shortened the
+    // posting. Preserve prior enrichment only when the fresh source has no description at all.
+    if (!descriptionReady(out) && descriptionReady(previous)) {
       out.description = String(previous.description).slice(0, 20000);
       out.descriptionStatus = previous.descriptionStatus || 'complete';
     }
@@ -171,6 +173,8 @@
       descriptionFingerprint: state.descriptionFingerprint || '',
       evidenceFingerprint: state.evidenceFingerprint || '',
       candidateFingerprint: state.candidateFingerprint || '',
+      sourcePriority: state.sourcePriority || '',
+      sourceChangedAt: state.sourceChangedAt || 0,
       matchEvidence: Array.isArray(state.matchEvidence) ? state.matchEvidence : [],
       gaps: Array.isArray(state.gaps) ? state.gaps : [],
       conflicts: Array.isArray(state.conflicts) ? state.conflicts : [],
@@ -275,7 +279,8 @@
       });
       const t = db.transaction(['index', 'state'], 'readwrite');
       const idxS = t.objectStore('index'), stS = t.objectStore('state');
-      let n = 0, preserved = 0, preservedEvidence = 0, retired = 0;
+      let n = 0, added = 0, newlyHydrated = 0, descriptionUpdated = 0, unchanged = 0;
+      let preserved = 0, preservedEvidence = 0, retired = 0;
       if (opts.replaceMissing === true) {
         const incomingIds = new Set(Object.keys(store.index || {}));
         for (const id of Object.keys(existingIndex)) {
@@ -289,8 +294,25 @@
         const incoming = (store.state && store.state[id]) || { status: 'sourced', fitScore: null };
         const prev = existing[id];
         let merged = Object.assign({ id }, incoming);
-        const incomingFp = incoming.descriptionFingerprint || posting.descriptionFingerprint || descriptionFingerprint(posting.description);
+        const incomingFp = posting.descriptionFingerprint || descriptionFingerprint(posting.description);
         merged.descriptionFingerprint = incomingFp;
+        if (!existingIndex[id]) {
+          merged.sourcePriority = 'newly_sourced';
+          merged.sourceChangedAt = Date.now();
+          added++;
+        } else if (!descriptionReady(existingIndex[id]) && descriptionReady(posting)) {
+          merged.sourcePriority = 'newly_hydrated';
+          merged.sourceChangedAt = Date.now();
+          newlyHydrated++;
+        } else if (descriptionFingerprint(existingIndex[id].description) !== incomingFp) {
+          merged.sourcePriority = 'description_updated';
+          merged.sourceChangedAt = Date.now();
+          descriptionUpdated++;
+        } else {
+          merged.sourcePriority = 'unchanged';
+          merged.sourceChangedAt = prev && prev.sourceChangedAt || 0;
+          unchanged++;
+        }
         const keepLlm = prev && prev.scoreKind === 'llm' && prev.descriptionFingerprint && prev.descriptionFingerprint === incomingFp;
         if (keepLlm) {
           for (const k of ['fitScore', 'scoreKind', 'matchEvidence', 'gaps', 'conflicts', 'confidence',
@@ -310,7 +332,7 @@
       }
       await txDone(t);
       await setMeta('schemaVersion', SCHEMA_VERSION);
-      return { imported: n, preserved, preservedEvidence, retired };
+      return { imported: n, added, newlyHydrated, descriptionUpdated, unchanged, preserved, preservedEvidence, retired };
     } finally { db.close(); }
   }
 
