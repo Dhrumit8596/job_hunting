@@ -2609,7 +2609,19 @@ ${(description || '').slice(0, 6000)}`;
 
         // Dedupe against already-applied: durable applied log (survives queue overwrites) +
         // pja_jobs + current queue results.
-        const st = await getStorageFromExtension(['pja_profile', 'pja_prefs', 'pja_jobs', 'pja_ext_queue', 'pja_applied_log']);
+        let st = {};
+        for (let attempt = 0; attempt < 3; attempt += 1) {
+          st = await getStorageFromExtension(['pja_profile', 'pja_prefs', 'pja_jobs', 'pja_ext_queue', 'pja_applied_log'],
+            attempt === 0 ? 5000 : 10000);
+          const sourceStorageReadObserved = st && (Object.prototype.hasOwnProperty.call(st, 'pja_profile') ||
+            Object.prototype.hasOwnProperty.call(st, 'pja_prefs'));
+          if (sourceStorageReadObserved) break;
+          if (attempt < 2) await new Promise(r => setTimeout(r, 500));
+        }
+        if (!st || (!Object.prototype.hasOwnProperty.call(st, 'pja_profile') &&
+            !Object.prototype.hasOwnProperty.call(st, 'pja_prefs'))) {
+          throw new Error('source profile/preferences storage unavailable; refusing to broaden search defaults');
+        }
         const browserJobs = await getBrowserShortlistFromExtension(30000);
         const { pjaCollectAppliedRecords } = require('./sourcing/dedupe');
         const applied = pjaCollectAppliedRecords(st);

@@ -174,6 +174,8 @@ module.exports = (t) => {
     dev.includes('targetLocation') &&
     dev.includes('targetRadiusMiles') &&
     dev.includes('deriveTargetLocationOptions') &&
+    dev.includes('source profile/preferences storage unavailable; refusing to broaden search defaults') &&
+    dev.includes('sourceStorageReadObserved') &&
     dev.includes('outside_target_location') &&
     dev.includes('isEligibleTargetLocation') &&
     dev.includes("['pja_profile', 'pja_prefs', 'pja_jobs'") &&
