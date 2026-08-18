@@ -136,6 +136,7 @@ module.exports = async (t) => {
     source.includes('window.__pjaStartIndeedScan(scanOptions || {})') &&
     source.includes('window.__pjaStartScan({ ...(scanOptions || {}), fast })') &&
     source.includes('pja_linkedin_scan') &&
+    source.includes("current && current.status === 'complete'") &&
     !source.includes('}, 4500);'),
   'browser discovery: owned tabs are reused and scanners launch without an MV3-vulnerable delay');
 

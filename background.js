@@ -1802,6 +1802,12 @@ if (DEV_MODE) {
                   }
                 };
                 chrome.tabs.onUpdated.addListener(onUpd);
+                // Reused tabs can finish navigation before the update callback installs `onUpd`.
+                // Check current state immediately so a missed `complete` event cannot strand the
+                // scan at launcher_opened until an MV3-vulnerable fallback timer fires.
+                chrome.tabs.get(tab.id, current => {
+                  if (!chrome.runtime.lastError && current && current.status === 'complete') launchScanner();
+                });
                 setTimeout(launchScanner, 10000);
                 if (isIndeed) setTimeout(() => {
                   chrome.storage.local.get('pja_indeed_scan', d => {
