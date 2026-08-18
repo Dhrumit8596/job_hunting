@@ -273,5 +273,9 @@ module.exports = (t) => {
     t.eq(ok, true, 'EA trusted action succeeds after the contact-field blur commit');
     t.eq(trustedMessage?.x, 250, 'EA trusted action re-resolves replacement button coordinates after blur');
     t.eq(trustedMessage?.y, 100, 'EA trusted action uses replacement button vertical coordinate');
+    const activation = wBlur.__pjaTrustedActivations.at(-1);
+    t.eq(activation?.commandOk, true, 'EA trusted-action diagnostics distinguish successful CDP transport');
+    t.eq(activation?.landed, false, 'EA trusted-action diagnostics separately record missing DOM landing acknowledgement');
+    t.eq(activation?.targetId, 'new-next', 'EA trusted-action diagnostics identify the sanitized replacement target');
   });
 };

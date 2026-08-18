@@ -293,6 +293,7 @@ async function pjaRecordEasyApplyStepDiagnostics(label, heading, extra = {}) {
       heading: safeText(heading || pjaModalHeading() || ''),
       buttons: pjaModalBtns(),
       actionStates,
+      trustedActivations: PJA_TRUSTED_ACTIVATIONS.slice(-6),
       easyApplyState: modal ? pjaEasyApplyState(modal) : { open: false },
       submitErrors: pjaLinkedInSubmitErrors(),
       collectedRequiredEmpty: collected,
@@ -309,6 +310,9 @@ async function pjaRecordEasyApplyStepDiagnostics(label, heading, extra = {}) {
 function pjaEasyApplyResultDiagnostic(diag, reason) {
   if (!diag) return null;
   const controls = Array.isArray(diag.controls) ? diag.controls : [];
+  const trustedActivations = Array.isArray(diag.trustedActivations) ? diag.trustedActivations : [];
+  const transported = trustedActivations.filter(x => x && x.commandOk);
+  const landed = transported.filter(x => x.landed);
   return {
     phase: diag.label || 'easy-apply-step',
     reason: reason || '',
@@ -328,8 +332,11 @@ function pjaEasyApplyResultDiagnostic(diag, reason) {
     },
     submitButtons: diag.buttons || [],
     actionStates: diag.actionStates || [],
+    trustedActivations,
     likelyCause: reason === 'stuck'
-      ? 'Enabled action accepted trusted mouse and keyboard activation but the step fingerprint did not change'
+      ? (transported.length && landed.length === 0
+          ? 'CDP commands completed but no trusted activation event was observed on the intended modal action'
+          : 'Enabled action received trusted activation but the step fingerprint did not change')
       : '',
     capturedAt: diag.ts || Date.now(),
   };
@@ -377,6 +384,8 @@ function pjaCloseOpenModalPopups() {
   } catch (_) {}
 }
 
+const PJA_TRUSTED_ACTIVATIONS = [];
+
 // LinkedIn checks isTrusted on Easy Apply step-advance clicks — a synthetic click
 // (.click()/dispatchEvent) makes the page reload. Route step clicks through the
 // background CDP trusted-click (real isTrusted=true mouse event). A transport failure returns
@@ -411,7 +420,17 @@ async function pjaTrustedClickInModal(label, activation = 'mouse') {
   const r = btn.getBoundingClientRect();
   const x = r.left + r.width / 2, y = r.top + r.height / 2;
   const messageType = activation === 'keyboard' ? 'LINKEDIN_TRUSTED_KEY_ACTIVATE' : 'LINKEDIN_TRUSTED_CLICK';
-  return new Promise(resolve => {
+  let landed = false;
+  const eventType = activation === 'keyboard' ? 'keydown' : 'click';
+  const onActivation = event => {
+    if (!event?.isTrusted) return;
+    if (activation === 'keyboard' && event.key !== 'Enter') return;
+    landed = true;
+  };
+  btn.addEventListener(eventType, onActivation, true);
+  let hit = null;
+  try { hit = document.elementFromPoint?.(x, y) || null; } catch (_) {}
+  const commandOk = await new Promise(resolve => {
     let done = false;
     const t = setTimeout(() => { if (!done) { done = true; pjaTrace('CDP timeout; trusted ' + activation + ' failed ' + label); resolve(false); } }, 6000);
     try {
@@ -430,6 +449,18 @@ async function pjaTrustedClickInModal(label, activation = 'mouse') {
       if (!done) { done = true; clearTimeout(t); pjaTrace('CDP trusted ' + activation + ' threw ' + label + ' err=' + (e?.message || e || '')); resolve(false); }
     }
   });
+  if (commandOk) await pjaAutoWait(120);
+  btn.removeEventListener(eventType, onActivation, true);
+  PJA_TRUSTED_ACTIVATIONS.push({
+    ts: Date.now(), label: String(label || '').slice(0, 80), activation,
+    commandOk, landed, targetId: String(btn.id || '').slice(0, 80),
+    hitTag: String(hit?.tagName || '').toLowerCase(),
+    hitId: String(hit?.id || '').slice(0, 80),
+    hitLabel: String(hit ? pjaButtonLabel(hit) : '').slice(0, 80),
+    hitMatchesAction: !!(hit && (hit === btn || btn.contains(hit))),
+  });
+  if (PJA_TRUSTED_ACTIVATIONS.length > 12) PJA_TRUSTED_ACTIVATIONS.splice(0, PJA_TRUSTED_ACTIVATIONS.length - 12);
+  return commandOk;
 }
 
 function pjaDismissModal() {
@@ -1585,3 +1616,4 @@ window.__pjaEmptyRequiredFields        = pjaEmptyRequiredFields;
 window.__pjaEasyApplyState             = pjaEasyApplyState;
 window.__pjaFindEasyApplyBtn           = pjaFindEasyApplyBtn;
 window.__pjaTrustedClickInModal        = pjaTrustedClickInModal;
+window.__pjaTrustedActivations         = PJA_TRUSTED_ACTIVATIONS;

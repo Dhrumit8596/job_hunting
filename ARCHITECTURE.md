@@ -252,7 +252,8 @@ These classifications are important when deciding whether a file can be removed.
   `trusted_click_failed`, never a synthetic click fallback. Before either activation, the content
   script blurs open contact controls, waits one bounded React render beat, and re-resolves the modal
   action so CDP never targets the stale pre-commit footer node. Both terminal paths attach a sanitized
-  step diagnostic, including action disabled state, to the ledger event and exact-run report.
+  step diagnostic, including action disabled state and a bounded split between CDP command success,
+  DOM landing acknowledgement, and the hit-tested target, to the ledger event and exact-run report.
 - `runId`/job ownership checks must remain around result writes and queue advancement.
 - Planning and active-run storage stay compact; descriptions belong in IndexedDB.
 - Rule ordering in `PJA_FIELD_RULES` is semantic and must stay most-specific first.
