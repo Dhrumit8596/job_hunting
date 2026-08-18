@@ -112,6 +112,7 @@ module.exports = (t) => {
     dev.includes('summarizeBlockedFromLedger') &&
     dev.includes('blocked: summarizeBlockedFromLedger(storage)') &&
     dev.includes('planningDrops: planningDrops || null') &&
+    dev.includes('terminalPatch.planningDrops = applyResult.planningDrops || null') &&
     dev.includes('function writeApplyPlanningReport') &&
     dev.includes('function appendPlanningDrop') &&
     dev.includes('rescore_below_threshold') &&

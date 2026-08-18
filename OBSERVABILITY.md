@@ -70,6 +70,9 @@ The exact-run endpoint is valid as soon as `/apply-all` returns: before a browse
 reads the acknowledged `pja_apply_run_control` record and reports `sourcing` or `planning`. If that
 worker fails or times out, the same run becomes terminal `failed` and retains a bounded error;
 there must never be a later unowned queue installation for that ID.
+If planning ends with `nothing eligible`, the same control record retains compact planning-drop
+totals/reason counts and bounded sanitized examples so the exact-run report remains auditable without
+a ranked queue.
 Loopback transport errors name the internal endpoint and explicit timeout. The bare message
 `fetch failed` is not an acceptable terminal diagnostic because it hides Node's transport cause.
 

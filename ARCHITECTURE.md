@@ -103,6 +103,11 @@ pure modules are:
 - `apply-progress.js` — exact-run snapshot and bounded transition events from queue/ledger state.
 - `apply-recovery-policy.js` — deterministic wait/inspect/resume/stop/report actions.
 
+When planning finds no eligible queue, the terminal run control retains compact `planningDrops`
+(exact total/reason counts plus at most 12 sanitized examples). Exact-run export therefore preserves
+the planning explanation even though `pja_ranked_apply` was never installed; descriptions and
+candidate data remain outside run control.
+
 `npm run apply:all -- --target N --category C --wait` follows the returned ID through terminal
 state and exports its report. `npm run apply:watch -- --run-id ID` resumes that observation in a new
 session. A compact gitignored `.pja-run.local.json` stores only the last followed ID/status; browser

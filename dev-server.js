@@ -2635,10 +2635,12 @@ ${(description || '').slice(0, 6000)}`;
             } else {
               const applyResult = worker.data && worker.data.apply || {};
               const noQueue = !applyResult.dryRun && Number(applyResult.planned) === 0;
-              await persistApplyRunControl({ runId: requestedRunId, status: noQueue ? 'exhausted' : 'done', phase: 'terminal',
+              const terminalPatch = { runId: requestedRunId, status: noQueue ? 'exhausted' : 'done', phase: 'terminal',
                 terminalReason: applyResult.dryRun ? 'dry_run_complete'
                   : noQueue ? String(applyResult.note || 'nothing_eligible').slice(0, 120)
-                    : 'handed_off_to_ranked_run' });
+                    : 'handed_off_to_ranked_run' };
+              if (noQueue) terminalPatch.planningDrops = applyResult.planningDrops || null;
+              await persistApplyRunControl(terminalPatch);
             }
           } catch (e) {
             try {

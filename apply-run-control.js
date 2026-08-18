@@ -4,6 +4,30 @@
 // storage, but neither should invent merge/ownership semantics independently.
 const RunState = require('./apply-run-state');
 
+function compactPlanningDrops(value, options = {}) {
+  if (!value || typeof value !== 'object') return null;
+  const countLimit = options.countLimit != null ? Math.max(1, Number(options.countLimit) || 1) : 50;
+  const exampleLimit = options.exampleLimit != null ? Math.max(0, Number(options.exampleLimit) || 0) : 12;
+  const counts = {};
+  for (const [rawReason, rawCount] of Object.entries(value.counts || {}).slice(0, countLimit)) {
+    const reason = String(rawReason || '').trim().slice(0, 100);
+    const count = Math.max(0, Number(rawCount) || 0);
+    if (reason && count) counts[reason] = count;
+  }
+  const examples = Array.isArray(value.examples) ? value.examples.slice(0, exampleLimit).map(row => ({
+    id: String(row && (row.id || row.jobId) || '').slice(0, 160),
+    company: String(row && row.company || '').slice(0, 160),
+    title: String(row && row.title || '').slice(0, 200),
+    channel: String(row && row.channel || '').slice(0, 80),
+    ats: String(row && row.ats || '').slice(0, 80),
+    strategy: String(row && row.strategy || '').slice(0, 80),
+    reason: String(row && row.reason || '').slice(0, 100),
+    fitScore: row && row.fitScore != null ? Number(row.fitScore) : null,
+    applyUrl: String(row && row.applyUrl || '').slice(0, 500),
+  })) : [];
+  return { total: Math.max(0, Number(value.total) || Object.values(counts).reduce((sum, n) => sum + n, 0)), counts, examples };
+}
+
 function build(current, patch, options = {}) {
   if (!patch || !patch.runId) throw new Error('apply run control requires runId');
   if (!options.create && (!current || current.runId !== patch.runId)) {
@@ -23,6 +47,9 @@ function build(current, patch, options = {}) {
     startedAt: now,
     initialPhase: 'preflight',
   }, sameRun, patch, { updatedAt: now, lastTransitionAt: now });
+  if (Object.prototype.hasOwnProperty.call(patch, 'planningDrops')) {
+    next.planningDrops = compactPlanningDrops(patch.planningDrops);
+  }
   if (RunState.isTerminalStatus(next.status)) {
     next.phase = 'terminal';
     next.finishedAt = next.finishedAt || now;
@@ -41,4 +68,4 @@ function ownsPlanning(control, runId) {
   return !!(control && control.runId === runId && control.status === 'planning');
 }
 
-module.exports = { build, isActive, ownsPlanning };
+module.exports = { build, isActive, ownsPlanning, compactPlanningDrops };
