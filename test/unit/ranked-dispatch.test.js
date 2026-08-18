@@ -134,8 +134,9 @@ module.exports = async (t) => {
 
   t.ok(source.includes("'pja_discovery_scan_tabs'") &&
     source.includes('window.__pjaStartIndeedScan(scanOptions || {})') &&
-    source.includes('window.__pjaStartScan({ ...(scanOptions || {}), fast })'),
-  'browser discovery: owned tabs are reused and bounded scan options reach both platform scrapers');
+    source.includes('window.__pjaStartScan({ ...(scanOptions || {}), fast })') &&
+    !source.includes('}, 4500);'),
+  'browser discovery: owned tabs are reused and scanners launch without an MV3-vulnerable delay');
 
   t.ok(source.includes('const count = await self.PJAIdb.count()') &&
     !source.includes('const s = await self.PJAIdb.corpusSummary({ topN: 0 })'),

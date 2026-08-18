@@ -1751,33 +1751,33 @@ if (DEV_MODE) {
                   if (launched || !tab || tab.id == null) return;
                   launched = true;
                   chrome.tabs.onUpdated.removeListener(onUpd);
-                  setTimeout(() => {
-                    chrome.scripting.executeScript({
-                      target: { tabId: tab.id },
-                      func: (fast, source, scanOptions) => {
-                        if (source === 'indeed') {
-                          if (typeof window.__pjaStartIndeedScan !== 'function') return { ok: false, error: 'indeed_scanner_not_loaded' };
-                          try {
-                            Promise.resolve(window.__pjaStartIndeedScan(scanOptions || {})).catch(e => {
-                              try { chrome.storage.local.set({ pja_indeed_scan: {
-                                status: 'failed', reason: 'start_error',
-                                error: String(e && e.message || e), url: location.href, ts: Date.now()
-                              } }); } catch (_) {}
-                            });
-                            return { ok: true, started: true };
-                          } catch (e) { return { ok: false, error: String(e && e.message || e) }; }
-                        }
-                        else if (source === 'glassdoor') { if (typeof window.__pjaStartGlassdoorScan === 'function') window.__pjaStartGlassdoorScan(scanOptions || {}); return { ok: true, started: true }; }
-                        else { if (typeof window.__pjaStartScan === 'function') { window.__pjaStartScan({ ...(scanOptions || {}), fast }); return { ok: true, started: true }; } return { ok: false, error: 'scanner_not_loaded' }; }
-                      },
-                      args: [!!msg.fast, msg.source || '', msg.scanOptions || {}],
-                    }).then(result => {
-                      const state = result && result[0] && result[0].result;
-                      if (isIndeed && state && state.ok === false) chrome.storage.local.set({ pja_indeed_scan: {
-                        status: 'failed', reason: 'launcher_error', error: state.error || 'unknown', url: scanUrl, tabId: tab.id, ts: Date.now() } });
-                    }).catch(e => { if (isIndeed) chrome.storage.local.set({ pja_indeed_scan: {
-                      status: 'failed', reason: 'launcher_execute_error', error: String(e && e.message || e), url: scanUrl, tabId: tab.id, ts: Date.now() } }); });
-                  }, 4500);
+                  // `complete` means document-idle content scripts are available. Launch now so an
+                  // MV3 worker suspension cannot erase a delayed timer before the page scan starts.
+                  chrome.scripting.executeScript({
+                    target: { tabId: tab.id },
+                    func: (fast, source, scanOptions) => {
+                      if (source === 'indeed') {
+                        if (typeof window.__pjaStartIndeedScan !== 'function') return { ok: false, error: 'indeed_scanner_not_loaded' };
+                        try {
+                          Promise.resolve(window.__pjaStartIndeedScan(scanOptions || {})).catch(e => {
+                            try { chrome.storage.local.set({ pja_indeed_scan: {
+                              status: 'failed', reason: 'start_error',
+                              error: String(e && e.message || e), url: location.href, ts: Date.now()
+                            } }); } catch (_) {}
+                          });
+                          return { ok: true, started: true };
+                        } catch (e) { return { ok: false, error: String(e && e.message || e) }; }
+                      }
+                      else if (source === 'glassdoor') { if (typeof window.__pjaStartGlassdoorScan === 'function') window.__pjaStartGlassdoorScan(scanOptions || {}); return { ok: true, started: true }; }
+                      else { if (typeof window.__pjaStartScan === 'function') { window.__pjaStartScan({ ...(scanOptions || {}), fast }); return { ok: true, started: true }; } return { ok: false, error: 'scanner_not_loaded' }; }
+                    },
+                    args: [!!msg.fast, msg.source || '', msg.scanOptions || {}],
+                  }).then(result => {
+                    const state = result && result[0] && result[0].result;
+                    if (isIndeed && state && state.ok === false) chrome.storage.local.set({ pja_indeed_scan: {
+                      status: 'failed', reason: 'launcher_error', error: state.error || 'unknown', url: scanUrl, tabId: tab.id, ts: Date.now() } });
+                  }).catch(e => { if (isIndeed) chrome.storage.local.set({ pja_indeed_scan: {
+                    status: 'failed', reason: 'launcher_execute_error', error: String(e && e.message || e), url: scanUrl, tabId: tab.id, ts: Date.now() } }); });
                 };
                 const onUpd = (tid, info) => {
                   if (tid === tab.id && info.status === 'complete') {

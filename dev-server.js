@@ -414,11 +414,21 @@ async function runBrowserDiscoveryQueries(options = {}) {
   const byQuery = [], blockedSources = new Set();
   const runItem = async item => {
     const startedAt = Date.now();
-    const launch = await postLocalJson('/start-scan', {
-      source: item.source, url: item.url, fast: item.fast, discovery: true,
-      scanOptions: item.scanOptions,
-    }, 15000);
-    let terminal = { terminal: false, status: 'launch_failed' };
+    const launchBody = { source: item.source, url: item.url, fast: item.fast, discovery: true,
+      scanOptions: item.scanOptions };
+    let launch = await postLocalJson('/start-scan', launchBody, 15000);
+    // MV3 may reconnect while a long browser sweep is in progress. A zero-client launch is not a
+    // scan attempt: wait briefly for the existing extension to reconnect and retry exactly once.
+    if (!launch.ok || !launch.data || launch.data.ok === false || !(launch.data.pushed > 0)) {
+      const reconnectDeadline = Date.now() + 15000;
+      while (Date.now() < reconnectDeadline && !Array.from(wsClients).some(c => c.readyState === 1)) {
+        await new Promise(r => setTimeout(r, 1000));
+      }
+      if (Array.from(wsClients).some(c => c.readyState === 1)) {
+        launch = await postLocalJson('/start-scan', launchBody, 15000);
+      }
+    }
+    let terminal = { terminal: false, status: 'launch_failed', reason: 'extension_disconnected_or_launch_rejected' };
     if (launch.ok && launch.data && launch.data.ok !== false && launch.data.pushed > 0) {
       while (Date.now() - startedAt < timeoutMs) {
         const storage = await getStorageFromExtension(['pja_scan_coverage', 'pja_indeed_scan'], 5000);

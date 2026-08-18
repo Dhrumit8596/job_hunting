@@ -164,6 +164,8 @@ module.exports = (t) => {
     dev.includes('runBrowserDiscoveryQueries') &&
     dev.includes('browserDiscoveryMaxQueries') &&
     dev.includes('SUPPORTED_ADJACENT_SEARCH_TITLES') &&
+    dev.includes('extension_disconnected_or_launch_rejected') &&
+    dev.includes('reconnectDeadline') &&
     dev.includes('browserScan') &&
     dev.includes("await launch('linkedin'") &&
     dev.includes("{ fast: false }") &&
