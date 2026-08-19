@@ -3,11 +3,18 @@
 const { detectAts } = require('./detect-ats');
 
 function norm(value) { return String(value || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim(); }
+function presentationLocation(value) {
+  return norm(value)
+    .replace(/\b(?:on site|onsite|hybrid|remote)\b/g, ' ')
+    .replace(/\b(?:united states of america|united states|usa)\b/g, ' ')
+    .replace(/\bcalifornia\b/g, 'ca')
+    .replace(/\s+/g, ' ').trim();
+}
 function exactIdentity(job) {
-  return [norm(job && job.company), norm(job && job.title), norm(job && job.location)].join('::');
+  return [norm(job && job.company), norm(job && job.title), presentationLocation(job && job.location)].join('::');
 }
 function hasStrongIdentity(job) {
-  return !!(norm(job && job.company) && norm(job && job.title) && norm(job && job.location));
+  return !!(norm(job && job.company) && norm(job && job.title) && presentationLocation(job && job.location));
 }
 function isDirect(job) {
   try { return !/(^|\.)(linkedin|indeed|glassdoor)\.com$/i.test(new URL(job && job.applyUrl || '').hostname); }
@@ -58,6 +65,9 @@ function resolveAgainstOfficial(browserJobs, officialPostings) {
 function hydrationPriority(job, options = {}) {
   let score = 0;
   if (job && job.lastSeenAt && Number(job.lastSeenAt) >= Number(options.freshAfter || 0)) score += 30;
+  // An unresolved off-site lead can gain both its trusted direct route and its JD in one bounded
+  // Voyager read, so it has more autonomous-supply value than an already routed assisted lead.
+  if (job && job.needsAtsResolution === true) score += 35;
   if (job && (job.channel === 'linkedin_easy_apply' || job.channel === 'indeed_apply')) score += 25;
   if (job && isDirect(job)) score += 20;
   if (/\b(process|quality|metrology|inspection|validation|test|equipment|reliability|failure analysis|manufacturing) engineer\b/i.test(String(job && job.title || ''))) score += 25;
@@ -67,7 +77,8 @@ function hydrationPriority(job, options = {}) {
 function selectHydrationFrontier(jobs, options = {}) {
   const limit = Math.max(0, Math.min(50, Number(options.limit) || 20));
   return (jobs || []).filter(job => job && /^(linkedin|indeed)$/i.test(String(job.sourcePlatform || '')) &&
-    (!job.description || /^(missing|stale|needs_description)$/i.test(String(job.descriptionStatus || ''))))
+    (job.needsAtsResolution === true || !job.description ||
+      /^(missing|stale|needs_description)$/i.test(String(job.descriptionStatus || ''))))
     .sort((a, b) => hydrationPriority(b, options) - hydrationPriority(a, options) || String(a.id).localeCompare(String(b.id)))
     .slice(0, limit);
 }
@@ -97,5 +108,5 @@ async function runOwnedEnrichment(work, options = {}) {
   return { ok: true, result };
 }
 
-module.exports = { exactIdentity, hasStrongIdentity, isDirect, resolveAgainstOfficial,
+module.exports = { norm, presentationLocation, exactIdentity, hasStrongIdentity, isDirect, resolveAgainstOfficial,
   hydrationPriority, selectHydrationFrontier, runOwnedEnrichment };

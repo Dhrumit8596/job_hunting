@@ -23,6 +23,36 @@ module.exports = async t => {
     'browser resolution: no match remains explicit');
   t.eq(Enrichment.resolveAgainstOfficial([{ ...lead, location: '' }], [official]).identityMismatch, 1,
     'browser resolution: incomplete identity cannot attach a same-title job');
+  const decorated = Enrichment.resolveAgainstOfficial([
+    { ...lead, location: 'Fremont, CA (On-site)' },
+  ], [{ ...official, location: 'Fremont, California, United States' }]);
+  t.eq({ resolved: decorated.resolved, url: decorated.jobs[0].applyUrl },
+    { resolved: 1, url: official.applyUrl },
+  'browser resolution: presentation-only work-mode, state, and country suffixes normalize to the unique official identity');
+  t.eq(Enrichment.resolveAgainstOfficial([{ ...lead, location: 'San Jose, CA (On-site)' }],
+    [{ ...official, location: 'Fremont, CA, United States' }]).noMatch, 1,
+  'browser resolution: normalization never merges distinct cities');
+  const decoratedAmbiguous = Enrichment.resolveAgainstOfficial([
+    { ...lead, location: 'Fremont, CA (Hybrid)' },
+  ], [{ ...official, location: 'Fremont, California, United States' },
+    { ...official, id: 'gh-2', location: 'Fremont, CA', applyUrl: 'https://jobs.lever.co/acme/2' }]);
+  t.eq(decoratedAmbiguous.ambiguous, 1,
+    'browser resolution: multiple presentation-compatible official requisitions remain unresolved');
+
+  const now = Date.parse('2026-08-19T12:00:00Z');
+  const routeOnly = { ...lead, id: 'route-only', sourcePlatform: 'linkedin', channel: 'external',
+    description: 'Complete process requirements.', descriptionStatus: 'full', lastSeenAt: now - 1000 };
+  const assistedMissing = { ...lead, id: 'assisted', sourcePlatform: 'linkedin', channel: 'linkedin_easy_apply',
+    isEasyApply: true, needsAtsResolution: false, description: '', descriptionStatus: 'missing', lastSeenAt: now - 1000 };
+  const readyFull = { ...official, id: 'ready-full', sourcePlatform: 'linkedin', channel: 'external',
+    needsAtsResolution: false, description: 'Complete requirements.', descriptionStatus: 'full', lastSeenAt: now - 1000 };
+  const frontier = Enrichment.selectHydrationFrontier([assistedMissing, readyFull, routeOnly], {
+    limit: 20, freshAfter: now - 86400000 });
+  t.eq(frontier.map(row => row.id), ['route-only', 'assisted'],
+    'browser enrichment: full-JD unresolved routes remain eligible and outrank already-routed assisted hydration');
+  const bounded = Enrichment.selectHydrationFrontier(Array.from({ length: 60 }, (_, i) => ({
+    ...routeOnly, id: 'route-' + i })), { limit: 100, freshAfter: now - 86400000 });
+  t.eq(bounded.length, 50, 'browser enrichment: route-resolution frontier retains its hard fifty-row cap');
 
   let guarded = 0;
   const owned = await Enrichment.runOwnedEnrichment(async () => ({ hydrated: 1 }), {

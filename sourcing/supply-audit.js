@@ -5,6 +5,8 @@
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 const { postingSeniority, isCompatiblePostingSeniority } = require('./search-policy');
+const { detectAts } = require('./detect-ats');
+const ApplySelect = require('./apply-select');
 const ScoringEvidence = require('../scoring-evidence');
 
 function norm(value) {
@@ -53,10 +55,53 @@ function evidenceReady(state, threshold, candidateFingerprint) {
   const conflicts = Array.isArray(state && state.conflicts) ? state.conflicts.filter(Boolean) : [];
   const minEvidence = score >= threshold ? 3 : 2;
   if (!Number.isFinite(score) || score < threshold) return false;
+  if (!/^(llm|ai)$/i.test(String(state && state.scoreKind || ''))) return false;
   if (candidateFingerprint && state.candidateFingerprint !== candidateFingerprint) return false;
+  const transferability = ScoringEvidence.normalizeTransferability(state && state.transferability).level;
   return ScoringEvidence.isCurrentPolicy(state) && evidence.length >= minEvidence &&
     gaps.length <= 2 && !conflicts.length &&
+    /^(direct|adjacent)$/.test(transferability) &&
     /^(high|medium)$/i.test(String(state && state.confidence || ''));
+}
+
+function hasCurrentJdFingerprint(posting, state) {
+  const postingFingerprint = String(posting && posting.descriptionFingerprint || '');
+  const scoreFingerprint = String(state && state.descriptionFingerprint || '');
+  return !!postingFingerprint && postingFingerprint === scoreFingerprint;
+}
+
+function evidenceReadyForPosting(posting, state, threshold, candidateFingerprint) {
+  return ApplySelect.hasUsableDescription(posting) &&
+    hasCurrentJdFingerprint(posting, state) &&
+    evidenceReady(state, threshold, candidateFingerprint);
+}
+
+function postingChannel(posting) {
+  if (posting && (posting.channel === 'linkedin_easy_apply' || posting.isEasyApply === true)) return 'linkedin_easy_apply';
+  if (posting && (posting.channel === 'indeed_apply' || posting.indeedApply === true)) return 'indeed_apply';
+  return String(posting && posting.channel || 'external').toLowerCase() || 'external';
+}
+
+function routeReadiness(posting, options = {}) {
+  const channel = postingChannel(posting);
+  const applyUrl = String(posting && posting.applyUrl || '');
+  if (!applyUrl) return { supported: false, autonomous: false, reason: 'missing_apply_url', channel };
+  if (channel === 'linkedin_easy_apply') return { supported: true,
+    autonomous: options.includeAssisted === true, reason: options.includeAssisted === true ? '' : 'assisted_channel', channel };
+  if (channel === 'indeed_apply') return { supported: true, autonomous: true, reason: '', channel };
+  let host = '';
+  try { host = new URL(applyUrl).hostname.toLowerCase(); } catch (_) {
+    return { supported: false, autonomous: false, reason: 'invalid_apply_url', channel };
+  }
+  const strategy = detectAts(applyUrl) || String(posting && (posting.detectedAts || posting.ats) || '').toLowerCase();
+  if (/(^|\.)(linkedin|indeed|glassdoor)\.com$/i.test(host) && !detectAts(applyUrl)) {
+    return { supported: false, autonomous: false, reason: 'aggregator_without_apply_destination', channel };
+  }
+  const capability = ApplySelect.applyCapabilityStatus(applyUrl, strategy || 'generic');
+  if (capability.status === 'unsupported' || capability.status === 'unknown_needs_resolution') {
+    return { supported: false, autonomous: false, reason: capability.reason || 'unsupported_route', channel };
+  }
+  return { supported: true, autonomous: true, reason: '', channel };
 }
 
 function inferredBelowThresholdCause(posting, state, seniorityBand) {
@@ -98,7 +143,7 @@ function queryFamilySummary(index, state, families, opts) {
       if (p.descriptionReady === true) hydrated++;
       if (!opts.isLocationEligible || opts.isLocationEligible(p)) deterministic++;
       if (/^(llm|ai)$/i.test(String(st.scoreKind || ''))) scored++;
-      if (evidenceReady(st, opts.threshold, opts.candidateFingerprint)) qualified++;
+      if (evidenceReadyForPosting(p, st, opts.threshold, opts.candidateFingerprint)) qualified++;
     }
     rows.push({
       family: String(family && family.name || 'unnamed'),
@@ -136,8 +181,15 @@ function summarizeSupply(corpus, opts = {}) {
     seniorityBand: opts.seniorityBand || 'early_mid',
     scored: 0,
     unscored: 0,
+    evidenceScored: 0,
+    heuristicPrescored: 0,
+    currentCandidateFingerprintScores: 0,
+    currentJdFingerprintScores: 0,
     atOrAboveThreshold: 0,
     evidenceQualified: 0,
+    evidenceQualifiedOverall: 0,
+    evidenceQualifiedFreshState: 0,
+    qualifiedUnattemptedPreLedger: 0,
     descriptionReady: 0,
     locationEligible: 0,
     locationMismatch: 0,
@@ -147,6 +199,15 @@ function summarizeSupply(corpus, opts = {}) {
     byScoreBucket: {}, byRoleFamily: {}, belowThresholdByRoleFamily: {},
     bySeniority: {}, belowThresholdBySeniority: {}, byAts: {}, byState: {},
     belowThresholdCauseInference: {},
+    qualificationFunnel: {
+      evidenceQualifiedOverall: 0,
+      freshUnattemptedState: 0,
+      locationEligible: 0,
+      supportedRouteReady: 0,
+      autonomousRouteReady: 0,
+      qualifiedUnattemptedPreLedger: 0,
+    },
+    preLedgerDropCounts: {},
   };
   for (const id of Object.keys(index)) {
     const p = index[id] || {};
@@ -177,11 +238,46 @@ function summarizeSupply(corpus, opts = {}) {
       continue;
     }
     result.scored++;
+    if (/^(llm|ai)$/i.test(String(st.scoreKind || ''))) result.evidenceScored++;
+    else result.heuristicPrescored++;
+    if (!candidateFingerprint || st.candidateFingerprint === candidateFingerprint) result.currentCandidateFingerprintScores++;
+    if (hasCurrentJdFingerprint(p, st)) result.currentJdFingerprintScores++;
     const bucket = score < 40 ? '0-39' : score < 55 ? '40-54' : score < 70 ? '55-69' : score < threshold ? `70-${threshold - 1}` : `${threshold}+`;
     inc(result.byScoreBucket, bucket);
     if (score >= threshold) {
       result.atOrAboveThreshold++;
-      if (evidenceReady(st, threshold, candidateFingerprint)) result.evidenceQualified++;
+      const qualifiedEvidence = evidenceReadyForPosting(p, st, threshold, candidateFingerprint);
+      if (qualifiedEvidence) {
+        result.evidenceQualified++;
+        result.evidenceQualifiedOverall++;
+        result.qualificationFunnel.evidenceQualifiedOverall++;
+        const freshState = String(st.status || 'sourced') === 'sourced' && Number(st.attempts || 0) === 0;
+        if (!freshState) {
+          inc(result.preLedgerDropCounts, 'prior_or_nonfresh_state');
+        } else {
+          result.evidenceQualifiedFreshState++;
+          result.qualificationFunnel.freshUnattemptedState++;
+          const locationOk = typeof opts.isLocationEligible !== 'function' || opts.isLocationEligible(p);
+          if (!locationOk) {
+            inc(result.preLedgerDropCounts, 'outside_target_location');
+          } else {
+            result.qualificationFunnel.locationEligible++;
+            const route = routeReadiness(p, opts);
+            if (!route.supported) {
+              inc(result.preLedgerDropCounts, route.reason || 'unsupported_route');
+            } else {
+              result.qualificationFunnel.supportedRouteReady++;
+              if (!route.autonomous) {
+                inc(result.preLedgerDropCounts, route.reason || 'assisted_channel');
+              } else {
+                result.qualificationFunnel.autonomousRouteReady++;
+                result.qualifiedUnattemptedPreLedger++;
+                result.qualificationFunnel.qualifiedUnattemptedPreLedger++;
+              }
+            }
+          }
+        }
+      }
     } else {
       inc(result.belowThresholdByRoleFamily, family);
       inc(result.belowThresholdBySeniority, level);
@@ -193,8 +289,9 @@ function summarizeSupply(corpus, opts = {}) {
   result.queryFamilies = queryFamilySummary(index, state, opts.queryFamilies, {
     threshold, now, candidateFingerprint, isLocationEligible: opts.isLocationEligible,
   });
-  result.note = 'Below-threshold causes are deterministic title/evidence diagnostics, not a substitute for resume/JD scoring.';
+  result.note = 'Below-threshold causes are deterministic title/evidence diagnostics, not a substitute for resume/JD scoring. qualifiedUnattemptedPreLedger still requires the apply planner ledger/blocked-host check before admission.';
   return result;
 }
 
-module.exports = { summarizeSupply, roleFamily, seniority, postingAgeDays, evidenceReady, queryMatchesPosting };
+module.exports = { summarizeSupply, roleFamily, seniority, postingAgeDays, evidenceReady,
+  evidenceReadyForPosting, hasCurrentJdFingerprint, routeReadiness, queryMatchesPosting };

@@ -39,16 +39,23 @@ module.exports = (t) => {
   t.eq(isEligibleLocation('Santa Clara, CA'), true, 'loc: CA');
   t.eq(isEligibleLocation('Remote - US', true), true, 'loc: US remote');
   t.eq(isEligibleLocation('Remote - EMEA'), false, 'loc: non-US remote excluded');
+  t.eq(isEligibleLocation('Abu Dhabi, UAE', true), false, 'loc: UAE remote flag cannot masquerade as US remote');
   t.eq(isEligibleLocation('Austin, TX'), false, 'loc: non-CA onsite excluded');
   t.eq(isEligibleUSLocation('Austin, TX'), true, 'relocation: US onsite accepted');
   t.eq(isEligibleUSLocation('Hillsboro, Oregon'), true, 'relocation: semiconductor hub accepted');
   t.eq(isEligibleUSLocation('Toronto, Ontario, Canada'), false, 'relocation: international onsite excluded');
   t.eq(isEligibleUSLocation('Singapore'), false, 'relocation: ambiguous international excluded');
+  t.eq(isEligibleUSLocation('Dubai, United Arab Emirates', true), false,
+    'relocation: explicitly international remote remains excluded');
   const bayTarget = { city: 'Santa Clara', state: 'CA', zip: '95051' };
   t.eq(isWithinTargetRadius('San Jose, CA', bayTarget, 60), true, 'target loc: nearby city inside configured radius');
   t.eq(isWithinTargetRadius('Irvine, CA', bayTarget, 60), false, 'target loc: far CA city outside configured radius');
   t.eq(isEligibleTargetLocation('Remote - US', true, { targetLocation: bayTarget, targetRadiusMiles: 60, remotePolicy: 'us_or_ca_remote_allowed' }), true,
     'target loc: US remote allowed by configured remote policy');
+  t.eq(isEligibleTargetLocation('Abu Dhabi, UAE', true,
+    { locationStrictness: 'hard', targetLocation: bayTarget, targetRadiusMiles: 60,
+      remotePolicy: 'us_or_ca_remote_allowed' }), false,
+  'target loc: US-remote preference rejects an explicitly UAE remote posting');
 
   // --- filter: ITAR ---
   t.eq(isItarExcluded('Process Engineer (US Person required, ITAR)'), true, 'itar: blocked');

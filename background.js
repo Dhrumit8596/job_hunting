@@ -14,7 +14,7 @@ try {
 // Nano (SLM) is disabled when DEV_MODE is true.
 const DEV_MODE = true;
 const DEV_SERVER = 'http://localhost:6174';
-const PJA_RUNTIME_BUILD = 'apply-observer-v3';
+const PJA_RUNTIME_BUILD = 'apply-observer-v4';
 
 function pjaSanitizeProfileForRuntimeQueue(profile) {
   const src = profile && typeof profile === 'object' ? profile : {};
@@ -62,12 +62,18 @@ chrome.storage.local.get('pja_answers', r => {
 async function pjaIngestCorpus(index, state, opts = {}) {
   if (!self.PJAIdb) return 0;
   const imported = await self.PJAIdb.importNormalized({ index: index || {}, state: state || {} },
-    { replaceMissing: opts.replaceMissing === true });
-  // Counting is a native IDB operation. A full corpusSummary here used to perform two more cursor
-  // scans after every import, making source→apply contend with its own 20MB diagnostic pass.
-  const count = await self.PJAIdb.count();
-  await new Promise(r => chrome.storage.local.set({ pja_job_corpus_count: count, pja_schema_version: 1 }, r));
-  return Object.assign({ count }, imported);
+    { replaceMissing: opts.replaceMissing === true,
+      importId: opts.importId || '', runId: opts.runId || '', beforeCommit: opts.beforeCommit });
+  // The import receipt is committed atomically with the corpus and must reach the observer before
+  // any derived bookkeeping. Counting/storage are useful UI hints, but cannot make an already
+  // committed import look unacknowledged or invite a duplicate retry.
+  setTimeout(() => {
+    (async () => {
+      const count = await self.PJAIdb.count();
+      await new Promise(r => chrome.storage.local.set({ pja_job_corpus_count: count, pja_schema_version: 1 }, r));
+    })().catch(e => console.warn('PJA: corpus bookkeeping failed after committed import', e && e.message || e));
+  }, 0);
+  return imported;
 }
 
 // Build the apply-set from the IndexedDB corpus (shared by the GET_APPLY_SET message + the WS
@@ -1298,6 +1304,79 @@ chrome.storage.local.get(['pja_schema_version', 'pja_shortlist', 'pja_jobs'], r 
 // When dev-server receives POST /reload, it sends 'reload' over the socket
 // and background.js calls chrome.runtime.reload() — reloading the whole extension.
 // Pings every 20s keep the MV3 service worker alive while the socket is open.
+function pjaExactCorpusImportReceipt(value, importId, runId) {
+  const candidate = value && value.receipt && typeof value.receipt === 'object'
+    ? value.receipt : value;
+  if (!candidate || candidate.committed !== true || String(candidate.importId || '') !== importId) return null;
+  if (runId && String(candidate.runId || '') !== runId) return null;
+  return candidate;
+}
+
+function pjaCorpusImportError(code) {
+  const error = new Error(code);
+  error.code = code;
+  return error;
+}
+
+async function pjaAssertCorpusImportOwnership(message) {
+  if (!self.PJASourceSafety) throw pjaCorpusImportError('source_safety_unavailable');
+  const runId = String(message && message.runId || '').trim();
+  const ownership = runId ? await new Promise(resolve =>
+    chrome.storage.local.get('pja_apply_run_control', resolve)) : {};
+  return self.PJASourceSafety.assertSourceDecision(self.PJASourceSafety.sourceDecision({
+    runId, deadlineMs: message && message.deadlineMs, now: Date.now(), connected: true,
+    controlObserved: !runId || Object.prototype.hasOwnProperty.call(ownership, 'pja_apply_run_control'),
+    control: ownership.pja_apply_run_control,
+  }));
+}
+
+// One description-rich corpus mutation may own IndexedDB at a time. A duplicate request with the
+// same exact identity joins the existing promise; a different import is rejected rather than
+// queued behind a stale owner. The durable receipt is checked before any mutation as well.
+let pjaCorpusImportFlight = null;
+async function pjaRunCorpusImport(message) {
+  const importId = String(message && message.importId || '').trim();
+  const runId = String(message && message.runId || '').trim();
+  if (!importId || importId.length > 160) throw pjaCorpusImportError('corpus_import_id_required');
+  if (!self.PJAIdb || typeof self.PJAIdb.getImportReceipt !== 'function') {
+    throw pjaCorpusImportError('corpus_import_receipt_store_unavailable');
+  }
+  if (pjaCorpusImportFlight) {
+    if (pjaCorpusImportFlight.importId === importId && pjaCorpusImportFlight.runId === runId) {
+      return pjaCorpusImportFlight.promise;
+    }
+    const busy = pjaCorpusImportError('corpus_import_in_progress');
+    busy.activeImportId = pjaCorpusImportFlight.importId;
+    throw busy;
+  }
+
+  const flight = { importId, runId, promise: null };
+  flight.promise = (async () => {
+    const existing = await self.PJAIdb.getImportReceipt(importId);
+    if (existing) {
+      const receipt = pjaExactCorpusImportReceipt(existing, importId, runId);
+      if (!receipt) throw pjaCorpusImportError('corpus_import_receipt_mismatch');
+      return { receipt, imported: receipt.imported, incoming: receipt.incoming,
+        retired: receipt.retired, total: receipt.total, alreadyCommitted: true };
+    }
+    await pjaAssertCorpusImportOwnership(message);
+    return pjaIngestCorpus(message.index || {}, message.state || {}, {
+      replaceMissing: message.replaceMissing === true,
+      importId,
+      runId,
+      // IDB invokes this as the last awaited action immediately before its read/write transaction.
+      // Re-reading durable control here closes the discovery→commit ownership race.
+      beforeCommit: () => pjaAssertCorpusImportOwnership(message),
+    });
+  })();
+  pjaCorpusImportFlight = flight;
+  try {
+    return await flight.promise;
+  } finally {
+    if (pjaCorpusImportFlight === flight) pjaCorpusImportFlight = null;
+  }
+}
+
 if (DEV_MODE) {
   let _wsReloadSocket = null;
   let _wsReloadPingTimer = null;
@@ -1343,25 +1422,33 @@ if (DEV_MODE) {
               })();
             } else if (msg.cmd === 'importCorpus') {
               // Description-rich corpora go directly to IndexedDB over this acknowledged WS path.
-              // Avoid mirroring multi-megabyte posting text into chrome.storage's small quota.
-              // Re-check durable run ownership at the mutation boundary: a server-side timeout or
-              // newer admission must not allow a stale source worker to write or retire records.
+              // Avoid mirroring multi-megabyte posting text into chrome.storage's small quota. The
+              // exact receipt is committed with the mutation; this reply never waits for UI counts.
               (async () => {
                 let data;
                 try {
-                  const ownership = msg.runId ? await new Promise(resolve =>
-                    chrome.storage.local.get('pja_apply_run_control', resolve)) : {};
-                  const decision = self.PJASourceSafety.sourceDecision({
-                    runId: msg.runId || '', deadlineMs: msg.deadlineMs, now: Date.now(), connected: true,
-                    controlObserved: !msg.runId || Object.prototype.hasOwnProperty.call(ownership, 'pja_apply_run_control'),
-                    control: ownership.pja_apply_run_control,
-                  });
-                  const imported = await self.PJASourceSafety.guardedMutation(decision, () =>
-                    pjaIngestCorpus(msg.index || {}, msg.state || {},
-                      { replaceMissing: msg.replaceMissing === true }));
+                  const imported = await pjaRunCorpusImport(msg);
                   data = Object.assign({ ok: true }, imported);
-                } catch (e) { data = { ok: false, error: e.code || e.message }; }
-                _wsReloadSocket.send(JSON.stringify({ cmd: 'importCorpusReply', reqId: msg.reqId, data }));
+                } catch (e) {
+                  data = { ok: false, error: e.code || e.message };
+                  if (e.activeImportId) data.activeImportId = e.activeImportId;
+                }
+                try { _wsReloadSocket.send(JSON.stringify({ cmd: 'importCorpusReply', reqId: msg.reqId, data })); } catch (_) {}
+              })();
+            } else if (msg.cmd === 'getCorpusImportReceipt') {
+              // Read only the caller's exact durable receipt. Never substitute a latest import.
+              (async () => {
+                const importId = String(msg.importId || '').trim();
+                let data;
+                try {
+                  if (!importId || !self.PJAIdb || typeof self.PJAIdb.getImportReceipt !== 'function') {
+                    throw pjaCorpusImportError(!importId ? 'corpus_import_id_required' : 'corpus_import_receipt_store_unavailable');
+                  }
+                  data = { ok: true, importId, receipt: await self.PJAIdb.getImportReceipt(importId) };
+                } catch (e) { data = { ok: false, importId, error: e.code || e.message }; }
+                try {
+                  _wsReloadSocket.send(JSON.stringify({ cmd: 'corpusImportReceiptReply', reqId: msg.reqId, data }));
+                } catch (_) {}
               })();
             } else if (msg.cmd === 'pingExtension') {
               try {
@@ -1424,10 +1511,17 @@ if (DEV_MODE) {
                     channel: j.channel, isEasyApply: !!j.isEasyApply, indeedApply: !!j.indeedApply,
                     listingUrl: j.listingUrl || j.url || '', applyUrl: j.applyUrl || '',
                     externalApplyUrl: j.externalApplyUrl || '', detectedAts: j.detectedAts || '',
+                    needsAtsResolution: !!j.needsAtsResolution,
                     description: String(j.description || '').slice(0, 20000),
                     descriptionStatus: j.descriptionStatus || '', pipelineStatus: j.pipelineStatus || '',
                     status: j.status || '', query: j.query || '', scrapedAt: j.scrapedAt || '',
-                    discoveredAt: j.discoveredAt || '', postedAt: j.postedAt || ''
+                    discoveredAt: j.discoveredAt || '',
+                    firstDiscoveredAt: j.firstDiscoveredAt || j.discoveredAt || '',
+                    lastSeenAt: j.lastSeenAt || j.scrapedAt || j.discoveredAt || '',
+                    matchedQueries: Array.isArray(j.matchedQueries) ? j.matchedQueries.slice(0, 20) : [],
+                    sourcePage: j.sourcePage || null,
+                    sourcePages: Array.isArray(j.sourcePages) ? j.sourcePages.slice(-40) : [],
+                    postedAt: j.postedAt || ''
                   }));
                 _wsReloadSocket.send(JSON.stringify({ cmd: 'browserShortlistReply', reqId: msg.reqId, data: { jobs, total: raw.length } }));
               });

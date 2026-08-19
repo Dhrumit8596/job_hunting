@@ -172,6 +172,27 @@
     return !Evidence || typeof Evidence.isCurrentPolicy !== 'function' || Evidence.isCurrentPolicy(state);
   }
 
+  function timestampMs(value) {
+    if (typeof value === 'number') return Number.isFinite(value) ? value : NaN;
+    const raw = String(value == null ? '' : value).trim();
+    if (!raw) return NaN;
+    if (/^\d+(?:\.\d+)?$/.test(raw)) {
+      const numeric = Number(raw);
+      return Number.isFinite(numeric) ? numeric : NaN;
+    }
+    const parsed = Date.parse(raw);
+    return Number.isFinite(parsed) ? parsed : NaN;
+  }
+
+  // discoveredAt is immutable provenance. Rediscovery advances lastSeenAt, which is the actual
+  // freshness contract used by sourcing and must also drive apply eligibility. Fall back only when
+  // an older record genuinely has no usable last-seen value.
+  function browserFreshnessAt(posting) {
+    const lastSeen = timestampMs(posting && posting.lastSeenAt);
+    if (Number.isFinite(lastSeen)) return lastSeen;
+    return timestampMs(posting && posting.discoveredAt);
+  }
+
   // Full corpus records carry the JD text; compact apply-planning projections deliberately carry
   // only a readiness bit. Treat both representations identically so removing description payloads
   // cannot change evidence gates or planning-drop diagnostics.
@@ -193,7 +214,7 @@
     const atsAllow = opts.atsAllow && opts.atsAllow.length ? new Set(opts.atsAllow.map(x => String(x).toLowerCase())) : null;
     const channelAllow = opts.channelAllow && opts.channelAllow.length ? new Set(opts.channelAllow.map(x => String(x).toLowerCase())) : null;
     if (maxBrowserAgeMs != null && /^(linkedin|indeed|glassdoor)$/i.test(String(p.sourcePlatform || p.ats || ''))) {
-      const seen = typeof p.discoveredAt === 'number' ? p.discoveredAt : Date.parse(p.discoveredAt || '');
+      const seen = browserFreshnessAt(p);
       if (!Number.isFinite(seen) || now - seen > maxBrowserAgeMs) return 'stale_browser_listing';
     }
     const fit = st.fitScore;
@@ -307,7 +328,7 @@
     for (const id of Object.keys(index)) {
       const p = index[id];
       if (maxBrowserAgeMs != null && /^(linkedin|indeed|glassdoor)$/i.test(String(p.sourcePlatform || p.ats || ''))) {
-        const seen = typeof p.discoveredAt === 'number' ? p.discoveredAt : Date.parse(p.discoveredAt || '');
+        const seen = browserFreshnessAt(p);
         if (!Number.isFinite(seen) || now - seen > maxBrowserAgeMs) continue;
       }
       const st = state[id] || { status: 'sourced', fitScore: null, attempts: 0 };
@@ -501,7 +522,7 @@
   const API = { buildApplySet, buildApplyPlan, resultToState, poolStatus, roleKey, applyUrlKey, linkedinJobId, stableRecordId,
     recordIdentityIds, appliedIdentity, greenhouseEmbedFallback, exceededBudget, externalJobBudgetOptions, queueJobKey,
     watchdogDecision, unsupportedAutonomousApplyReason, applyCapabilityStatus, hasUsableDescription,
-    evidenceMaterialGaps, hasCurrentScoringPolicy };
+    evidenceMaterialGaps, hasCurrentScoringPolicy, timestampMs, browserFreshnessAt };
   if (root) root.PJAApplySelect = API;
   if (typeof module !== 'undefined' && module.exports) module.exports = API;
 })(typeof self !== 'undefined' ? self : (typeof globalThis !== 'undefined' ? globalThis : this));

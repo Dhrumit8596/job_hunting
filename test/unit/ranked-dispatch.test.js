@@ -133,6 +133,13 @@ module.exports = async (t) => {
     source.includes("getApplyPlanningCorpus()") && source.includes("supplyAuditCorpusReply"),
   'ranked dispatch: supply audit uses the description-free whole-corpus projection');
 
+  t.ok(source.includes("msg.cmd === 'getBrowserShortlist'") &&
+    source.includes('needsAtsResolution: !!j.needsAtsResolution') &&
+    source.includes('firstDiscoveredAt: j.firstDiscoveredAt || j.discoveredAt') &&
+    source.includes('lastSeenAt: j.lastSeenAt || j.scrapedAt || j.discoveredAt') &&
+    source.includes('j.matchedQueries.slice(0, 20)') && source.includes('j.sourcePages.slice(-40)'),
+  'browser shortlist: bounded projection preserves immutable discovery and current rediscovery provenance');
+
   t.ok(source.includes("'pja_discovery_scan_tabs'") &&
     source.includes("chrome.tabs.create({ url: scanUrl, active: true }") &&
     source.includes('chrome.tabs.remove(priorId, () => createOwned())') &&
@@ -169,7 +176,7 @@ module.exports = async (t) => {
     exactStatus.includes('writeApplyRunReport(reportStorage || {}, { runId })'),
   'exact-run observer returns compact owned state, retries transport gaps, and exports only from observed detail');
 
-  t.ok(source.includes("const PJA_RUNTIME_BUILD = 'apply-observer-v3'") &&
+  t.ok(source.includes("const PJA_RUNTIME_BUILD = 'apply-observer-v4'") &&
     source.includes("msg.cmd === 'pingExtension'") && source.includes("cmd: 'pingExtensionReply'") &&
     dev.includes("wsAsk('pingExtension'") && dev.includes('extensionResponsive:') &&
     dev.includes('extensionBuild:'),

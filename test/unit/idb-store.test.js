@@ -10,6 +10,42 @@ const jobid = require(path.resolve(__dirname, '../../sourcing/jobid'));
 const { roleKey } = jobid;
 const { makeJob } = require(path.resolve(__dirname, '../../sourcing/normalize'));
 
+function requestResult(request) {
+  return new Promise((resolve, reject) => {
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error);
+  });
+}
+
+function deleteDatabase(name) {
+  return new Promise((resolve, reject) => {
+    const request = indexedDB.deleteDatabase(name);
+    request.onsuccess = () => resolve();
+    request.onerror = () => reject(request.error);
+    request.onblocked = () => reject(new Error('database deletion blocked'));
+  });
+}
+
+async function seedV1Database(posting, state) {
+  await deleteDatabase(idb.DB_NAME);
+  const request = indexedDB.open(idb.DB_NAME, 1);
+  request.onupgradeneeded = () => {
+    const db = request.result;
+    const index = db.createObjectStore('index', { keyPath: 'id' });
+    index.createIndex('roleKey', 'roleKey', { unique: false });
+    index.createIndex('company', 'company', { unique: false });
+    index.createIndex('modality', 'modality', { unique: false });
+    const mutable = db.createObjectStore('state', { keyPath: 'id' });
+    mutable.createIndex('fitScore', 'fitScore', { unique: false });
+    mutable.createIndex('status', 'status', { unique: false });
+    db.createObjectStore('meta', { keyPath: 'k' });
+    index.put(posting);
+    mutable.put(state);
+  };
+  const db = await requestResult(request);
+  db.close();
+}
+
 module.exports = async (t) => {
   // parity: idb-store inlines canonicalId/roleKey — they MUST match sourcing/jobid exactly,
   // else the corpus and the source-run would dedup on different keys.
@@ -22,6 +58,29 @@ module.exports = async (t) => {
     t.eq(idb.canonicalId(s), jobid.canonicalId(s), 'parity: canonicalId matches jobid (' + (s.ats || 'noats') + ')');
     t.eq(idb.roleKey(s), jobid.roleKey(s), 'parity: roleKey matches jobid');
   }
+
+  // Schema v2 upgrades an existing v1 corpus atomically and backfills the compact planning store.
+  // The canonical posting keeps its JD while the new planning row never contains that body.
+  const migratedDescription = 'Legacy full process-control requirements that must stay canonical only.';
+  await seedV1Database({
+    id: 'greenhouse:migrate-1', title: 'Legacy Process Engineer', company: 'Legacy Co',
+    location: 'San Jose, CA', roleKey: 'legacy co::legacy process engineer', mirrorKey: 'legacy co::legacy process engineer::san jose ca',
+    modality: 'api-registry', description: migratedDescription, descriptionStatus: 'complete',
+    descriptionFingerprint: idb.descriptionFingerprint(migratedDescription),
+  }, { id: 'greenhouse:migrate-1', status: 'sourced', fitScore: 77 });
+  const migratedDb = await idb.openDb();
+  t.eq(migratedDb.version, idb.SCHEMA_VERSION, 'idb v2 migration: database upgrades to current schema');
+  t.eq(migratedDb.objectStoreNames.contains(idb.PLANNING_STORE), true,
+    'idb v2 migration: compact planning store exists');
+  migratedDb.close();
+  const migratedPlanning = await idb.getApplyPlanningCorpus();
+  t.eq(migratedPlanning.total, 1, 'idb v2 migration: existing posting is backfilled into planning');
+  t.eq(migratedPlanning.index['greenhouse:migrate-1'].descriptionLength, migratedDescription.length,
+    'idb v2 migration: backfill carries description length metadata');
+  t.eq(Object.prototype.hasOwnProperty.call(migratedPlanning.index['greenhouse:migrate-1'], 'description'), false,
+    'idb v2 migration: backfilled projection is description-free');
+  t.eq((await idb.getJob('greenhouse:migrate-1')).description, migratedDescription,
+    'idb v2 migration: canonical JD remains intact');
 
   await idb.clearAll();
 
@@ -101,6 +160,8 @@ module.exports = async (t) => {
   const removed = await idb.excludeApplied([roleKey({ company: 'Co1', title: 'Process Engineer 1' })]);
   t.eq(removed, 1, 'idb: excludeApplied removes the applied role');
   t.eq(await idb.count(), 2507, 'idb: count drops by 1 after exclusion');
+  t.eq((await idb.getApplyPlanningCorpus()).index['greenhouse:1'], undefined,
+    'idb: excludeApplied removes the compact planning projection too');
 
   // GATE at 2,000+ scale
   const g = await idb.gateReport({ target: 200 });
@@ -117,6 +178,11 @@ module.exports = async (t) => {
   const richResult = await idb.upsertJobs([rich], 'browser-linkedin', () => ({ fitScore: 70 }));
   t.eq(richResult.dupById, 1, 'idb: duplicate id recognized during enrichment');
   t.eq((await idb.getJob('greenhouse:8')).description, rich.description, 'idb: richer duplicate description retained');
+  const richProjection = (await idb.getApplyPlanningCorpus()).index['greenhouse:8'];
+  t.eq(richProjection.descriptionLength, rich.description.length,
+    'idb: enrichment synchronizes compact planning metadata');
+  t.eq(richProjection.descriptionFingerprint, idb.descriptionFingerprint(rich.description),
+    'idb: enrichment synchronizes the planning fingerprint without storing JD text');
 
   // Distinct ids from the same ATS survive even if employer/title/location are identical.
   const req2 = makeJob({ id: 'req-2', title: 'Process Engineer 8', company: 'Co8', location: 'San Jose, CA', ats: 'greenhouse' });
@@ -193,6 +259,55 @@ module.exports = async (t) => {
   t.eq((await idb.getJob('workday:hydrate-1')).description, 'Short current requirements.',
     'idb: stale longer description does not override a populated current primary-source JD');
 
+  // Exact import receipts are committed in the same transaction as canonical, planning, and state
+  // rows, and can be reconciled later without re-sending an ambiguous import.
+  const receiptResult = await idb.importNormalized({
+    index: { 'greenhouse:receipt-1': { id: 'greenhouse:receipt-1', company: 'Receipt Co', title: 'Yield Engineer',
+      location: 'Fremont, CA', roleKey: 'receipt co::yield engineer', modality: 'api-registry',
+      description: 'Yield, SPC, and metrology requirements.', descriptionStatus: 'complete' } },
+    state: { 'greenhouse:receipt-1': { fitScore: 79, scoreKind: 'llm', status: 'sourced' } },
+  }, { importId: 'source-import-123', runId: 'apply-run-456' });
+  const receipt = await idb.getImportReceipt('source-import-123');
+  t.eq({ importId: receipt.importId, runId: receipt.runId, committed: receipt.committed,
+    imported: receipt.imported, incoming: receipt.incoming, retired: receipt.retired },
+  { importId: 'source-import-123', runId: 'apply-run-456', committed: true,
+    imported: 1, incoming: 1, retired: 0 },
+  'idb import receipt: exact run/import identity and committed counts are durable');
+  t.eq(receipt.total, await idb.count(), 'idb import receipt: committed total matches corpus count');
+  t.eq(receiptResult.receipt, receipt, 'idb import receipt: import returns the atomically stored receipt');
+  t.eq(typeof receipt.committedAt, 'number', 'idb import receipt: committed timestamp is recorded');
+  t.eq(await idb.getImportReceipt('source-import-unknown'), null,
+    'idb import receipt: an unknown exact import id is not inferred from another receipt');
+  t.ok((await idb.getApplyPlanningCorpus()).index['greenhouse:receipt-1'],
+    'idb import receipt: compact projection committed with the receipt');
+
+  // Ownership is rechecked after all read/preparation work and before opening the write transaction.
+  // Rejection must preserve both the prior corpus and the absence of a receipt.
+  const countBeforeRejectedImport = await idb.count();
+  let beforeCommitContext = null;
+  let rejectedMessage = '';
+  try {
+    await idb.importNormalized({
+      index: { 'greenhouse:must-not-write': { id: 'greenhouse:must-not-write', company: 'No Write Co',
+        title: 'Process Engineer', roleKey: 'no write co::process engineer', modality: 'api-registry',
+        description: 'This row must never commit.' } },
+      state: { 'greenhouse:must-not-write': { fitScore: 99, status: 'sourced' } },
+    }, { importId: 'source-import-rejected', runId: 'apply-run-stale', replaceMissing: true,
+      beforeCommit: async context => { beforeCommitContext = context; throw new Error('run ownership changed'); } });
+  } catch (err) { rejectedMessage = err.message; }
+  t.eq(rejectedMessage, 'run ownership changed', 'idb beforeCommit: authority rejection propagates');
+  t.eq(beforeCommitContext, { importId: 'source-import-rejected', runId: 'apply-run-stale',
+    incoming: 1, replaceMissing: true }, 'idb beforeCommit: callback receives exact bounded identity');
+  t.eq(await idb.count(), countBeforeRejectedImport,
+    'idb beforeCommit: rejected authoritative replacement performs no canonical writes or retirements');
+  const afterRejectedPlan = await idb.getApplyPlanningCorpus();
+  t.eq(afterRejectedPlan.index['greenhouse:must-not-write'], undefined,
+    'idb beforeCommit: rejected import creates no planning projection');
+  t.ok(afterRejectedPlan.index['greenhouse:receipt-1'],
+    'idb beforeCommit: rejected replaceMissing does not retire an existing projection');
+  t.eq(await idb.getImportReceipt('source-import-rejected'), null,
+    'idb beforeCommit: rejected import writes no receipt');
+
   // Phase E: corpusSummary status breakdown + matching count
   const sum = await idb.corpusSummary({ topN: 3, matchThreshold: 60 });
   t.ok(sum.statusCounts && sum.statusCounts.sourced > 0, 'corpusSummary: statusCounts.sourced present');
@@ -207,10 +322,21 @@ module.exports = async (t) => {
   const replaced = await idb.importNormalized({
     index: { 'greenhouse:fresh-1': { id: 'greenhouse:fresh-1', title: 'Fresh Role', company: 'NewCo', location: 'CA', ats: 'greenhouse', roleKey: 'newco::fresh role', modality: 'api-registry' } },
     state: { 'greenhouse:fresh-1': { fitScore: 60, status: 'sourced' } },
-  }, { replaceMissing: true });
+  }, { replaceMissing: true, importId: 'source-import-replace', runId: 'source-run-replace' });
   t.ok(replaced.retired > 0, 'idb: authoritative refresh reports retired absent records');
   t.eq(await idb.getJob('greenhouse:stale-1'), null, 'idb: absent/closed posting cannot remain sourced forever');
   t.eq(await idb.count(), 1, 'idb: replacement leaves only the current run corpus');
+  const replacementReceipt = await idb.getImportReceipt('source-import-replace');
+  t.eq({ total: replacementReceipt.total, retired: replacementReceipt.retired },
+    { total: 1, retired: replaced.retired },
+    'idb: authoritative replacement receipt records the same atomic retirement and total');
+  const replacementPlanning = await idb.getApplyPlanningCorpus();
+  t.eq(replacementPlanning.total, 1, 'idb: authoritative replacement retires compact projections');
+  t.ok(replacementPlanning.index['greenhouse:fresh-1'], 'idb: replacement synchronizes the incoming projection');
+  t.eq(replacementPlanning.index['greenhouse:stale-1'], undefined,
+    'idb: retired canonical row cannot remain in compact planning');
 
   await idb.clearAll();
+  t.eq((await idb.getApplyPlanningCorpus()).total, 0, 'idb: clearAll clears compact planning rows');
+  t.eq(await idb.getImportReceipt('source-import-123'), null, 'idb: clearAll clears import receipts');
 };

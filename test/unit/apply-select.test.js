@@ -6,7 +6,7 @@ const Evidence = require(path.resolve(__dirname, '../../scoring-evidence'));
 const { buildApplySet, buildApplyPlan, resultToState, poolStatus, roleKey, greenhouseEmbedFallback, exceededBudget,
   externalJobBudgetOptions,
   watchdogDecision, queueJobKey, unsupportedAutonomousApplyReason, applyCapabilityStatus,
-  hasUsableDescription, applyUrlKey, linkedinJobId } = require(path.resolve(__dirname, '../../sourcing/apply-select'));
+  hasUsableDescription, applyUrlKey, linkedinJobId, browserFreshnessAt } = require(path.resolve(__dirname, '../../sourcing/apply-select'));
 
 function corpus(entries) {
   const index = {}, state = {};
@@ -60,6 +60,21 @@ module.exports = (t) => {
   t.eq(plan.dropCounts.state_dead, 1, 'buildApplyPlan explains dead posting drops');
   t.eq(plan.dropCounts.missing_apply_url, 1, 'buildApplyPlan explains missing apply URL drops');
   t.ok(plan.dropped.every(j => j.reason && j.company != null && j.title != null), 'buildApplyPlan emits compact developer-readable drop examples');
+
+  const freshnessNow = Date.parse('2026-08-19T12:00:00Z');
+  const rediscovered = corpus([{ id: 'linkedin:fresh', company: 'Fresh Co', title: 'Process Engineer',
+    applyUrl: 'https://job-boards.greenhouse.io/fresh/jobs/1', fit: 80, ats: 'linkedin' }]);
+  Object.assign(rediscovered.index['linkedin:fresh'], { sourcePlatform: 'linkedin',
+    discoveredAt: freshnessNow - 10 * 86400000, lastSeenAt: String(freshnessNow - 3600000) });
+  t.eq(browserFreshnessAt(rediscovered.index['linkedin:fresh']), freshnessNow - 3600000,
+    'browser freshness: numeric-string lastSeenAt is parsed as the rediscovery time');
+  t.eq(buildApplySet(rediscovered, { threshold: 75, maxBrowserAgeMs: 48 * 3600000,
+    now: freshnessNow }).map(j => j.id), ['linkedin:fresh'],
+  'browser freshness: a listing rediscovered within the window remains eligible despite old immutable discovery provenance');
+  rediscovered.index['linkedin:fresh'].lastSeenAt = String(freshnessNow - 3 * 86400000);
+  t.eq(buildApplyPlan(rediscovered, { threshold: 75, maxBrowserAgeMs: 48 * 3600000,
+    now: freshnessNow }).dropCounts.stale_browser_listing, 1,
+  'browser freshness: a genuinely old lastSeenAt remains a stale planning drop');
 
   // dedup vs applied log (role-key)
   const set2 = buildApplySet(c, { threshold: 70, appliedRoleKeys: [roleKey({ company: 'Carbon', title: 'Process Engineer' })] });

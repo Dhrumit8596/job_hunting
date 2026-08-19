@@ -632,6 +632,75 @@ function safeReportId(value) {
     .slice(0, 80) || `run-${Date.now()}`;
 }
 
+function makeCorpusImportId(runId) {
+  const owner = safeReportId(String(runId || '').trim() || 'standalone').slice(0, 32);
+  return safeReportId(`corpus-${owner}-${Date.now()}-${crypto.randomBytes(6).toString('hex')}`);
+}
+
+function exactCommittedCorpusImportReceipt(value, importId, runId) {
+  const candidate = value && value.receipt && typeof value.receipt === 'object'
+    ? value.receipt : value;
+  if (!candidate || candidate.committed !== true || String(candidate.importId || '') !== importId) return null;
+  if (runId && String(candidate.runId || '') !== runId) return null;
+  return candidate;
+}
+
+async function observeExactCorpusImportReceipt(importId, runId, options = {}) {
+  const attempts = Math.max(1, Math.min(3, Number(options.attempts) || 3));
+  const timeoutMs = Math.max(250, Math.min(10000, Number(options.timeoutMs) || 5000));
+  let lastError = 'corpus_import_receipt_not_committed';
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    const observed = await wsAsk('getCorpusImportReceipt', { importId },
+      'corpusImportReceiptReply', timeoutMs);
+    const receipt = exactCommittedCorpusImportReceipt(observed, importId, runId);
+    if (receipt) return { receipt, attempts: attempt, error: null };
+    lastError = observed && observed.error || 'corpus_import_receipt_not_committed';
+    if (attempt < attempts) await new Promise(resolve => setTimeout(resolve, attempt * 250));
+  }
+  return { receipt: null, attempts, error: lastError };
+}
+
+function corpusImportStateUnavailable(importId, observationError) {
+  const error = SourceSafety.sourceError('corpus_import_state_unavailable',
+    'corpus_import_state_unavailable', 503);
+  error.importId = importId;
+  error.observerError = observationError || 'corpus_import_receipt_not_committed';
+  error.retryable = true;
+  error.retryScope = 'receipt_observation';
+  error.resubmit = false;
+  return error;
+}
+
+async function resolveCorpusImportReply(reply, importId, runId) {
+  const directReceipt = exactCommittedCorpusImportReceipt(reply, importId, runId);
+  if (directReceipt) return { reply, receipt: directReceipt, reconciled: false };
+  if (reply && reply.receipt) {
+    const mismatch = SourceSafety.sourceError('corpus_import_receipt_mismatch',
+      'corpus_import_receipt_mismatch', 409);
+    mismatch.importId = importId;
+    throw mismatch;
+  }
+  const reason = String(reply && reply.error || '').trim();
+  const uncertain = !reason || /^(timeout|no extension connected|extension_disconnected)$/i.test(reason);
+  if (uncertain) {
+    // The timed-out import may already have committed. Observe only this exact identity and never
+    // resend the description-rich mutation.
+    const observed = await observeExactCorpusImportReceipt(importId, runId);
+    if (observed.receipt) {
+      return { reply: Object.assign({ ok: true, receipt: observed.receipt,
+        reconciledFromReceipt: true }, observed.receipt), receipt: observed.receipt, reconciled: true };
+    }
+    throw corpusImportStateUnavailable(importId, observed.error);
+  }
+  if (/^(source_ownership_lost|sourcing_deadline_exceeded)$/.test(reason)) {
+    throw SourceSafety.sourceError(reason, reason, reason === 'sourcing_deadline_exceeded' ? 408 : 409);
+  }
+  const error = SourceSafety.sourceError(reason, reason,
+    /^(corpus_import_in_progress|corpus_import_receipt_mismatch)$/.test(reason) ? 409 : 500);
+  error.importId = importId;
+  throw error;
+}
+
 function compactReportJob(job, fallbackStatus) {
   const row = job && typeof job === 'object' ? job : {};
   return {
@@ -2988,6 +3057,7 @@ ${(description || '').slice(0, 6000)}`;
           browserDiscoveryMaxPages: o.browserDiscoveryMaxPages,
           browserDiscoveryPerQueryTimeoutMs: o.browserDiscoveryPerQueryTimeoutMs,
         };
+        if (o.source !== false && sourceBody.write) sourceBody.importId = makeCorpusImportId(requestedRunId);
         if (o._ownedRunControl) {
           sourceBody.runId = requestedRunId;
           sourceBody.sourcingBudgetMs = workflowBudgets.sourcingBudgetMs;
@@ -3109,6 +3179,7 @@ ${(description || '').slice(0, 6000)}`;
     let body = '';
     req.on('data', d => body += d);
     req.on('end', async () => {
+      let sourceImportId = '';
       try {
         const o = body ? JSON.parse(body) : {};
         const write = o.write !== false;
@@ -3119,6 +3190,11 @@ ${(description || '').slice(0, 6000)}`;
         });
         const guardOptions = { runId: SourceSafety.optionalRunId(o.runId, safeReportId),
           deadlineMs: sourceWindow.deadlineMs };
+        const suppliedImportId = String(o.importId || '').trim();
+        if (suppliedImportId && !/^[a-zA-Z0-9_.-]{1,80}$/.test(suppliedImportId)) {
+          throw SourceSafety.sourceError('invalid_corpus_import_id', 'invalid_corpus_import_id', 400);
+        }
+        sourceImportId = write ? (suppliedImportId || makeCorpusImportId(guardOptions.runId)) : '';
         await assertSourcingAllowed(guardOptions, 'before_source_storage');
         const sourceResult = await SourceSafety.withObservedSourcingStorage(
           (_keys, timeoutMs) => getSourcingStorageFromExtension(timeoutMs),
@@ -3241,29 +3317,33 @@ ${(description || '').slice(0, 6000)}`;
             SourceSafety.remainingDeadlineMs(sourceWindow.deadlineMs)));
           const retirement = SearchPolicy.corpusRetirementDecision(searchPolicy, o.replaceMissing,
             report.gate, o.autonomousApplyOnly === true);
-          const imported = await wsAsk('importCorpus', { index: store.index, state: store.state,
+          const importReply = await wsAsk('importCorpus', { index: store.index, state: store.state,
+            importId: sourceImportId,
             runId: guardOptions.runId || null,
             deadlineMs: sourceWindow.deadlineMs,
             // Only retire records absent from this run when the fresh corpus itself passed its
             // supply/quality gate; a transient partial run must not wipe healthy prior coverage.
             replaceMissing: retirement.replaceMissing }, 'importCorpusReply', importTimeoutMs);
-          if (!imported || imported.error || imported.ok === false) {
-            const importReason = imported && imported.error || 'corpus_import_unacknowledged';
-            if (/^(source_ownership_lost|sourcing_deadline_exceeded|extension_disconnected)$/.test(importReason)) {
-              throw SourceSafety.sourceError(importReason, importReason,
-                importReason === 'sourcing_deadline_exceeded' ? 408 : importReason === 'extension_disconnected' ? 503 : 409);
-            }
-            throw new Error('corpus import failed: ' + importReason);
-          }
-          wrote = imported.imported != null ? imported.imported : Object.keys(store.index).length;
+          const resolvedImport = await resolveCorpusImportReply(importReply, sourceImportId,
+            guardOptions.runId || '');
+          const imported = resolvedImport.reply;
+          const receipt = resolvedImport.receipt;
+          wrote = Number(receipt.imported || 0);
           report.import = {
+            importId: receipt.importId,
+            runId: receipt.runId || '',
+            committed: true,
+            committedAt: receipt.committedAt,
+            acknowledgement: resolvedImport.reconciled ? 'exact_receipt_reconciliation' : 'direct_reply',
             imported: wrote,
-            added: Number(imported.added || 0),
-            newlyHydrated: Number(imported.newlyHydrated || 0),
-            descriptionUpdated: Number(imported.descriptionUpdated || 0),
-            unchanged: Number(imported.unchanged || 0),
-            preservedEvidence: Number(imported.preservedEvidence || 0),
-            retired: Number(imported.retired || 0),
+            incoming: Number(receipt.incoming || 0),
+            total: Number(receipt.total || 0),
+            added: imported.added == null ? null : Number(imported.added),
+            newlyHydrated: imported.newlyHydrated == null ? null : Number(imported.newlyHydrated),
+            descriptionUpdated: imported.descriptionUpdated == null ? null : Number(imported.descriptionUpdated),
+            unchanged: imported.unchanged == null ? null : Number(imported.unchanged),
+            preservedEvidence: imported.preservedEvidence == null ? null : Number(imported.preservedEvidence),
+            retired: Number(receipt.retired || 0),
             retirementAuthoritative: retirement.authoritative,
           };
         }
@@ -3276,7 +3356,12 @@ ${(description || '').slice(0, 6000)}`;
       } catch (e) {
         console.error('[PJA] /source-v2 error:', e.message);
         res.writeHead(e.statusCode || 500, CORS);
-        res.end(JSON.stringify({ success: false, error: e.code || e.message }));
+        res.end(JSON.stringify({ success: false, error: e.code || e.message,
+          importId: e.importId || sourceImportId || null,
+          retryable: e.retryable === true,
+          retryScope: e.retryScope || null,
+          resubmit: e.resubmit === true,
+          observerError: e.observerError || null }));
       }
     });
     return;
@@ -3297,7 +3382,7 @@ ${(description || '').slice(0, 6000)}`;
         const { summarizeSupply } = require('./sourcing/supply-audit');
         const hardLocation = /^hard$/i.test(String(targetFilter.locationStrictness || '')) &&
           (targetFilter.targetLocation.city || targetFilter.targetLocation.state || targetFilter.targetLocation.zip);
-        const audit = summarizeSupply(corpus, {
+        const auditOptions = {
           threshold: o.threshold != null ? Number(o.threshold) : 75,
           candidateFingerprint: runtimeCandidateFingerprint,
           seniorityBand: SearchPolicy.inferCandidateSeniority(targetFilter.profile || {}, targetFilter.prefs || {}),
@@ -3305,7 +3390,11 @@ ${(description || '').slice(0, 6000)}`;
           isLocationEligible: hardLocation
             ? posting => isEligibleTargetLocation(posting.location, posting.remote, targetFilter)
             : () => true,
-        });
+        };
+        // LinkedIn Easy Apply is an assisted route and remains excluded unless the caller makes
+        // that policy choice explicit; supply diagnostics must mirror the intended live planner.
+        if (o.includeAssisted === true) auditOptions.includeAssisted = true;
+        const audit = summarizeSupply(corpus, auditOptions);
         res.writeHead(200, CORS);
         res.end(JSON.stringify({ success: true, audit }));
       } catch (e) {

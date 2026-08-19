@@ -14,7 +14,7 @@ const DOMAIN_EXCLUDE = /\b(software|firmware|machine learning|\bml\b|\bai\b|arti
 
 // California or US-remote.
 const CA_LOC = /\b(california|\bca\b|san jose|santa clara|sunnyvale|fremont|alameda|oakland|san francisco|south san francisco|\bssf\b|menlo park|palo alto|mountain view|pleasanton|milpitas|hayward|newark|san diego|irvine|carlsbad|roseville|sacramento|livermore|union city|redwood city|foster city|san carlos|emeryville|berkeley)\b/i;
-const NON_US_LOC = /\b(canada|ontario|quebec|british columbia|vancouver|toronto|montreal|mexico|europe|united kingdom|\buk\b|ireland|germany|france|italy|spain|netherlands|sweden|poland|romania|israel|india|china|taiwan|japan|korea|singapore|australia|brazil|argentina|emea|apac|latam)\b/i;
+const NON_US_LOC = /\b(canada|ontario|quebec|british columbia|vancouver|toronto|montreal|mexico|europe|united kingdom|\buk\b|ireland|germany|france|italy|spain|netherlands|sweden|poland|romania|israel|india|china|taiwan|japan|korea|singapore|australia|brazil|argentina|united arab emirates|uae|abu dhabi|dubai|emea|apac|apj|latam)\b/i;
 const US_LOC = /\b(united states|u\.s\.|usa|alabama|alaska|arizona|arkansas|california|colorado|connecticut|delaware|florida|georgia|hawaii|idaho|illinois|indiana|iowa|kansas|kentucky|louisiana|maine|maryland|massachusetts|michigan|minnesota|mississippi|missouri|montana|nebraska|nevada|new hampshire|new jersey|new mexico|new york|north carolina|north dakota|ohio|oklahoma|oregon|pennsylvania|rhode island|south carolina|south dakota|tennessee|texas|utah|vermont|virginia|washington|west virginia|wisconsin|wyoming|district of columbia|washington,? dc|phoenix|chandler|hillsboro|portland|austin|dallas|boise|albany|malta,? ny|manassas)\b/i;
 const US_STATE_CODE = /(?:^|[,\s])(AL|AK|AZ|AR|CA|CO|CT|DE|FL|GA|HI|ID|IL|IN|IA|KS|KY|LA|ME|MD|MA|MI|MN|MS|MO|MT|NE|NV|NH|NJ|NM|NY|NC|ND|OH|OK|OR|PA|RI|SC|SD|TN|TX|UT|VT|VA|WA|WV|WI|WY|DC)(?:\s|,|$)/;
 const CITY_COORDS = {
@@ -91,7 +91,7 @@ function isEligibleLocation(location, remote) {
   const loc = String(location || '');
   if (/\b(remote)\b/i.test(loc) || remote) {
     // US-remote only — drop explicitly non-US remote.
-    if (/\b(emea|apac|apj|europe|united kingdom|\buk\b|india|canada|germany|france|italy|spain|china|japan|singapore|australia|brazil|mexico|latam)\b/i.test(loc)) return false;
+    if (NON_US_LOC.test(loc)) return false;
     return true;
   }
   return CA_LOC.test(loc);

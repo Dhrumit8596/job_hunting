@@ -11,7 +11,9 @@
 // chrome.storage.local blob ceiling. Immutable posting in `index`, mutable state in `state`.
 (function (root) {
   const DB_NAME = 'pja_jobs_db';
-  const SCHEMA_VERSION = 1;
+  const SCHEMA_VERSION = 2;
+  const PLANNING_STORE = 'planning';
+  const IMPORT_RECEIPT_PREFIX = 'corpusImport:';
   const MAX_APPLY_DESCRIPTION_BATCH = 10;
   let Evidence = (root && root.PJAScoringEvidence) || null;
   if (!Evidence && typeof require !== 'undefined') { try { Evidence = require('./scoring-evidence'); } catch (_) {} }
@@ -229,6 +231,23 @@
     };
   }
 
+  function exactImportId(value) {
+    const id = String(value || '').trim();
+    if (id.length > 512) throw new Error('importId exceeds 512 characters');
+    return id;
+  }
+
+  function exactRunId(value) {
+    const id = String(value || '').trim();
+    if (id.length > 512) throw new Error('runId exceeds 512 characters');
+    return id;
+  }
+
+  function importReceiptKey(importId) {
+    const id = exactImportId(importId);
+    return id ? IMPORT_RECEIPT_PREFIX + id : '';
+  }
+
   function idb() {
     if (typeof indexedDB !== 'undefined' && indexedDB) return indexedDB;
     if (root && root.indexedDB) return root.indexedDB;
@@ -240,22 +259,44 @@
   function openDb() {
     return new Promise((resolve, reject) => {
       const req = idb().open(DB_NAME, SCHEMA_VERSION);
-      req.onupgradeneeded = () => {
+      req.onupgradeneeded = event => {
         const db = req.result;
+        let indexStore;
         if (!db.objectStoreNames.contains('index')) {
-          const idx = db.createObjectStore('index', { keyPath: 'id' });
-          idx.createIndex('roleKey', 'roleKey', { unique: false });
-          idx.createIndex('company', 'company', { unique: false });
-          idx.createIndex('modality', 'modality', { unique: false });
-        }
+          indexStore = db.createObjectStore('index', { keyPath: 'id' });
+          indexStore.createIndex('roleKey', 'roleKey', { unique: false });
+          indexStore.createIndex('company', 'company', { unique: false });
+          indexStore.createIndex('modality', 'modality', { unique: false });
+        } else indexStore = req.transaction.objectStore('index');
         if (!db.objectStoreNames.contains('state')) {
           const st = db.createObjectStore('state', { keyPath: 'id' });
           st.createIndex('fitScore', 'fitScore', { unique: false });
           st.createIndex('status', 'status', { unique: false });
         }
         if (!db.objectStoreNames.contains('meta')) db.createObjectStore('meta', { keyPath: 'k' });
+        let planningStore;
+        if (!db.objectStoreNames.contains(PLANNING_STORE)) {
+          planningStore = db.createObjectStore(PLANNING_STORE, { keyPath: 'id' });
+        } else planningStore = req.transaction.objectStore(PLANNING_STORE);
+
+        // v2 separates the compact immutable planning projection from canonical JD bodies. Upgrade
+        // the existing corpus in the version-change transaction so readers can never observe a
+        // partially backfilled planning store. A cursor keeps migration memory bounded.
+        if (event.oldVersion < 2) {
+          const cur = indexStore.openCursor();
+          cur.onsuccess = () => {
+            const c = cur.result;
+            if (!c) return;
+            planningStore.put(applyPostingProjection(c.value));
+            c.continue();
+          };
+        }
       };
-      req.onsuccess = () => resolve(req.result);
+      req.onsuccess = () => {
+        const db = req.result;
+        db.onversionchange = () => db.close();
+        resolve(db);
+      };
       req.onerror = () => reject(req.error);
     });
   }
@@ -276,13 +317,15 @@
       const { ids, records, mirrors, directUrls } = await existingKeys(db);
       const seenIds = new Set(ids);
       let added = 0, dupById = 0, dupByRole = 0, enriched = 0;
-      const t = db.transaction(['index', 'state'], 'readwrite');
+      const t = db.transaction(['index', 'state', PLANNING_STORE], 'readwrite');
       const idxS = t.objectStore('index'), stS = t.objectStore('state');
+      const planningS = t.objectStore(PLANNING_STORE);
       for (const job of jobs || []) {
         if (!job) continue;
         const id = canonicalId(job), rk = roleKey(job), mk = mirrorKey(job);
         if (seenIds.has(id)) {
           dupById++; const merged = mergePosting(records[id], job, modality); records[id] = merged; idxS.put(merged);
+          planningS.put(applyPostingProjection(merged));
           const mergedKey = merged.applyUrl && !isAggregatorUrl(merged.applyUrl) ? applyUrlKey(merged.applyUrl) : '';
           if (mergedKey) directUrls.set(mergedKey, id);
           enriched++; continue;
@@ -290,10 +333,11 @@
         const directKey = job.applyUrl && !isAggregatorUrl(job.applyUrl) ? applyUrlKey(job.applyUrl) : '';
         const directId = directKey && directUrls.get(directKey), direct = directId && records[directId];
         if (direct) {
-          dupByRole++; const merged = mergePosting(direct, job, modality); records[directId] = merged; idxS.put(merged); enriched++; continue;
+          dupByRole++; const merged = mergePosting(direct, job, modality); records[directId] = merged; idxS.put(merged);
+          planningS.put(applyPostingProjection(merged)); enriched++; continue;
         }
         const posting = postingRecord(id, rk, mk, job, modality);
-        idxS.put(posting); records[id] = posting;
+        idxS.put(posting); planningS.put(applyPostingProjection(posting)); records[id] = posting;
         const st = typeof stateFor === 'function' ? (stateFor(job) || {}) : {};
         stS.put(Object.assign({ id, status: 'sourced', fitScore: null }, st));
         seenIds.add(id); if (!mirrors.has(mk)) mirrors.set(mk, id);
@@ -311,6 +355,12 @@
   async function importNormalized(store, opts = {}) {
     const db = await openDb();
     try {
+      const importId = exactImportId(opts.importId);
+      const runId = exactRunId(opts.runId);
+      const incomingIndex = store && store.index && typeof store.index === 'object' ? store.index : {};
+      const incomingState = store && store.state && typeof store.state === 'object' ? store.state : {};
+      const incomingIds = Object.keys(incomingIndex);
+
       // Read existing posting/state first so a refresh can retain a richer browser description,
       // application progress, and still-valid LLM evidence.
       const existing = {}, existingIndex = {};
@@ -324,36 +374,41 @@
         cur.onsuccess = () => { const c = cur.result; if (!c) return res(); existing[c.value.id] = c.value; c.continue(); };
         cur.onerror = () => rej(cur.error);
       });
-      const t = db.transaction(['index', 'state'], 'readwrite');
-      const idxS = t.objectStore('index'), stS = t.objectStore('state');
+
+      // Prepare the complete mutation set before the ownership callback. The callback is the final
+      // awaited operation before the readwrite transaction is opened, so a rejected/stale run can
+      // never leave a partial corpus, projection, retirement, or receipt behind.
+      const retireIds = [];
+      const postings = [];
+      const states = [];
       let n = 0, added = 0, newlyHydrated = 0, descriptionUpdated = 0, unchanged = 0;
       let preserved = 0, preservedEvidence = 0, retired = 0;
       if (opts.replaceMissing === true) {
-        const incomingIds = new Set(Object.keys(store.index || {}));
+        const incomingSet = new Set(incomingIds);
         for (const id of Object.keys(existingIndex)) {
-          if (incomingIds.has(id)) continue;
-          idxS.delete(id); stS.delete(id); retired++;
+          if (incomingSet.has(id)) continue;
+          retireIds.push(id); retired++;
         }
       }
-      for (const id of Object.keys(store.index || {})) {
-        const posting = refreshPosting(store.index[id], existingIndex[id]);
-        idxS.put(posting);
-        const incoming = (store.state && store.state[id]) || { status: 'sourced', fitScore: null };
+      const sourceChangedAt = Date.now();
+      for (const id of incomingIds) {
+        const posting = Object.assign({}, refreshPosting(incomingIndex[id], existingIndex[id]), { id });
+        const incoming = incomingState[id] || { status: 'sourced', fitScore: null };
         const prev = existing[id];
-        let merged = Object.assign({ id }, incoming);
+        let merged = Object.assign({}, incoming, { id });
         const incomingFp = posting.descriptionFingerprint || descriptionFingerprint(posting.description);
         merged.descriptionFingerprint = incomingFp;
         if (!existingIndex[id]) {
           merged.sourcePriority = 'newly_sourced';
-          merged.sourceChangedAt = Date.now();
+          merged.sourceChangedAt = sourceChangedAt;
           added++;
         } else if (!descriptionReady(existingIndex[id]) && descriptionReady(posting)) {
           merged.sourcePriority = 'newly_hydrated';
-          merged.sourceChangedAt = Date.now();
+          merged.sourceChangedAt = sourceChangedAt;
           newlyHydrated++;
         } else if (descriptionFingerprint(existingIndex[id].description) !== incomingFp) {
           merged.sourcePriority = 'description_updated';
-          merged.sourceChangedAt = Date.now();
+          merged.sourceChangedAt = sourceChangedAt;
           descriptionUpdated++;
         } else {
           merged.sourcePriority = 'unchanged';
@@ -376,12 +431,46 @@
           }
           preserved++;
         }
-        stS.put(merged);
+        postings.push(posting);
+        states.push(merged);
         n++;
       }
-      await txDone(t);
-      await setMeta('schemaVersion', SCHEMA_VERSION);
-      return { imported: n, added, newlyHydrated, descriptionUpdated, unchanged, preserved, preservedEvidence, retired };
+
+      if (typeof opts.beforeCommit === 'function') {
+        await opts.beforeCommit({ importId, runId, incoming: incomingIds.length,
+          replaceMissing: opts.replaceMissing === true });
+      }
+
+      const total = opts.replaceMissing === true ? n : Object.keys(existingIndex).length + added;
+      const receipt = importId ? {
+        importId, runId, committed: true, imported: n, incoming: incomingIds.length,
+        retired, total, committedAt: Date.now(),
+      } : null;
+      const t = db.transaction(['index', 'state', PLANNING_STORE, 'meta'], 'readwrite');
+      const done = txDone(t);
+      const idxS = t.objectStore('index'), stS = t.objectStore('state');
+      const planningS = t.objectStore(PLANNING_STORE), metaS = t.objectStore('meta');
+      try {
+        for (const id of retireIds) {
+          idxS.delete(id);
+          stS.delete(id);
+          planningS.delete(id);
+        }
+        for (let i = 0; i < postings.length; i++) {
+          idxS.put(postings[i]);
+          planningS.put(applyPostingProjection(postings[i]));
+          stS.put(states[i]);
+        }
+        metaS.put({ k: 'schemaVersion', v: SCHEMA_VERSION });
+        if (receipt) metaS.put({ k: importReceiptKey(importId), v: receipt });
+      } catch (error) {
+        try { t.abort(); } catch (_) {}
+        try { await done; } catch (_) {}
+        throw error;
+      }
+      await done;
+      return { imported: n, added, newlyHydrated, descriptionUpdated, unchanged,
+        preserved, preservedEvidence, retired, total, receipt };
     } finally { db.close(); }
   }
 
@@ -431,23 +520,20 @@
 
   // Description-free corpus snapshot for apply selection and planning-drop diagnostics. Both
   // stores are read in one transaction so posting/state metadata comes from the same IDB snapshot.
-  // Cursor values still arrive one record at a time under schema v1, but JD text is never retained
-  // in the returned corpus or serialized into the initial apply-set response.
+  // Schema v2 keeps this projection materialized, so JD text is never cloned into this read or
+  // serialized into the initial apply-set response.
   async function getApplyPlanningCorpus() {
     const db = await openDb();
     try {
       const index = {}, state = {};
-      const t = db.transaction(['index', 'state'], 'readonly');
-      // Native getAll avoids one extension event round-trip per record. We still immediately
-      // project away JD bodies, so the compact result and WS payload remain description-free.
+      const t = db.transaction([PLANNING_STORE, 'state'], 'readonly');
+      // Native getAll avoids one extension event round-trip per record. The planning store is
+      // already description-free, so canonical JD bodies are neither cloned nor retained here.
       const [postingRows, stateRows] = await Promise.all([
-        reqP(t.objectStore('index').getAll()),
+        reqP(t.objectStore(PLANNING_STORE).getAll()),
         reqP(t.objectStore('state').getAll()),
       ]);
-      for (const row of postingRows) {
-        const projected = applyPostingProjection(row);
-        index[projected.id] = projected;
-      }
+      for (const row of postingRows) index[row.id] = row;
       for (const row of stateRows) {
         const projected = applyStateProjection(row);
         state[projected.id] = projected;
@@ -514,6 +600,11 @@
     finally { db.close(); }
   }
 
+  async function getImportReceipt(importId) {
+    const key = importReceiptKey(importId);
+    return key ? getMeta(key) : null;
+  }
+
   async function excludeApplied(appliedRoleKeys) {
     const applied = appliedRoleKeys instanceof Set ? appliedRoleKeys : new Set(appliedRoleKeys || []);
     const db = await openDb();
@@ -524,8 +615,12 @@
         cur.onsuccess = () => { const c = cur.result; if (!c) return res(); if (applied.has(c.value.roleKey)) toDelete.push(c.value.id); c.continue(); };
         cur.onerror = () => rej(cur.error);
       });
-      const t = db.transaction(['index', 'state'], 'readwrite');
-      for (const id of toDelete) { t.objectStore('index').delete(id); t.objectStore('state').delete(id); }
+      const t = db.transaction(['index', 'state', PLANNING_STORE], 'readwrite');
+      for (const id of toDelete) {
+        t.objectStore('index').delete(id);
+        t.objectStore('state').delete(id);
+        t.objectStore(PLANNING_STORE).delete(id);
+      }
       await txDone(t);
       return toDelete.length;
     } finally { db.close(); }
@@ -610,16 +705,22 @@
 
   async function clearAll() {
     const db = await openDb();
-    try { const t = db.transaction(['index', 'state', 'meta'], 'readwrite'); ['index', 'state', 'meta'].forEach(s => t.objectStore(s).clear()); await txDone(t); }
+    try {
+      const stores = ['index', 'state', PLANNING_STORE, 'meta'];
+      const t = db.transaction(stores, 'readwrite');
+      stores.forEach(s => t.objectStore(s).clear());
+      await txDone(t);
+    }
     finally { db.close(); }
   }
 
-  const API = { DB_NAME, SCHEMA_VERSION, MAX_APPLY_DESCRIPTION_BATCH,
+  const API = { DB_NAME, SCHEMA_VERSION, PLANNING_STORE, MAX_APPLY_DESCRIPTION_BATCH,
     canonicalId, roleKey, mirrorKey, descriptionFingerprint,
     applyPostingProjection, applyStateProjection,
     openDb, upsertJobs, importNormalized,
     migrateFromLegacy, count, getAll, getApplyPlanningCorpus, getApplyDescriptions,
-    updateState, getJob, setMeta, getMeta, excludeApplied, corpusSummary, gateReport, clearAll };
+    updateState, getJob, setMeta, getMeta, getImportReceipt,
+    excludeApplied, corpusSummary, gateReport, clearAll };
 
   if (root) root.PJAIdb = API;                                   // service worker: self.PJAIdb
   if (typeof module !== 'undefined' && module.exports) module.exports = API; // node: require
