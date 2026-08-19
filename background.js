@@ -14,7 +14,7 @@ try {
 // Nano (SLM) is disabled when DEV_MODE is true.
 const DEV_MODE = true;
 const DEV_SERVER = 'http://localhost:6174';
-const PJA_RUNTIME_BUILD = 'apply-observer-v2';
+const PJA_RUNTIME_BUILD = 'apply-observer-v3';
 
 function pjaSanitizeProfileForRuntimeQueue(profile) {
   const src = profile && typeof profile === 'object' ? profile : {};
@@ -1371,6 +1371,21 @@ if (DEV_MODE) {
             } else if (msg.cmd === 'getStorage') {
               chrome.storage.local.get(msg.keys, data => {
                 _wsReloadSocket.send(JSON.stringify({ cmd: 'storageReply', reqId: msg.reqId, data }));
+              });
+            } else if (msg.cmd === 'getSourcingStorageSnapshot') {
+              const keys = self.PJASourceSafety && self.PJASourceSafety.SOURCE_STORAGE_KEYS || [];
+              chrome.storage.local.get(keys, storage => {
+                let data;
+                try {
+                  data = { observed: true,
+                    storage: self.PJASourceSafety.compactSourcingStorage(storage || {}) };
+                } catch (e) {
+                  data = { observed: false, error: e && e.message || String(e || 'sourcing snapshot failed') };
+                }
+                try {
+                  _wsReloadSocket.send(JSON.stringify({ cmd: 'sourcingStorageSnapshotReply',
+                    reqId: msg.reqId, data }));
+                } catch (_) {}
               });
             } else if (msg.cmd === 'getApplyRunSnapshot') {
               // Exact-run observation is intentionally summarized inside the extension. Sending

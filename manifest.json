@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Job Application Assistant",
-  "version": "1.0.7",
+  "version": "1.0.8",
   "description": "AI-powered job search assistant for semiconductor/medtech roles",
   "permissions": [
     "storage",

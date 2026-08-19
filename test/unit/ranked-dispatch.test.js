@@ -169,11 +169,18 @@ module.exports = async (t) => {
     exactStatus.includes('writeApplyRunReport(reportStorage || {}, { runId })'),
   'exact-run observer returns compact owned state, retries transport gaps, and exports only from observed detail');
 
-  t.ok(source.includes("const PJA_RUNTIME_BUILD = 'apply-observer-v2'") &&
+  t.ok(source.includes("const PJA_RUNTIME_BUILD = 'apply-observer-v3'") &&
     source.includes("msg.cmd === 'pingExtension'") && source.includes("cmd: 'pingExtensionReply'") &&
     dev.includes("wsAsk('pingExtension'") && dev.includes('extensionResponsive:') &&
     dev.includes('extensionBuild:'),
   'health: connected and command-responsive extension state are reported separately with a build marker');
+
+  t.ok(source.includes("msg.cmd === 'getSourcingStorageSnapshot'") &&
+    source.includes('compactSourcingStorage(storage || {})') &&
+    source.includes("cmd: 'sourcingStorageSnapshotReply'") &&
+    dev.includes("wsAsk('getSourcingStorageSnapshot'") &&
+    dev.includes('getSourcingStorageFromExtension(timeoutMs)'),
+  'sourcing observer: profile/dedupe state is compacted inside the worker before WebSocket transfer');
 
   t.ok(source.includes('Acknowledge the durable run install before network/tab launch work') &&
     source.includes('setTimeout(() => {') && source.includes('pjaDispatchRankedCurrent(msg.master).catch'),

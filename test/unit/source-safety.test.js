@@ -35,6 +35,26 @@ module.exports = async t => {
   } catch (error) { unavailable = error.code; }
   t.eq(unavailable, 'source_storage_unavailable',
     'source safety: exhausted storage reads fail closed with an explicit service error');
+  const compact = Safety.compactSourcingStorage({
+    pja_profile: { city: 'San Jose', yearsExperience: '4', email: 'private@example.test', resumeText: 'private' },
+    pja_prefs: { searchTitles: ['Process Engineer'], targetRadiusMiles: 50, screeningAnswers: { private: true } },
+    pja_applied_log: [{ jobId: 'job-1', company: 'Example', title: 'Engineer', status: 'submitted',
+      diagnostic: { phase: 'submit_observation', html: '<private>' }, privatePayload: 'omit' }],
+    pja_application_ledger: { schemaVersion: 1, events: { e1: { eventId: 'e1', jobId: 'job-2',
+      status: 'failed', reason: 'ranked_watchdog_timeout', submitAttempted: false, phase: 'pre_submit',
+      diagnostic: { phase: 'pre_submit', submitAttempted: false, screenshot: 'omit' } } } },
+  });
+  t.eq(compact.pja_profile, { city: 'San Jose', yearsExperience: '4' },
+    'source safety: sourcing snapshot retains only location/seniority profile inputs');
+  t.ok(compact.pja_applied_log[0].jobId === 'job-1' && !('privatePayload' in compact.pja_applied_log[0]) &&
+    !('html' in compact.pja_applied_log[0].diagnostic),
+  'source safety: applied identities survive while unrelated diagnostic/private payloads are omitted');
+  t.eq(compact.pja_application_ledger.events.e1,
+    { eventId: 'e1', jobId: 'job-2', status: 'failed', reason: 'ranked_watchdog_timeout',
+      submitAttempted: false, phase: 'pre_submit', diagnostic: { phase: 'pre_submit', submitAttempted: false } },
+  'source safety: ledger retry classification fields survive compact sourcing observation');
+  t.eq(Safety.storageObserved(Safety.compactSourcingStorage({ pja_jobs: [] })), false,
+    'source safety: compaction preserves missing profile/preferences fail-closed semantics');
   let browserDiscoveryCalls = 0, importCalls = 0;
   try {
     await Safety.withObservedSourcingStorage(async () => ({}), async () => {

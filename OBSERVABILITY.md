@@ -77,6 +77,10 @@ must not admit a replacement run.
 `extensionResponsive:false` is not sufficient for live-run admission; `extensionBuild` identifies
 the worker command contract currently loaded.
 
+Sourcing reads a separate compact worker snapshot containing search/location preferences and only
+the application-identity fields required by dedupe/retry policy. Full profile history, diagnostics,
+and applied-log payloads are not serialized merely to admit discovery.
+
 The exact-run endpoint is valid as soon as `/apply-all` returns: before a browser queue exists it
 reads the acknowledged `pja_apply_run_control` record and reports `sourcing` or `planning`. If that
 worker fails or times out, the same run becomes terminal `failed` and retains a bounded error;

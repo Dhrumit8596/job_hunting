@@ -62,6 +62,69 @@
     return !!(storage && (Object.prototype.hasOwnProperty.call(storage, 'pja_profile') ||
       Object.prototype.hasOwnProperty.call(storage, 'pja_prefs')));
   }
+  function pick(source, keys) {
+    const value = source && typeof source === 'object' ? source : {};
+    const out = {};
+    for (const key of keys) {
+      if (Object.prototype.hasOwnProperty.call(value, key)) out[key] = value[key];
+    }
+    return out;
+  }
+  function compactAppliedRecord(record) {
+    const row = record && typeof record === 'object' ? record : {};
+    const compact = pick(row, [
+      'eventId', 'id', 'jobId', 'sourceJobId', 'runId', 'applyUrl', 'url',
+      'company', 'companyName', 'title', 'role', 'jobTitle', 'status', 'result',
+      'reason', 'skipReason', 'success', 'submitAttempted', 'phase',
+      'confirmationSource', 'confirmedBy', 'confirmedAt', 'confirmedEmail',
+      'confirmationEmailId', 'emailMessageId', 'messageId', 'applicationAt',
+      'occurredAt', 'appliedAt',
+    ]);
+    if (row.diagnostic && typeof row.diagnostic === 'object') {
+      compact.diagnostic = pick(row.diagnostic, ['phase', 'submitAttempted']);
+    }
+    return compact;
+  }
+  // Sourcing needs only search/location preferences and stable application identities. Sending
+  // full profile history plus description-rich diagnostics and logs over the observer socket can
+  // time out before discovery begins. Preserve every field used by dedupe/retry policy while
+  // excluding unrelated personal and diagnostic payloads.
+  function compactSourcingStorage(storage) {
+    const source = storage && typeof storage === 'object' ? storage : {};
+    const ledger = source.pja_application_ledger && typeof source.pja_application_ledger === 'object'
+      ? source.pja_application_ledger : {};
+    const events = ledger.events && typeof ledger.events === 'object' ? ledger.events : {};
+    const queue = source.pja_ext_queue && typeof source.pja_ext_queue === 'object' ? source.pja_ext_queue : {};
+    const results = queue.results && typeof queue.results === 'object' ? queue.results : {};
+    const compact = {
+      pja_jobs: Array.isArray(source.pja_jobs) ? source.pja_jobs.map(compactAppliedRecord) : [],
+      pja_ext_queue: { results: {
+        applied: Array.isArray(results.applied) ? results.applied.map(compactAppliedRecord) : [],
+      } },
+      pja_applied_log: Array.isArray(source.pja_applied_log)
+        ? source.pja_applied_log.map(compactAppliedRecord) : [],
+      pja_application_ledger: {
+        schemaVersion: ledger.schemaVersion || 1,
+        events: Object.fromEntries(Object.entries(events)
+          .map(([key, event]) => [key, compactAppliedRecord(event)])),
+      },
+      pja_source_yield: source.pja_source_yield || null,
+      pja_scan_coverage: source.pja_scan_coverage || null,
+    };
+    if (Object.prototype.hasOwnProperty.call(source, 'pja_profile')) {
+      compact.pja_profile = pick(source.pja_profile, [
+        'city', 'state', 'zip', 'country', 'willingToRelocate', 'yearsExperience',
+      ]);
+    }
+    if (Object.prototype.hasOwnProperty.call(source, 'pja_prefs')) {
+      compact.pja_prefs = pick(source.pja_prefs, [
+        'searchTitles', 'searchSeniority', 'targetLocationLabel', 'targetLocationCity',
+        'targetLocationState', 'targetLocationZip', 'targetLocationCountry',
+        'targetRadiusMiles', 'locationStrictness', 'remotePolicy',
+      ]);
+    }
+    return compact;
+  }
   async function readObservedSourcingStorage(read, options = {}) {
     const attempts = Math.max(1, Math.min(5, Number(options.attempts) || 3));
     const timeoutMs = Math.max(250, Math.min(15000, Number(options.timeoutMs) || 5000));
@@ -121,7 +184,7 @@
   }
 
   const api = { SOURCE_STORAGE_KEYS, sourceError, remainingDeadlineMs, optionalRunId, sourceDecision,
-    assertSourceDecision, guardedMutation, storageObserved, readObservedSourcingStorage,
+    assertSourceDecision, guardedMutation, storageObserved, compactSourcingStorage, readObservedSourcingStorage,
     withObservedSourcingStorage, calculateWorkflowBudgets, standaloneDeadline };
   if (root) root.PJASourceSafety = api;
   if (typeof module !== 'undefined' && module.exports) module.exports = api;

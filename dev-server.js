@@ -329,8 +329,14 @@ function getStorageFromExtension(keys, timeoutMs = 4000) {
 
 async function readSourcingStorage() {
   return SourceSafety.readObservedSourcingStorage(
-    (keys, timeoutMs) => getStorageFromExtension(keys, timeoutMs),
-    { attempts: 3, timeoutMs: 5000, retryDelayMs: 500 });
+    (_keys, timeoutMs) => getSourcingStorageFromExtension(timeoutMs),
+    { attempts: 3, timeoutMs: 15000, retryDelayMs: 500 });
+}
+
+async function getSourcingStorageFromExtension(timeoutMs = 15000) {
+  const data = await wsAsk('getSourcingStorageSnapshot', {}, 'sourcingStorageSnapshotReply', timeoutMs);
+  return data && data.observed === true && data.storage && typeof data.storage === 'object'
+    ? data.storage : {};
 }
 
 async function sourcingGuardDecision(options = {}) {
@@ -3115,7 +3121,7 @@ ${(description || '').slice(0, 6000)}`;
           deadlineMs: sourceWindow.deadlineMs };
         await assertSourcingAllowed(guardOptions, 'before_source_storage');
         const sourceResult = await SourceSafety.withObservedSourcingStorage(
-          (keys, timeoutMs) => getStorageFromExtension(keys, timeoutMs),
+          (_keys, timeoutMs) => getSourcingStorageFromExtension(timeoutMs),
           async (st, storageRead) => {
         const { pjaCollectAppliedRecords, appliedIdentity } = require('./sourcing/dedupe');
         const applied = appliedIdentity(pjaCollectAppliedRecords(st, {
@@ -3262,7 +3268,7 @@ ${(description || '').slice(0, 6000)}`;
           };
         }
         return { wrote, report, storageReadAttempts: storageRead.attempts };
-          }, { attempts: 3, timeoutMs: 5000, retryDelayMs: 500 });
+          }, { attempts: 3, timeoutMs: 15000, retryDelayMs: 500 });
         const { wrote, report } = sourceResult;
         console.log(`[PJA] /source-v2: unique=${report.gate.uniqueIds} modalities=${report.gate.modalities.join('+')} gate=${report.gate.pass ? 'PASS' : 'FAIL'}`);
         res.writeHead(200, CORS);
