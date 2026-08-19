@@ -105,6 +105,8 @@ Exact sourcing carries `runId` plus an absolute deadline and rechecks both betwe
 each acknowledged browser-batch write, and at the service-worker import boundary. Lost/terminal
 ownership or expiration prevents shortlist refresh, corpus import, and retirement. `/source-v2` uses bounded observed-storage retries and returns
 `source_storage_unavailable` before discovery when profile/preferences keys cannot be observed.
+Standalone sourcing must keep an omitted `runId` empty; sanitizing a blank value into a generated
+identifier falsely claims exact-run ownership and causes `source_ownership_lost` before discovery.
 
 ## BUG 13 — Browser pages could report success before persistence — ✅ FIXED
 **Was:** LinkedIn and Indeed treated an eight-second missing callback as success, marked IDs seen
@@ -115,4 +117,6 @@ source-namespaced idempotent merge, and explicit `persistence_failed` terminaliz
 pagination persists each page before navigation and requires changed result IDs plus useful yield.
 Rediscovery now updates `lastSeenAt` and query/page provenance while preserving unchanged JD/evidence;
 new or changed descriptions invalidate scoring fields. Never restore the old timeout-as-success or
-pre-acknowledgement seen-set behavior.
+pre-acknowledgement seen-set behavior. LinkedIn's trailing accessibility badge text (`with
+verification`) is removed at both collection and corpus-normalization boundaries so official-ATS
+identity matching uses the employer's actual title.

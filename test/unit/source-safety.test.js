@@ -3,6 +3,10 @@
 const Safety = require('../../sourcing/source-safety');
 
 module.exports = async t => {
+  t.eq(Safety.optionalRunId('', value => `safe-${value}`), '',
+    'source safety: standalone source-v2 keeps a missing runId empty instead of inventing ownership');
+  t.eq(Safety.optionalRunId('apply 123', value => value.replace(/\s+/g, '-')), 'apply-123',
+    'source safety: an explicit exact runId is still sanitized');
   t.ok(Safety.SOURCE_STORAGE_KEYS.includes('pja_application_ledger') &&
     Safety.SOURCE_STORAGE_KEYS.includes('pja_profile') && Safety.SOURCE_STORAGE_KEYS.includes('pja_prefs'),
   'source safety: unified storage preflight includes profile/preferences and the ledger dedupe key');

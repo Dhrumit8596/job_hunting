@@ -74,20 +74,28 @@
            null;
   }
 
+  // LinkedIn's current React cards expose the verified-company badge through accessibility
+  // text. In some layouts that text is concatenated onto the job title as "with verification".
+  // It is UI metadata, not part of the employer's title, and retaining it breaks conservative
+  // title matching against the employer's official ATS record.
+  function cleanLinkedInTitle(value) {
+    return String(value || '').replace(/\s+with\s+verification\s*$/i, '').replace(/\s+/g, ' ').trim();
+  }
+
   function getJobTitleFromCard(card) {
     // Try aria-label on the primary link first (most stable), then class-based
     const link = card.querySelector('a[href*="/jobs/view/"]');
-    if (link?.getAttribute('aria-label')) return link.getAttribute('aria-label').trim();
+    if (link?.getAttribute('aria-label')) return cleanLinkedInTitle(link.getAttribute('aria-label'));
     const legacy = (card.querySelector([
       '.job-card-list__title--link',   // current LinkedIn class
       '.job-card-list__title',          // older variant
       '.base-search-card__title',       // public job search pages
       'a.job-card-container__link'
     ].join(','))?.textContent || '').trim();
-    if (legacy) return legacy;
+    if (legacy) return cleanLinkedInTitle(legacy);
     const dismiss = card.querySelector('button[aria-label^="Dismiss "][aria-label$=" job"]')
       ?.getAttribute('aria-label') || '';
-    return dismiss.replace(/^Dismiss\s+/i, '').replace(/\s+job$/i, '').trim();
+    return cleanLinkedInTitle(dismiss.replace(/^Dismiss\s+/i, '').replace(/\s+job$/i, ''));
   }
 
   function getJobCompanyFromCard(card) {
@@ -229,11 +237,11 @@
       '.jobs-unified-top-card__job-title',
       '.job-details-jobs-unified-top-card__job-title'
     ].join(','))?.textContent || '').trim();
-    if (legacy) return legacy;
+    if (legacy) return cleanLinkedInTitle(legacy);
     const visibleId = String(location.href).match(/(?:currentJobId=|\/jobs\/view\/)(\d+)(?:[/?&#]|$)/i)?.[1] || '';
     const link = Array.from(document.querySelectorAll('a[href*="/jobs/view/"]')).find(a =>
       !visibleId || String(a.getAttribute('href') || '').includes(`/jobs/view/${visibleId}/`));
-    return (link?.textContent || '').trim();
+    return cleanLinkedInTitle(link?.textContent || '');
   }
 
   function getDetailPanelCompany() {
@@ -745,6 +753,7 @@
   // Expose collection helpers for unit tests (virtualisation accumulation is the core fix).
   if (typeof window !== 'undefined') {
     window.pjaExtractCardMeta = extractCardMeta;
+    window.pjaCleanLinkedInTitle = cleanLinkedInTitle;
     window.pjaAccumulateRenderedCards = accumulateRenderedCards;
     window.pjaDecodeApplyUrl = pjaDecodeApplyUrl;
     window.pjaWaitForLinkedInDescription = waitForDetailPanelDescription;

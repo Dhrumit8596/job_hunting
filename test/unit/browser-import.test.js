@@ -6,6 +6,7 @@ const {
   normalizeBrowserJob,
   normalizeBrowserJobs,
   browserSourceKey,
+  cleanBrowserTitle,
 } = require('../../sourcing/browser-import');
 
 module.exports = (t) => {
@@ -42,6 +43,14 @@ module.exports = (t) => {
   t.eq(li.sourceRefs[0].sourcePlatform, 'linkedin', 'browser-import: source ref platform');
   t.eq(li.sourceRefs[0].hydrationStatus, 'hydration_success', 'browser-import: source ref carries hydration status');
   t.eq(li.provenance.modality, 'browser-linkedin', 'browser-import: modality retained in provenance');
+  t.eq(cleanBrowserTitle('Process Engineer with verification', 'linkedin'), 'Process Engineer',
+    'browser-import: LinkedIn verification badge is stripped at the corpus boundary');
+  t.eq(cleanBrowserTitle('Verification Engineer', 'linkedin'), 'Verification Engineer',
+    'browser-import: legitimate verification role names remain intact');
+  const pollutedLinkedIn = normalizeBrowserJob({ ...linkedInRaw, id: '4430362421',
+    title: 'Wafer Inspection Engineer with verification' });
+  t.eq(pollutedLinkedIn.title, 'Wafer Inspection Engineer',
+    'browser-import: normalized corpus title cannot retain LinkedIn badge text');
 
   const longDescription = 'x'.repeat(20100);
   const liExternal = normalizeBrowserJob({

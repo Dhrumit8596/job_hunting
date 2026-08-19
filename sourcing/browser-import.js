@@ -27,6 +27,13 @@ function lower(value) {
   return String(value || '').trim().toLowerCase();
 }
 
+function cleanBrowserTitle(value, platform) {
+  const title = clean(value);
+  return platform === 'linkedin'
+    ? title.replace(/\s+with\s+verification\s*$/i, '').trim()
+    : title;
+}
+
 function supportedPlatform(value) {
   const p = lower(value).replace(/^browser[-_:]/, '');
   return PLATFORMS.has(p) ? p : '';
@@ -255,7 +262,7 @@ function normalizeBrowserJob(raw, opts = {}) {
   const hydration = normalizeHydration(raw, desc, sourcePlatform);
   const base = makeJob({
     id: sourceJobId,
-    title: raw.title,
+    title: cleanBrowserTitle(raw.title, sourcePlatform),
     company: raw.company || raw.companyName,
     location: raw.location,
     remote: raw.remote,
@@ -357,6 +364,7 @@ module.exports = {
   PLATFORMS,
   CHANNELS,
   detectBrowserPlatform,
+  cleanBrowserTitle,
   sourceId,
   normalizeChannel,
   normalizeBrowserJob,

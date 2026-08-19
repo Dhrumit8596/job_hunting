@@ -3019,7 +3019,8 @@ ${(description || '').slice(0, 6000)}`;
           sourcingBudgetMs: o.sourcingBudgetMs,
           maximumBudgetMs: o.runId ? Number(o.sourcingBudgetMs) || 25 * 60 * 1000 : 25 * 60 * 1000,
         });
-        const guardOptions = { runId: safeReportId(o.runId || ''), deadlineMs: sourceWindow.deadlineMs };
+        const guardOptions = { runId: SourceSafety.optionalRunId(o.runId, safeReportId),
+          deadlineMs: sourceWindow.deadlineMs };
         await assertSourcingAllowed(guardOptions, 'before_source_storage');
         const sourceResult = await SourceSafety.withObservedSourcingStorage(
           (keys, timeoutMs) => getStorageFromExtension(keys, timeoutMs),

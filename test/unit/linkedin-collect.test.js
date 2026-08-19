@@ -72,6 +72,10 @@ module.exports = (t) => {
   const w = load();
   t.ok(typeof w.pjaAccumulateRenderedCards === 'function', 'collect: accumulate exported');
   t.ok(typeof w.pjaExtractCardMeta === 'function', 'collect: extractCardMeta exported');
+  t.eq(w.pjaCleanLinkedInTitle('Process Engineer with verification'), 'Process Engineer',
+    'collect: verified-company badge text is not retained in the job title');
+  t.eq(w.pjaCleanLinkedInTitle('Verification Engineer'), 'Verification Engineer',
+    'collect: a legitimate verification title remains intact');
 
   // 20 jobs exist, but only a 7-card window is ever in the DOM at once.
   const all = [];
@@ -106,6 +110,13 @@ module.exports = (t) => {
   t.eq(reactCard.company, 'Headway Technologies', 'collect: React card company captured');
   t.eq(reactCard.location, 'Milpitas, CA (On-site)', 'collect: React card location captured');
   t.eq(reactCard.isEasyApply, true, 'collect: React card Easy Apply channel captured');
+
+  render(w, [makeReactCard(w, { id: 4451913134, title: 'Process Engineer with verification',
+    company: 'Example Semiconductor', location: 'San Jose, CA', easy: false })]);
+  const verifiedBadgeMap = new Map();
+  w.pjaAccumulateRenderedCards(verifiedBadgeMap);
+  t.eq(verifiedBadgeMap.get('4451913134').title, 'Process Engineer',
+    'collect: React card extraction behaviorally strips the trailing verification badge');
 
   // re-accumulating the same window adds nothing (idempotent / deduped by jobId)
   const before = map.size;

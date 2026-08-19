@@ -27,6 +27,11 @@
     if (!Number.isFinite(deadline)) return 0;
     return Math.max(0, deadline - Number(now));
   }
+  function optionalRunId(value, sanitize) {
+    const raw = String(value || '').trim();
+    if (!raw) return '';
+    return typeof sanitize === 'function' ? String(sanitize(raw) || '') : raw;
+  }
   function sourceDecision(options = {}) {
     const now = options.now == null ? Date.now() : Number(options.now);
     if (remainingDeadlineMs(options.deadlineMs, now) <= 0) {
@@ -115,7 +120,7 @@
     return { deadlineMs, budgetMs: deadlineMs - now };
   }
 
-  const api = { SOURCE_STORAGE_KEYS, sourceError, remainingDeadlineMs, sourceDecision,
+  const api = { SOURCE_STORAGE_KEYS, sourceError, remainingDeadlineMs, optionalRunId, sourceDecision,
     assertSourceDecision, guardedMutation, storageObserved, readObservedSourcingStorage,
     withObservedSourcingStorage, calculateWorkflowBudgets, standaloneDeadline };
   if (root) root.PJASourceSafety = api;
