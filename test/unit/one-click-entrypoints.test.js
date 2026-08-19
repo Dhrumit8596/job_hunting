@@ -148,6 +148,7 @@ module.exports = (t) => {
     dev.includes('resume_not_configured') &&
     dev.includes('pre_apply_storage_guard') &&
     dev.includes('workdayAttemptTimeoutMs') &&
+    dev.includes('SourceSafety.resolveWorkdayAttemptTimeoutMs(o)') &&
     dev.includes('for (let attempt = 0; attempt < 3; attempt += 1)') &&
     dev.includes("Object.prototype.hasOwnProperty.call(st, 'pja_resume_filename')") &&
     dev.includes('extension_not_connected') &&

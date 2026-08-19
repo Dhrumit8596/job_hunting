@@ -75,6 +75,7 @@ module.exports = async (t) => {
   'workday auth: background exposes MAIN-world Workday step advance fallback');
   t.ok(workdayAuthSource.includes('function workdayAuthScreenSummary(label)') &&
     workdayAuthSource.includes('pja_wd_auth_diag') &&
+    workdayAuthSource.includes('Phase snapshots intentionally carry no run/job identity') &&
     workdayAuthSource.includes("type: 'CAPTURE_APPLY_DIAGNOSTIC'") &&
     workdayAuthSource.includes('function classifyCreateRejectedAfterSignin') &&
     workdayAuthSource.includes("signInResult === 'unverified'") &&
@@ -89,6 +90,25 @@ module.exports = async (t) => {
   'workday auth: only explicit Workday unverified-account errors trigger Gmail verification after create-account redirects to sign-in');
 
   const authWindow = loadContentScript(path.join(ROOT, 'content/workday-auth.js'));
+  const verifyOwner = { runId: 'run-1', jobId: 'workday:R1',
+    applyUrl: 'https://acme.wd1.myworkdayjobs.com/job/R1' };
+  t.eq(authWindow.pjaWorkdayAuth._sameWorkdayVerifyOwner(verifyOwner, { ...verifyOwner }), true,
+    'workday auth: Gmail verification result accepts the exact immutable run/job/route owner');
+  t.eq(authWindow.pjaWorkdayAuth._sameWorkdayVerifyOwner(verifyOwner,
+    { ...verifyOwner, runId: 'run-2' }), false,
+  'workday auth: Gmail verification result rejects a stale run on the same tenant');
+  t.eq(authWindow.pjaWorkdayAuth._sameWorkdayVerifyOwner(verifyOwner,
+    { ...verifyOwner, applyUrl: 'https://other.wd1.myworkdayjobs.com/job/R1' }), false,
+  'workday auth: Gmail verification result rejects the same raw requisition on another route');
+  t.eq(authWindow.pjaWorkdayAuth._sameWorkdayVerifyOwner(
+    { ...verifyOwner, sessionId: 'session-1' }, { ...verifyOwner, sessionId: 'session-2' }), false,
+  'workday auth: a delayed replaced Gmail session cannot satisfy the current waiter');
+  t.ok(workdayAuthSource.includes("type: 'WD_OPEN_GMAIL_TAB'") &&
+    workdayAuthSource.includes('runId: owner.runId') &&
+    workdayAuthSource.includes('jobId: owner.jobId') &&
+    workdayAuthSource.includes('applyUrl: owner.applyUrl') &&
+    workdayAuthSource.includes('sameWorkdayVerifyOwner(result, owner)'),
+  'workday auth: Gmail open and result polling carry the exact owner fields end to end');
   t.eq(authWindow.pjaWorkdayAuth.pjaWorkdayTenantEmail('candidate@gmail.com', 'kla.wd1.myworkdayjobs.com'),
     'candidate+wd-kla@gmail.com',
     'workday auth: Gmail address gets tenant-specific plus alias');

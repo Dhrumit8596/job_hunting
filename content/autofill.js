@@ -1342,18 +1342,32 @@ async function pjaFillSmartRecruitersCustomFields(profile) {
       });
     } catch (_) { resolve(false); }
   });
-  const committed = host => {
-    const cls = host.getAttribute('class') || '';
-    const val = host.getAttribute('value') || host.value || '';
-    if (/\bng-valid\b/.test(cls) && !/\bng-invalid\b/.test(cls)) return true;
+  const committed = (host, opts = {}) => {
+    const inner = host.shadowRoot?.querySelector('input,[role="combobox"]') ||
+      host.querySelector?.('input,[role="combobox"]');
+    const controls = [host, inner].filter(Boolean);
+    const cls = controls.map(el => el.getAttribute?.('class') || '').join(' ');
+    if (controls.some(el => el.getAttribute?.('aria-invalid') === 'true') || /\bng-invalid\b/.test(cls)) return false;
+    const val = host.getAttribute('value') || host.value || inner?.getAttribute?.('value') || inner?.value || '';
+    const explicitlyValid = /\bng-valid\b/.test(cls) ||
+      controls.some(el => el.getAttribute?.('aria-invalid') === 'false');
+    if (opts.requireValidity) return explicitlyValid && !!String(val || '').trim();
+    if (explicitlyValid) return true;
     return !!String(val || '').trim();
   };
-  const labelText = host => [
-    host.getAttribute('label') || '',
-    host.getAttribute('aria-label') || '',
-    host.id || '',
-    host.shadowRoot?.querySelector('label,[id$="-label"],spl-typography-label')?.textContent || '',
-  ].join(' ').trim();
+  const labelText = host => {
+    const inner = host.shadowRoot?.querySelector('input,[role="combobox"]') ||
+      host.querySelector?.('input,[role="combobox"]');
+    return [
+      host.getAttribute('label') || '',
+      host.getAttribute('aria-label') || '',
+      host.id || '',
+      host.shadowRoot?.querySelector('label,[id$="-label"],spl-typography-label')?.textContent || '',
+      inner?.getAttribute?.('aria-label') || '',
+      inner?.getAttribute?.('name') || '',
+      inner?.id || '',
+    ].join(' ').trim();
+  };
   const splOptions = host => {
     const roots = [host.shadowRoot, ...(typeof pjaGetAllRoots === 'function' ? pjaGetAllRoots() : [document])].filter(Boolean);
     const opts = [];
@@ -1547,8 +1561,9 @@ async function pjaFillSmartRecruitersCustomFields(profile) {
       const label = (labelText(el) + ' ' + (el.textContent || '') + ' ' + (el.id || '')).replace(/\s+/g, ' ');
       // Some SmartRecruiters tenants render the Country/Region field with no discoverable label,
       // before City/Location fields. Prefer United States for that first required autocomplete
-      // instead of letting the generic location filler commit Santa Clara.
-      return /country|region/i.test(label) || idx === 0;
+      // instead of letting the generic location filler commit Santa Clara. Never let that positional
+      // fallback override an explicit Current location/City/Address label.
+      return /country|region/i.test(label) || (idx === 0 && !/city|location|address/i.test(label));
     });
   for (const host of countryAutocompleteHosts) {
     try { host.value = ''; host.removeAttribute('value'); host.removeAttribute('data-pja-value'); } catch (_) {}
@@ -1591,12 +1606,19 @@ async function pjaFillSmartRecruitersCustomFields(profile) {
     }
     return null;
   };
-  const fillSrAutocompleteHost = async (host, answer, name) => {
+  const fillSrAutocompleteHost = async (host, answer, name, opts = {}) => {
     if (!host || !answer) return false;
     const input = host.shadowRoot?.querySelector('input,[role="combobox"]') ||
       host.querySelector?.('input,[role="combobox"]') ||
       (host.matches?.('input,[role="combobox"]') ? host : null);
     const target = input || host;
+    const ariaValidity = () => {
+      const states = [target, host].map(el => el.getAttribute?.('aria-invalid')).filter(v => v != null);
+      if (states.includes('true')) return 'true';
+      if (states.includes('false')) return 'false';
+      return '';
+    };
+    const preActionValidity = ariaValidity();
     try {
       const setter = target instanceof HTMLInputElement
         ? Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value')?.set
@@ -1610,43 +1632,60 @@ async function pjaFillSmartRecruitersCustomFields(profile) {
     await cdpTypeAt(target, answer);
     await sleep(500);
     let clickedOption = false;
+    let entered = false;
     try {
       const cityPart = String(answer || '').split(',')[0].trim().toLowerCase();
       const answerText = String(answer || '').trim().toLowerCase();
-      const opts = splOptions(host);
-      const match = opts.find(o => {
-        const txt = (o.textContent || '').trim().replace(/\s+/g, ' ').toLowerCase();
-        return txt && (txt.includes(answerText) || (cityPart && txt.includes(cityPart)));
-      }) || null;
+      let match = null;
+      const polls = opts.requireCommittedSelection ? 12 : 1;
+      for (let attempt = 0; attempt < polls && !match; attempt++) {
+        if (attempt || opts.requireCommittedSelection) await sleep(200);
+        match = splOptions(host).find(o => {
+          const txt = (o.textContent || '').trim().replace(/\s+/g, ' ').toLowerCase();
+          return txt && (txt.includes(answerText) || (cityPart && txt.includes(cityPart)));
+        }) || null;
+      }
       if (match) {
         await pjaCdpClickEl(match);
         clickedOption = true;
         await sleep(500);
       }
     } catch (_) {}
-    if (!clickedOption) await cdpEnter();
+    if (!clickedOption) entered = await cdpEnter();
     await sleep(400);
-    try {
-      const setter = target instanceof HTMLInputElement
-        ? Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value')?.set
-        : null;
-      if (setter) setter.call(target, answer);
-      else if ('value' in target) target.value = answer;
-      target.setAttribute?.('data-pja-value', answer);
-      target.dispatchEvent(new InputEvent('input', { bubbles: true, composed: true, data: answer, inputType: 'insertText' }));
-      target.dispatchEvent(new Event('change', { bubbles: true, composed: true }));
-      target.dispatchEvent(new Event('blur', { bubbles: true, composed: true }));
-      host.value = answer;
-      host.setAttribute?.('value', answer);
-      host.setAttribute?.('data-pja-value', answer);
-      host.dispatchEvent(new CustomEvent('selectionChange', { bubbles: true, composed: true, detail: { value: answer, label: answer } }));
-      host.dispatchEvent(new Event('change', { bubbles: true, composed: true }));
-    } catch (_) {}
-    const invalid = target.getAttribute?.('aria-invalid') || host.getAttribute?.('aria-invalid') || '';
+    // Location widgets must commit an option (or a trusted Enter that makes the widget valid).
+    // Writing the visible query back into an ng-invalid control only masks the unresolved field.
+    if (!clickedOption && !opts.requireCommittedSelection) {
+      try {
+        const setter = target instanceof HTMLInputElement
+          ? Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value')?.set
+          : null;
+        if (setter) setter.call(target, answer);
+        else if ('value' in target) target.value = answer;
+        target.setAttribute?.('data-pja-value', answer);
+        target.dispatchEvent(new InputEvent('input', { bubbles: true, composed: true, data: answer, inputType: 'insertText' }));
+        target.dispatchEvent(new Event('change', { bubbles: true, composed: true }));
+        target.dispatchEvent(new Event('blur', { bubbles: true, composed: true }));
+        host.value = answer;
+        host.setAttribute?.('value', answer);
+        host.setAttribute?.('data-pja-value', answer);
+        host.dispatchEvent(new CustomEvent('selectionChange', { bubbles: true, composed: true, detail: { value: answer, label: answer } }));
+        host.dispatchEvent(new Event('change', { bubbles: true, composed: true }));
+      } catch (_) {}
+    }
+    const invalid = ariaValidity();
     dbg('screening ' + name + '="' + answer + '" clickedOption=' + clickedOption + ' invalid=' + invalid);
+    if (opts.requireCommittedSelection) {
+      const validCommit = committed(host, { requireValidity: true });
+      if (clickedOption) return validCommit;
+      return entered && preActionValidity !== 'false' && invalid === 'false' && validCommit;
+    }
     return clickedOption || invalid === 'false' || !!String(target.value || host.value || host.getAttribute?.('data-pja-value') || '').trim();
   };
-  const locationAutocompleteHosts = allRequiredAutocompletes
+  const requiredAutocompleteInputs = pjaQueryAll('input[required][role="combobox"], input[aria-required="true"][role="combobox"]')
+    .map(input => input.closest?.('spl-autocomplete') ||
+      (input.getRootNode?.().host?.matches?.('spl-autocomplete') ? input.getRootNode().host : input));
+  const locationAutocompleteHosts = [...new Set([...allRequiredAutocompletes, ...requiredAutocompleteInputs])]
     .filter(el => !countryAutocompleteHosts.includes(el))
     .filter(el => {
       const label = [
@@ -1659,9 +1698,8 @@ async function pjaFillSmartRecruitersCustomFields(profile) {
       return /city|location|address/i.test(label) || /^spl-form-element_/i.test(el.id || '');
     });
   for (const host of locationAutocompleteHosts.slice(0, 2)) {
-    const current = String(host.value || host.getAttribute?.('data-pja-value') || '').trim();
-    if (current && /false/i.test(host.getAttribute?.('aria-invalid') || '')) continue;
-    if (await fillSrAutocompleteHost(host, locValue || city, 'city/location')) filled++;
+    if (committed(host, { requireValidity: true })) continue;
+    if (await fillSrAutocompleteHost(host, locValue || city, 'city/location', { requireCommittedSelection: true })) filled++;
   }
   const screeningHosts = pjaQueryAll('spl-autocomplete, input[required][role="combobox"], input[aria-required="true"][role="combobox"]')
     .filter(el => {
@@ -1789,7 +1827,7 @@ async function pjaFillSmartRecruitersCustomFields(profile) {
   }
   const hosts = pjaQueryAll('spl-autocomplete[required], oc-location-autocomplete.ng-invalid spl-autocomplete, oc-location-autocomplete spl-autocomplete')
     .filter(el => {
-      if (countryAutocompleteHosts.includes(el)) return false;
+      if (countryAutocompleteHosts.includes(el) || locationAutocompleteHosts.includes(el)) return false;
       const r = el.getBoundingClientRect();
       const label = el.getAttribute('label') || el.getAttribute('aria-label') || el.id || '';
       return r.width > 0 && r.height > 0 && /city|location/i.test(label + ' ' + (el.id || ''));

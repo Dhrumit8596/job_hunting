@@ -125,6 +125,7 @@
           returnUrl: 'https://www.linkedin.com/jobs/',
           runId: ranked.runId,
           rankedRun: true,
+          _applyPhase: 'pre_submit',
           applicationAt: rankedJob.applicationAt || ranked.inFlightAt || Date.now(),
         });
         const repairedQueue = {
@@ -480,6 +481,64 @@
     const addDbg = msg => new Promise(r => chrome.storage.local.get('pja_dbg', d => {
       const arr = (d.pja_dbg || []).slice(-19); arr.push(msg); chrome.storage.local.set({ pja_dbg: arr }, r);
     }));
+    const readApplyOwnership = () => new Promise(r => chrome.storage.local.get(
+      ['pja_ext_queue', 'pja_ext_current', 'pja_ranked_apply'], d => {
+        const classify = window.PJAApplySelect && window.PJAApplySelect.applyLifecycleOwnership;
+        r(typeof classify === 'function' ? classify(job, d) : { owns: false, handled: false });
+      }));
+    const workdayPendingOwner = () => ({
+      runId: job.runId || '',
+      jobId: job.id || job.jobId || job.sourceJobId || '',
+      applyUrl: job.applyUrl || location.href,
+      hostname: location.hostname,
+      ts: Date.now(),
+    });
+    // A submit click is permitted only after its exact run/job has a verified durable marker.
+    // Missing-tab recovery uses this phase boundary, so a failed storage write must fail closed
+    // instead of clicking and later looking like a retryable pre-submit disappearance.
+    const persistSubmitPending = async (extraKey = '') => {
+      const before = await readApplyOwnership();
+      if (!before.owns || before.handled) {
+        await addDbg('[ownership] refusing submit marker for stale/handled run/job');
+        return false;
+      }
+      const previousPhase = job._applyPhase;
+      const markerAt = Date.now();
+      job._applyPhase = 'submit_pending';
+      job._submitPending = true;
+      job._preSubmitUrl = location.href;
+      job._submitStartedAt = markerAt;
+      const payload = { pja_ext_current: job };
+      if (extraKey) payload[extraKey] = job._submitStartedAt;
+      const wrote = await new Promise(resolve => {
+        try {
+          chrome.storage.local.set(payload, () => {
+            const err = chrome.runtime.lastError;
+            if (err) console.warn('PJA ext-apply: submit marker write failed', err.message);
+            resolve(!err);
+          });
+        } catch (_) { resolve(false); }
+      });
+      if (!wrote) {
+        job._applyPhase = previousPhase || 'pre_submit';
+        delete job._submitPending;
+        delete job._preSubmitUrl;
+        delete job._submitStartedAt;
+        await addDbg('[submit] durable submit marker unavailable; refusing click');
+        return false;
+      }
+      const after = await readApplyOwnership();
+      const extraCommitted = !extraKey || await new Promise(resolve => {
+        try { chrome.storage.local.get(extraKey, d => resolve(Number(d[extraKey] || 0) === markerAt)); }
+        catch (_) { resolve(false); }
+      });
+      if (!after.owns || after.handled || after.phase !== 'submit_pending' ||
+          !after.submitPending || after.submitStartedAt !== markerAt || !extraCommitted) {
+        await addDbg('[ownership] ownership changed while persisting submit marker; refusing click');
+        return false;
+      }
+      return true;
+    };
     const collectApplyDomSummary = () => {
       try {
         const controls = pjaQueryAllExt('button, input, select, textarea, [role="button"], [role="combobox"], spl-select, spl-autocomplete')
@@ -766,6 +825,11 @@
               const nextBtn = document.querySelector('[data-automation-id="bottomNavigationNext"], [data-automation-id="pageFooterNextButton"]') ||
                 findButton(/save and continue|continue|next|review/i);
               if (nextBtn) {
+                const recoveryOwnership = await readApplyOwnership();
+                if (!recoveryOwnership.owns || recoveryOwnership.handled) {
+                  await addDbg('[ownership] refusing stale Workday recovery Next');
+                  return { executed, retrySubmit, advanceReason };
+                }
                 if (typeof trustedWorkdayClick === 'function') await trustedWorkdayClick(nextBtn, 'recover-advance');
                 else nextBtn.click();
               }
@@ -913,7 +977,18 @@
       return findButton(/submit.*application|submit.*app|apply now|send application|complete application|^submit$|^submit application$/i);
     }
 
-    async function waitForEmailCodeRecoveryOutcome(preSubmitUrl, branch, clickedAfterCode) {
+    function emailCodeActionIsVerificationOnly(button) {
+      if (!button || !findEmailCodeField()) return false;
+      const text = (button.textContent || button.value || button.getAttribute?.('aria-label') || '')
+        .replace(/\s+/g, ' ').trim();
+      return /verify (?:code|email)|verification code|confirm email|submit.*code|send code|complete verification|^verify$/i.test(text) &&
+        !/submit.*application|apply now|send application|complete application/i.test(text);
+    }
+
+    async function waitForEmailCodeRecoveryOutcome(preSubmitUrl, branch, clickedAfterCode,
+      allowFinalSubmitAfterVerification = false, actionAttempted = false) {
+      let finalSubmitAttempted = false;
+      let finalSubmitDelivered = false;
       for (let i = 0; i < 30; i++) {
         await sleep(500);
         const hasSubmitButton = !!findButton(/submit.*application|submit.*app|apply now|send application|complete application|^submit$|^submit application$/i);
@@ -925,12 +1000,17 @@
         // Some ATSes use a two-phase gate: code verification first, then the original submit
         // button reappears/enables. Click it once rather than recording a false verification
         // failure immediately after the code field disappears.
-        if (i >= 2 && !findEmailCodeField() && hasSubmitButton) {
+        if (i >= 2 && clickedAfterCode && allowFinalSubmitAfterVerification &&
+            !finalSubmitAttempted && !findEmailCodeField() && hasSubmitButton) {
           const submitAfterVerify = findButton(/submit.*application|submit.*app|apply now|send application|complete application|^submit$|^submit application$/i);
-          if (submitAfterVerify && !submitAfterVerify.dataset.pjaEmailCodeSubmitRetried) {
-            submitAfterVerify.dataset.pjaEmailCodeSubmitRetried = '1';
+          if (submitAfterVerify) {
+            finalSubmitAttempted = true;
             await addDbg('[email-code] code verified; clicking final submit');
-            try { await pjaCdpClickEl(submitAfterVerify); } catch (_) { try { submitAfterVerify.click(); } catch (__) {} }
+            if (!(await persistSubmitPending())) return { success: false, ownershipLost: true };
+            sessionStorage.setItem('pja_last_action', 'submit_clicked:' + job.company);
+            const delivered = await trustedPointClick(submitAfterVerify);
+            finalSubmitDelivered = delivered === true;
+            if (!finalSubmitDelivered) await addDbg('[email-code] final submit delivery unobserved; refusing fallback click');
           }
         }
       }
@@ -938,8 +1018,19 @@
       await capturePostClickDiagnostic('email_code_submit_unconfirmed', {
         branch,
         clickedAfterCode,
+        actionAttempted,
+        finalSubmitAttempted,
+        finalSubmitDelivered,
       });
-      return { success: false };
+      const risk = window.PJAApplySelect && window.PJAApplySelect.emailCodeSubmitRisk;
+      return { success: false,
+        submitMayHaveOccurred: typeof risk === 'function' ? risk({
+          priorSubmit: branch === 'post_submit_code_gate',
+          verificationOnly: allowFinalSubmitAfterVerification,
+          initialActionAttempted: actionAttempted,
+          finalSubmitAttempted,
+        }) : branch === 'post_submit_code_gate' || finalSubmitAttempted ||
+          (actionAttempted && !allowFinalSubmitAfterVerification) };
     }
 
     async function recoverEmailVerificationCode(contextReason) {
@@ -955,6 +1046,11 @@
       }
       sessionStorage.setItem(recoveryKey, '1');
       const searchQuery = emailCodeSearchQuery();
+      const emailCodeOwner = {
+        runId: String(job.runId || ''),
+        jobId: String(job.id || job.jobId || job.sourceJobId || ''),
+        applyUrl: String(job.applyUrl || location.href),
+      };
       await addDbg('[email-code] opening gmail search for verification code');
       const openResp = await new Promise(resolve => {
         try {
@@ -964,6 +1060,7 @@
             hostname: location.hostname,
             company: job.company || '',
             title: job.title || '',
+            ...emailCodeOwner,
             expectedLength: 8
           }, resp => {
             if (chrome.runtime.lastError) resolve({ ok: false, reason: chrome.runtime.lastError.message });
@@ -973,29 +1070,39 @@
           resolve({ ok: false, reason: e.message });
         }
       });
-      if (!openResp.ok) {
+      if (!openResp.ok || !openResp.sessionId) {
         await addDbg('[email-code] gmail open failed: ' + String(openResp.reason || 'unknown').slice(0, 60));
         return { filled: false, reason: openResp.reason || 'open_failed' };
       }
+      const exactSession = { ...emailCodeOwner, sessionId: String(openResp.sessionId) };
       let result = null;
       const started = Date.now();
       while (Date.now() - started < 90000) {
         await sleep(1000);
         const data = await new Promise(r => chrome.storage.local.get('pja_email_code_result', r));
         const r = data.pja_email_code_result;
-        if (r && r.ts >= started - 1000) { result = r; break; }
+        if (r && String(r.sessionId || '') === exactSession.sessionId &&
+            String(r.runId || '') === exactSession.runId &&
+            String(r.jobId || '') === exactSession.jobId &&
+            String(r.applyUrl || '') === exactSession.applyUrl) { result = r; break; }
       }
-      await new Promise(r => chrome.storage.local.remove('pja_email_code_result', r));
+      if (result) await new Promise(r => chrome.storage.local.remove('pja_email_code_result', r));
       if (!result || !result.success || !result.code) {
         if (!result) {
           try {
-            chrome.runtime.sendMessage({ type: 'CANCEL_EMAIL_CODE_SESSION', reason: 'timeout' }, () => {});
+            chrome.runtime.sendMessage({ type: 'CANCEL_EMAIL_CODE_SESSION', reason: 'timeout',
+              ...exactSession }, () => {});
           } catch (_) {}
         }
         await addDbg('[email-code] code not found: ' + String(result?.reason || 'timeout').slice(0, 60));
         return { filled: false, reason: result?.reason || 'timeout' };
       }
       try {
+        const codeOwnership = await readApplyOwnership();
+        if (!codeOwnership.owns || codeOwnership.handled) {
+          await addDbg('[ownership] email-code recovery completed after job handoff; refusing stale fill/click');
+          return { filled: false, reason: 'ownership_lost', ownershipLost: true };
+        }
         if (typeof pjaSetNative === 'function') pjaSetNative(codeField, result.code);
         else {
           const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set;
@@ -1451,10 +1558,8 @@
             const submitBtn2 = findButton(/submit.*application|submit.*app|apply now|send application|complete application/i);
             if (!submitBtn2) { await recordResult(job, { success: false, reason: 'no_submit_after_spa' }); navigateBack(job); return; }
             const preSubmitUrl2 = location.href;
-            job._submitPending = true;
-            job._preSubmitUrl = preSubmitUrl2;
-            job._submitStartedAt = Date.now();
-            try { await new Promise(r => chrome.storage.local.set({ pja_ext_current: job }, r)); } catch (_) {}
+            if (!(await persistSubmitPending())) return;
+            sessionStorage.setItem('pja_last_action', 'submit_clicked:' + job.company);
             submitBtn2.click();
             let success2 = false;
             for (let wait = 0; wait < 20; wait++) {
@@ -1468,41 +1573,9 @@
                 iterations: wait })) { success2 = true; break; }
             }
             if (!success2) {
-              const help = await maybeRequestApplyHelp('submit_unclear', {
-                formSummary: 'SPA form still present after submit click',
-                visibleErrors: collectApplyDomSummary().errors || [],
+              await capturePostClickDiagnostic('submit_unclear', {
+                formSummary: 'SPA form remained after submit click without explicit acceptance evidence',
               });
-              const recovery = await executeRecoveryActions(help, 'submit_unclear');
-              if (recovery.advanceReason) {
-                await recordResult(job, { success: false, reason: recovery.advanceReason });
-                navigateBack(job);
-                return;
-              }
-              if (recovery.retrySubmit) {
-                if (typeof pjaFillForm === 'function') {
-                  window._pjaComboChain = Promise.resolve();
-                  pjaFillForm(profile, answers);
-                  if (window._pjaComboChain && typeof window._pjaComboChain.then === 'function') {
-                    await Promise.race([window._pjaComboChain.catch(() => {}), sleep(30000)]);
-                  }
-                }
-                if (typeof pjaForceAllPolicyReactSelects === 'function') await withTimeout(pjaForceAllPolicyReactSelects(profile), 20000, 'spa-recover-gh-policy');
-                await sleep(600);
-                const retryBtn = findButton(/submit.*application|submit.*app|apply now|send application|complete application/i);
-                if (retryBtn) {
-                  retryBtn.click();
-                  for (let wait = 0; wait < 25; wait++) {
-                    await sleep(400);
-                    const hasSubmitButton = pjaQueryAllExt('button[type=submit], input[type=submit]')
-                      .some(b => /submit/i.test((b.textContent || '') + (b.value || '')));
-                    const hasFormFields = pjaQueryAllExt('form input, form select, form textarea')
-                      .some(el => el.type !== 'hidden');
-                    if (pjaIsSubmitSuccess({ text: document.body?.innerText || '', title: document.title,
-                      url: location.href, preSubmitUrl: preSubmitUrl2, hasSubmitButton, hasFormFields,
-                      iterations: wait })) { success2 = true; break; }
-                  }
-                }
-              }
             }
             await recordResult(job, { success: success2, reason: success2 ? 'applied' : 'submit_unclear' });
             navigateBack(job);
@@ -1561,10 +1634,24 @@
     // --- Handle login/sign-in forms first ---
 
     // Check if this is a post-Gmail-verification resume
-    const { pja_wd_verify_result: _wdVerifyResult, pja_wd_pending_apply: _wdPendingApply } =
-      await new Promise(r => chrome.storage.local.get(['pja_wd_verify_result', 'pja_wd_pending_apply'], r));
+    const _wdResumeStorage = await new Promise(r => chrome.storage.local.get(
+      ['pja_wd_verify_result', 'pja_wd_pending_apply', 'pja_ext_queue', 'pja_ext_current', 'pja_ranked_apply'], r));
+    const _wdVerifyResult = _wdResumeStorage.pja_wd_verify_result;
+    const _wdPendingApply = _wdResumeStorage.pja_wd_pending_apply;
+    const _wdOwnerClassify = window.PJAApplySelect && window.PJAApplySelect.workdayGmailOwnership;
+    const _wdPendingOwnsCurrent = typeof _wdOwnerClassify === 'function' &&
+      _wdOwnerClassify(_wdPendingApply, _wdResumeStorage);
+    const _wdResultMatchesPending = !!(_wdVerifyResult && _wdPendingApply &&
+      String(_wdVerifyResult.sessionId || '') === String(_wdPendingApply.sessionId || '') &&
+      !!_wdPendingApply.sessionId &&
+      String(_wdVerifyResult.runId || '') === String(_wdPendingApply.runId || '') &&
+      String(_wdVerifyResult.jobId || '') === String(_wdPendingApply.jobId || '') &&
+      String(_wdVerifyResult.applyUrl || '') === String(_wdPendingApply.applyUrl || ''));
+    const _wdPendingMatchesLocalJob = !!(_wdPendingApply &&
+      String(_wdPendingApply.runId || '') === String(job.runId || '') &&
+      pjaSameQueuedJob(job, { id: _wdPendingApply.jobId, applyUrl: _wdPendingApply.applyUrl }));
 
-    if (_wdVerifyResult && _wdPendingApply &&
+    if (_wdPendingOwnsCurrent && _wdResultMatchesPending && _wdPendingMatchesLocalJob &&
         _wdPendingApply.hostname === location.hostname &&
         _wdVerifyResult.hostname === location.hostname &&
         _wdVerifyResult.success === true &&
@@ -1594,19 +1681,42 @@
       // apply tab back after the verification link succeeds. Do this before auth starts so stale
       // pending records from prior Workday tenants cannot hijack the resume.
       await new Promise(r => chrome.storage.local.set({
-        pja_wd_pending_apply: {
-          applyUrl: job.applyUrl,
-          jobId: job.id || job.jobId,
-          hostname: location.hostname,
-          ts: Date.now()
-        }
+        pja_wd_pending_apply: workdayPendingOwner()
       }, r));
 
       const authResult = await window.pjaWorkdayAuth.run(profile, jobPassword);
       console.log('PJA ext-apply: pjaWorkdayAuth result:', authResult);
+      let authScreen = '';
+      try {
+        const authLifecycle = await window.pjaWorkdayAuth.lifecycle(profile);
+        authScreen = String(authLifecycle && authLifecycle.screen || '');
+      } catch (_) {}
+
+      // Auth and lifecycle inspection can outlive a ranked watchdog or a tab handoff. Recheck
+      // before writing the singleton diagnostic so a stale coroutine cannot erase the active
+      // job's exact auth result, then recheck again before any navigation/fill side effects.
+      const authDiagnosticOwnership = await readApplyOwnership();
+      if (!authDiagnosticOwnership.owns || authDiagnosticOwnership.handled) {
+        console.warn('PJA ext-apply: Workday auth completed after job ownership changed; stopping stale handler');
+        return;
+      }
       await new Promise(r => chrome.storage.local.set({
-        pja_dbg_workday_auth: { result: authResult, url: location.href.slice(0, 120), ts: Date.now() }
+        pja_dbg_workday_auth: {
+          runId: job.runId || '',
+          jobId: job.id || job.jobId || job.sourceJobId || '',
+          result: authResult,
+          screen: authScreen,
+          url: location.href.slice(0, 120),
+          ts: Date.now()
+        }
       }, r));
+
+      // The diagnostic write is asynchronous; close its remaining handoff window as well.
+      const postAuthOwnership = await readApplyOwnership();
+      if (!postAuthOwnership.owns || postAuthOwnership.handled) {
+        console.warn('PJA ext-apply: Workday auth completed after job ownership changed; stopping stale handler');
+        return;
+      }
 
       if (authResult === 'signed_in' || authResult === 'account_created_verified') {
         // Workday SPA: after auth the application form may take a few seconds to hydrate.
@@ -1666,15 +1776,8 @@
         }
         // Fall through to form fill
       } else if (authResult === 'needs_gmail_verify') {
-        // Gmail verification in progress — store pending apply context (no password)
-        await new Promise(r => chrome.storage.local.set({
-          pja_wd_pending_apply: {
-            applyUrl: job.applyUrl,
-            jobId: job.id,
-            hostname: location.hostname,
-            ts: Date.now()
-          }
-        }, r));
+        // Gmail verification owns the pending record and has enriched it with the exact apply tab.
+        // Do not overwrite that durable owner with a tab-less copy from the content script.
         return; // Background will reload this tab when verification completes
       } else if (authResult === 'needs_navigation') {
         await addDbg('[WD] auth requested navigation; waiting for reloaded apply page');
@@ -1734,7 +1837,9 @@
         // OR the sessionStorage marker as a fallback. Landing on /completed/ WITHOUT having
         // clicked Submit this run (a req applied in a PAST session) is NOT a new application →
         // already_applied, so the tally isn't inflated.
-        const submitFlagKey = 'pja_wd_submitclick_' + (job.id || job.jobId || '');
+        const submitFlagKey = isWorkdayHost
+          ? 'pja_wd_submitclick_' + (job.id || job.jobId || '')
+          : '';
         const submitClickTs = await new Promise(r => chrome.storage.local.get(submitFlagKey, d => r(d[submitFlagKey])));
         const realSubmit = pjaPrevAction.startsWith('ready_to_submit:') || (submitClickTs && (Date.now() - submitClickTs) < 180000);
         if (submitClickTs) { try { await new Promise(r => chrome.storage.local.remove(submitFlagKey, r)); } catch (_) {} }
@@ -1967,7 +2072,7 @@
       if (targets.length) await addDbg('[WD] forced phoneCountryCode n=' + targets.length);
       return targets.length;
     };
-    const trustedWorkdayClick = async (el, label) => {
+    const trustedWorkdayClick = async (el, label, options = {}) => {
       if (!el || !/workday\.com|myworkdayjobs\.com/i.test(location.hostname)) return false;
       const priorId = el.id;
       const tempId = priorId || ('__pja_wd_click_' + Date.now() + '_' + Math.random().toString(36).slice(2, 7));
@@ -1988,7 +2093,8 @@
         });
         await addDbg('[WD] trusted click ' + (label || '') + ' ok=' + !!resp.ok + (resp.error ? ' err=' + String(resp.error).slice(0, 60) : ''));
         if (resp.ok) return true;
-        if (/submit|advance|continue|next|retry|recover/i.test(String(label || ''))) {
+        if (options.allowAdvanceFallback !== false &&
+            /submit|advance|continue|next|retry|recover/i.test(String(label || ''))) {
           const fallback = await new Promise(resolve => {
             try {
               chrome.runtime.sendMessage({
@@ -3041,9 +3147,15 @@
       const nextBtnDisabled = !!(nextBtn.disabled || nextBtn.getAttribute('aria-disabled') === 'true');
       const nextBtnText = (nextBtn.textContent || nextBtn.getAttribute('aria-label') || '').trim().slice(0,30);
       const nextBtnAid = nextBtn.getAttribute('data-automation-id') || '';
+      const isFinalStepSubmit = /submit/i.test(nextBtnText) || nextBtnAid === 'bottomNavigationSubmit';
       // SID form detected by its unique fields (disability checkbox + date spinner).
       const isWorkdaySidStep = isWorkdaySelfIdentifyStep();
       await addDbg('[ext] step ' + steps + ' clicking Next step=' + stepTextBefore + ' wdMissing=' + wdSelectMissing.map(m=>m.label).join('|') + ' btn=' + nextBtnAid + '/' + nextBtnText + (nextBtnDisabled ? '[DISABLED]' : '') + (isWorkdaySidStep ? '[SID-CDP]' : ''));
+      const stepOwnership = await readApplyOwnership();
+      if (!stepOwnership.owns) {
+        await addDbg('[ownership] refusing stale Workday Next/Submit after exact run/job handoff');
+        return;
+      }
       if (isWorkdayHost) {
         if (isWorkdaySidStep) {
           const sidReadyRaw = await withTimeout(workdaySelfIdentifyTransaction(profile, 'pre-click-' + steps), 45000, 'wd-sid-pre-click-' + steps);
@@ -3059,24 +3171,19 @@
           if (typeof pjaForceWorkdayTermsCheckbox === 'function') await withTimeout(pjaForceWorkdayTermsCheckbox('pre-click-' + steps), 12000, 'wd-terms-pre-click-' + steps);
         }
       }
-      // If THIS click is the final Submit (Workday multi-step forms submit via the footer/bottom
-      // Submit button in the step loop), record a PERSISTENT per-job "submitted this run" flag so
-      // the early-confirmation on the next /completed/ load records APPLIED — not already_applied.
-      // sessionStorage.pja_last_action is too fragile (later step-loop iterations overwrite it
-      // before /completed/ loads); chrome.storage.local survives the navigation intact.
-      if (/submit/i.test(nextBtnText) || nextBtnAid === 'bottomNavigationSubmit') {
-        const stopBeforeFinalSubmit = await new Promise(r => {
-          try { chrome.storage.local.get('pja_ext_stop_before_submit', d => r(d.pja_ext_stop_before_submit ?? PJA_EXT_STOP_BEFORE_SUBMIT_DEFAULT)); }
-          catch(_) { r(PJA_EXT_STOP_BEFORE_SUBMIT_DEFAULT); }
-        });
-        if (stopBeforeFinalSubmit) {
-          await addDbg('[ext] stop-before-submit at Workday final Submit — leaving review screen');
-          sessionStorage.setItem('pja_last_action', 'ready_to_submit:' + job.company);
-          await recordResult(job, { success: false, reason: 'ready_to_submit_review' });
-          return;
-        }
-        try { sessionStorage.setItem('pja_last_action', 'ready_to_submit:' + job.company); } catch (_) {}
-        try { await new Promise(r => chrome.storage.local.set({ ['pja_wd_submitclick_' + (job.id || job.jobId || '')]: Date.now() }, r)); } catch (_) {}
+      // Never run final Submit through the multi-step recovery ladder below: that ladder may
+      // deliver MAIN-world, trusted, and DOM clicks when a transition is merely slow. The unified
+      // final path persists the marker and performs exactly one bounded Workday delivery.
+      if (isFinalStepSubmit) {
+        await addDbg('[WD] final Submit detected; deferring to single-delivery final path');
+        break;
+      }
+      // SID/finalization/terms preparation above can take tens of seconds. Re-read ownership
+      // after those awaits so a watchdog handoff cannot leave this stale coroutine clicking Next.
+      const preparedOwnership = await readApplyOwnership();
+      if (!preparedOwnership.owns || preparedOwnership.handled) {
+        await addDbg('[ownership] refusing stale Workday Next after pre-click preparation');
+        return;
       }
       const preClickUrl = location.href;
       const preClickBodyMarker = !isWorkdayHost && !stepTextBefore
@@ -3272,6 +3379,11 @@
             || findButton(/save and continue|^continue$|^next$/i);
           if (reNext) {
             await closeWorkdayTransientMenus();
+            const validationRetryOwnership = await readApplyOwnership();
+            if (!validationRetryOwnership.owns || validationRetryOwnership.handled) {
+              await addDbg('[ownership] refusing stale Workday validation-retry Next');
+              return;
+            }
             if (!(await trustedWorkdayClick(reNext, 'validation-retry'))) reNext.click();
             await new Promise(resolve => { let w=0; const p=setInterval(()=>{ w+=250;
               const err=Array.from(document.querySelectorAll('button')).some(b=>/^errors found$/i.test(b.textContent.trim()));
@@ -3302,7 +3414,15 @@
         }
         if (didRetryName || nameFieldR?.value) {
           await closeWorkdayTransientMenus();
-          if (!(await trustedWorkdayClick(nextBtn, 'sid-name-retry'))) nextBtn.click();
+          const sidRetryOwnership = await readApplyOwnership();
+          if (!sidRetryOwnership.owns || sidRetryOwnership.handled) {
+            await addDbg('[ownership] refusing stale Workday SID name-retry Next');
+            return;
+          }
+          const sidRetryNext = document.querySelector('[data-automation-id="pageFooterNextButton"]')
+            || document.querySelector('[data-automation-id="bottomNavigationNext"]')
+            || findButton(/save and continue|^continue$|^next$/i);
+          if (sidRetryNext && !(await trustedWorkdayClick(sidRetryNext, 'sid-name-retry'))) sidRetryNext.click();
           await new Promise(resolve => {
             let w2 = 0;
             const p2 = setInterval(() => {
@@ -3608,25 +3728,36 @@
           formSummary: 'external email security-code verification required before final submission',
         });
         const recovery = await recoverEmailVerificationCode('email_verification_required');
+        if (recovery.ownershipLost) return;
         if (recovery.filled) {
           const btn = findEmailCodeActionButton();
           if (btn) {
             await addDbg('[email-code] retrying verification/submit after gmail code');
-            let clickedAfterCode = false;
-            try {
-              clickedAfterCode = await Promise.race([
-                (async () => { await pjaCdpClickEl(btn); return true; })(),
-                new Promise(resolve => setTimeout(() => resolve(false), 8000))
-              ]);
-            } catch (_) {}
+            const verificationOnly = emailCodeActionIsVerificationOnly(btn);
+            if (verificationOnly) {
+              const verificationOwnership = await readApplyOwnership();
+              if (!verificationOwnership.owns || verificationOwnership.handled) return;
+            } else if (!(await persistSubmitPending())) return;
+            if (!verificationOnly) sessionStorage.setItem('pja_last_action', 'submit_clicked:' + job.company);
+            const clickedAfterCode = await trustedPointClick(btn);
             if (!clickedAfterCode) {
-              await addDbg('[email-code] cdp verify after code timed out; using DOM click fallback');
-              try { btn.click(); clickedAfterCode = true; } catch (_) {}
+              await addDbg('[email-code] cdp verify after code unobserved; refusing fallback click');
             }
-            const outcome = await waitForEmailCodeRecoveryOutcome(job._preSubmitUrl || job.applyUrl || '', 'pre_submit_code_gate', clickedAfterCode);
+            const outcome = await waitForEmailCodeRecoveryOutcome(
+              job._preSubmitUrl || job.applyUrl || '', 'pre_submit_code_gate', clickedAfterCode,
+              verificationOnly, true
+            );
+            if (outcome.ownershipLost) return;
             if (outcome.success) {
               sessionStorage.setItem('pja_last_action', 'recordResult:applied:' + job.company);
               await recordResult(job, { success: true, reason: 'applied' });
+              navigateBack(job);
+              return;
+            }
+            if (outcome.submitMayHaveOccurred) {
+              sessionStorage.setItem('pja_last_action', 'recordResult:email_code_submit_unconfirmed:' + job.company);
+              await recordResult(job, { success: false, reason: 'email_code_submit_unconfirmed',
+                diagnostic: collectPostClickPageSnapshot() });
               navigateBack(job);
               return;
             }
@@ -3750,11 +3881,14 @@
     // --- Submit ---
     // Workday: the submit button is a click_filter div (role=button), not a <button>.
     // Check both the click_filter overlay and the underlying element by automation-id.
-    const wdSubmitClickFilter = Array.from(document.querySelectorAll('[data-automation-id="click_filter"]'))
-      .find(el => /submit.*application|apply now|^submit$/i.test(el.getAttribute('aria-label') || ''));
-    const submitBtn = wdSubmitClickFilter
-      || document.querySelector('[data-automation-id="bottomNavigationSubmit"]')
-      || findButton(/submit.*application|submit.*app|apply now|send application|complete application|^submit$|^submit application$/i);
+    const resolveFinalSubmitButton = () => {
+      const wdSubmitClickFilter = Array.from(document.querySelectorAll('[data-automation-id="click_filter"]'))
+        .find(el => /submit.*application|apply now|^submit$/i.test(el.getAttribute('aria-label') || ''));
+      return wdSubmitClickFilter
+        || document.querySelector('[data-automation-id="bottomNavigationSubmit"]')
+        || findButton(/submit.*application|submit.*app|apply now|send application|complete application|^submit$|^submit application$/i);
+    };
+    let submitBtn = resolveFinalSubmitButton();
     if (!submitBtn) {
       // Capture button list and URL to persistent storage for debugging
       const allBtns = pjaQueryAllExt('button, input[type=submit], [role=button], [data-automation-id="click_filter"]')
@@ -3806,9 +3940,7 @@
           const authResult2 = await window.pjaWorkdayAuth.run(profile, _storedPw2 || 'ChangeMe#2025!');
           await addDbg('[WD] no_submit auth-gate recovery result=' + authResult2);
           if (authResult2 === 'needs_gmail_verify') {
-            await new Promise(r => chrome.storage.local.set({
-              pja_wd_pending_apply: { applyUrl: job.applyUrl, jobId: job.id, hostname: location.hostname, ts: Date.now() }
-            }, r));
+            // The exact Gmail session remains responsible for resuming its captured apply tab.
             return;
           }
           if (authResult2 === 'signed_in' || authResult2 === 'account_created_verified') {
@@ -3854,6 +3986,11 @@
     }
 
     // Stop-before-submit gate: leave the filled application on screen for review.
+    const submitOwnership = await readApplyOwnership();
+    if (!submitOwnership.owns) {
+      await addDbg('[ownership] refusing stale final Submit after exact run/job handoff');
+      return;
+    }
     const stopBefore = await new Promise(r => {
       try { chrome.storage.local.get('pja_ext_stop_before_submit', d => r(d.pja_ext_stop_before_submit ?? PJA_EXT_STOP_BEFORE_SUBMIT_DEFAULT)); }
       catch(_) { r(PJA_EXT_STOP_BEFORE_SUBMIT_DEFAULT); }
@@ -3867,14 +4004,22 @@
     }
 
     await withTimeout(repairAshbyRequiredFields('pre-submit'), 12000, 'ashby-repair-pre-submit');
+    // Ashby repair may rerender the React form and detach the earlier button reference.
+    submitBtn = resolveFinalSubmitButton();
+    if (!submitBtn) {
+      await recordResult(job, { success: false, reason: 'no_submit_after_spa' });
+      navigateBack(job);
+      return;
+    }
 
     // Persist a PENDING submit before the click so a navigation can be recovered. Pending is
     // deliberately distinct from handled/applied: the destination page must still prove success.
-    const preSubmitUrl = location.href;
-    job._submitPending = true;
-    job._preSubmitUrl = preSubmitUrl;
-    job._submitStartedAt = Date.now();
-    try { await new Promise(r => chrome.storage.local.set({ pja_ext_current: job }, r)); } catch(_) {}
+    // This also rechecks exact ownership after the potentially long Ashby repair above.
+    const finalWorkdaySubmitKey = /workday\.com|myworkdayjobs\.com/i.test(location.hostname)
+      ? 'pja_wd_submitclick_' + (job.id || job.jobId || '')
+      : '';
+    if (!(await persistSubmitPending(finalWorkdaySubmitKey))) return;
+    const preSubmitUrl = job._preSubmitUrl;
     // Optimistic durable-log pre-write: we've passed validation + found the submit button, so
     // record 'submitting' BEFORE the click. If the submit navigates away and kills this script
     // (the Greenhouse under-count case), the entry already exists; the post-submit success path
@@ -3889,21 +4034,23 @@
       } }, () => void chrome.runtime.lastError);
     } catch (_) {}
 
+    // The durable-log prewrite above is asynchronous. Recheck once more immediately before the
+    // delivery call so a ranked watchdog advance during that write cannot produce a stale click.
+    const finalClickOwnership = await readApplyOwnership();
+    if (!finalClickOwnership.owns || finalClickOwnership.handled) {
+      await addDbg('[ownership] refusing stale final Submit after durable pre-click writes');
+      return;
+    }
+
     console.log('PJA ext-apply: clicking submit:', submitBtn.textContent.trim().slice(0,40));
     sessionStorage.setItem('pja_last_action', 'submit_clicked:' + job.company);
     let workdaySubmitDelivery = '';
     if (/workday\.com|myworkdayjobs\.com/i.test(location.hostname)) {
       const clicked = await Promise.race([
-        trustedWorkdayClick(submitBtn, 'submit'),
+        trustedWorkdayClick(submitBtn, 'submit', { allowAdvanceFallback: false }),
         sleep(10000).then(async () => { await addDbg('[WD] trusted click submit TIMEOUT 10000ms'); return false; })
       ]);
       workdaySubmitDelivery = clicked ? 'trusted' : 'transport_failed';
-      if (!clicked) {
-        try {
-          submitBtn.click();
-          workdaySubmitDelivery = 'dom_fallback';
-        } catch (_) {}
-      }
     } else if (/greenhouse\.io|ashbyhq\.com/i.test(location.hostname)) {
       // Several Remix tenants accept synthetic field events but reject a synthetic final click:
       // the page simply reloads with zero validation errors and no confirmation. Deliver the final
@@ -3923,7 +4070,9 @@
         } catch (_) { if (!done) { done = true; clearTimeout(timer); resolve('failed'); } }
       });
       await addDbg('[submit] ' + (/ashbyhq\.com/i.test(location.hostname) ? 'ashby' : 'greenhouse') + ' delivery=' + submitDelivery);
-      if (submitDelivery === 'failed') submitBtn.click();
+      if (submitDelivery === 'failed') {
+        await addDbg('[submit] trusted delivery unobserved; refusing synthetic fallback');
+      }
     } else {
       submitBtn.click();
     }
@@ -3979,22 +4128,22 @@
           formSummary: 'email security-code verification required after submit click',
         });
         const recovery = await recoverEmailVerificationCode('post_submit_email_code');
+        if (recovery.ownershipLost) return;
         if (recovery.filled) {
           const btn = findEmailCodeActionButton();
           if (btn) {
             await addDbg('[email-code] retrying verification/submit once after post-submit code');
-            let clickedAfterCode = false;
-            try {
-              clickedAfterCode = await Promise.race([
-                (async () => { await pjaCdpClickEl(btn); return true; })(),
-                new Promise(resolve => setTimeout(() => resolve(false), 8000))
-              ]);
-            } catch (_) {}
+            const verificationOnly = emailCodeActionIsVerificationOnly(btn);
+            if (!(await persistSubmitPending())) return;
+            if (!verificationOnly) sessionStorage.setItem('pja_last_action', 'submit_clicked:' + job.company);
+            const clickedAfterCode = await trustedPointClick(btn);
             if (!clickedAfterCode) {
-              await addDbg('[email-code] cdp submit after code timed out; using DOM click fallback');
-              try { btn.click(); clickedAfterCode = true; } catch (_) {}
+              await addDbg('[email-code] cdp submit after code unobserved; refusing fallback click');
             }
-            const outcome = await waitForEmailCodeRecoveryOutcome(preSubmitUrl, 'post_submit_code_gate', clickedAfterCode);
+            const outcome = await waitForEmailCodeRecoveryOutcome(
+              preSubmitUrl, 'post_submit_code_gate', clickedAfterCode, verificationOnly, true
+            );
+            if (outcome.ownershipLost) return;
             if (outcome.success) {
               sessionStorage.setItem('pja_last_action', 'recordResult:applied:' + job.company);
               await recordResult(job, { success: true, reason: 'applied' });
@@ -4004,8 +4153,8 @@
           }
         }
         if (help && help.shouldAdvance === false) await addDbg('[email-code] recovery incomplete; recording email_verification_required');
-        sessionStorage.setItem('pja_last_action', 'recordResult:email_verification_required:' + job.company);
-        await recordResult(job, { success: false, reason: 'email_verification_required',
+        sessionStorage.setItem('pja_last_action', 'recordResult:email_code_submit_unconfirmed:' + job.company);
+        await recordResult(job, { success: false, reason: 'email_code_submit_unconfirmed',
           diagnostic: collectPostClickPageSnapshot() });
         navigateBack(job);
         return;
@@ -4058,6 +4207,7 @@
     // DIAGNOSTIC: on submit_unclear, dump Greenhouse/ATS validation errors so we can see WHICH
     // field blocked the submit (the form stays up with error text / aria-invalid on the culprit).
     let reactSelectError = false;
+    let validationSubmitRetried = false;
     if (!success) {
       try {
         const errEls = visibleValidationErrors();
@@ -4079,6 +4229,9 @@
             const submitAgainAshby = findButton(/submit.*application|submit.*app|apply now|send application|complete application|^submit$|^submit application$/i);
             if (submitAgainAshby) {
               await addDbg('[ashby-repair] retrying submit once after required-field repair n=' + ashbyRepaired);
+              if (!(await persistSubmitPending())) return;
+              validationSubmitRetried = true;
+              sessionStorage.setItem('pja_last_action', 'submit_clicked:' + job.company);
               try {
                 submitAgainAshby.scrollIntoView({ block: 'center', behavior: 'instant' });
                 const ar = submitAgainAshby.getBoundingClientRect();
@@ -4086,8 +4239,8 @@
                   try { chrome.runtime.sendMessage({ type: 'LINKEDIN_TRUSTED_CLICK', x: ar.left + ar.width / 2, y: ar.top + ar.height / 2 }, resp => resolve(!(chrome.runtime.lastError || resp?.error))); }
                   catch (_) { resolve(false); }
                 });
-                if (!deliveredAshby) submitAgainAshby.click();
-              } catch (_) { try { submitAgainAshby.click(); } catch (_) {} }
+                if (!deliveredAshby) await addDbg('[ashby-repair] retry delivery unobserved; refusing fallback click');
+              } catch (_) { await addDbg('[ashby-repair] retry delivery threw; refusing fallback click'); }
               await sleep(4500);
               success = pjaIsSubmitSuccess({
                 text: document.body?.innerText || '',
@@ -4108,7 +4261,9 @@
         }
         const terminalHelpReason = reactSelectError && isWorkdayHost ? 'wd_selectinput_blocked' : explicitRequiredError ? 'missing_required' : 'submit_unclear';
         const recoveryKey = 'pja_recovery_submit_' + (job.id || job.jobId || job.applyUrl || '');
-        if (!success && !sessionStorage.getItem(recoveryKey)) {
+        // Do not mutate or resubmit an ambiguous post-click page. Recovery is authorized only by
+        // explicit validation evidence proving the preceding submit was rejected.
+        if (!success && explicitRequiredError && !sessionStorage.getItem(recoveryKey)) {
           sessionStorage.setItem(recoveryKey, '1');
           const recovery = await runApplyRecoveryLoop(terminalHelpReason, {
             visibleErrors: errs,
@@ -4135,11 +4290,15 @@
             navigateBack(job);
             return;
           }
-          if (recovery.executed || recovery.retrySubmit) {
+          if (!validationSubmitRetried && !isWorkdayHost &&
+              (recovery.executed || recovery.retrySubmit)) {
             await sleep(900);
             const submitAgain = findButton(/submit.*application|submit.*app|apply now|send application|complete application|^submit$|^submit application$/i);
             if (submitAgain && (recovery.retrySubmit || recovery.executed)) {
               await addDbg('[recover] retrying submit once after LLM recovery');
+              if (!(await persistSubmitPending())) return;
+              validationSubmitRetried = true;
+              sessionStorage.setItem('pja_last_action', 'submit_clicked:' + job.company);
               try {
                 submitAgain.scrollIntoView({ block: 'center', behavior: 'instant' });
                 const rr = submitAgain.getBoundingClientRect();
@@ -4147,8 +4306,8 @@
                   try { chrome.runtime.sendMessage({ type: 'LINKEDIN_TRUSTED_CLICK', x: rr.left + rr.width / 2, y: rr.top + rr.height / 2 }, resp => resolve(!(chrome.runtime.lastError || resp?.error))); }
                   catch (_) { resolve(false); }
                 });
-                if (!delivered) submitAgain.click();
-              } catch (_) { try { submitAgain.click(); } catch (_) {} }
+                if (!delivered) await addDbg('[recover] retry delivery unobserved; refusing fallback click');
+              } catch (_) { await addDbg('[recover] retry delivery threw; refusing fallback click'); }
               await sleep(4500);
               const postRetrySuccess = pjaIsSubmitSuccess({
                 text: document.body?.innerText || '',
@@ -6551,16 +6710,7 @@
     // A recovered/reopened tab can finish after another tab or the service-worker watchdog has
     // already advanced the queue. Never let that stale result append duplicates, mutate corpus
     // state, or advance the NEW current job (observed after queue recovery: 27 skips for 21 jobs).
-    const ownership = await new Promise(resolve => chrome.storage.local.get(['pja_ext_queue', 'pja_ext_current'], d => {
-      const q = d.pja_ext_queue, current = q && q.jobs && q.jobs[q.currentIndex];
-      const queueOwns = !!q && q.status === 'applying' && pjaSameQueuedJob(current, job);
-      const currentOwns = pjaSameQueuedJob(d.pja_ext_current, job);
-      // Ranked apply uses one-job queues and may repoint pja_ext_current during dispatcher
-      // recovery/reload. The queue is the durable owner for result recording; requiring both
-      // keys to match caused valid terminal results (captcha/missing_required) to be ignored,
-      // leaving pja_ext_queue stuck on the old job.
-      resolve({ owns: queueOwns && (currentOwns || !!job.rankedRun), handled: currentOwns && !!d.pja_ext_current?._handled });
-    }));
+    const ownership = await readApplyOwnership();
     if (!ownership.owns || ownership.handled) {
       console.log('PJA ext-apply: stale/duplicate result ignored', job.company, job.title);
       return;
@@ -6569,6 +6719,7 @@
     // click, which allowed a bare navigation to become a false positive on reload.
     const applicationAt = job._submitStartedAt || Date.now();
     job._handled = true;
+    job._applyPhase = 'terminal_recording';
     if (result.success) {
       job._confirmationSource = 'page';
       job._confirmedAt = Date.now();
@@ -6580,6 +6731,11 @@
       if (chrome.runtime.lastError) console.warn('PJA ext-apply: current result write failed', chrome.runtime.lastError.message);
       resolve();
     }));
+    const ownershipAfterCurrentWrite = await readApplyOwnership();
+    if (!ownershipAfterCurrentWrite.owns) {
+      console.warn('PJA ext-apply: result ownership changed before durable side effects; ignoring stale result');
+      return;
+    }
 
     const alreadyApplied = /^already_applied\b/i.test(String(result.reason || ''));
     let terminalDiagnostic = null;
@@ -6591,6 +6747,12 @@
       result.diagnostic = terminalDiagnostic;
     }
 
+    const ownershipBeforeDurableResult = await readApplyOwnership();
+    if (!ownershipBeforeDurableResult.owns) {
+      console.warn('PJA ext-apply: result ownership changed during diagnostics; ignoring stale durable result');
+      return;
+    }
+
     // Persist successful applies — and prior-session already-applied detections — to a DURABLE log
     // (pja_ext_queue gets overwritten each run, so sourcing dedupe needs this to avoid re-surfacing
     // the same roles). Prior-session already_applied is not counted as a new confirmed submission.
@@ -6600,7 +6762,10 @@
         confirmedAt: result.success ? job._confirmedAt : null });
     }
 
-    const uncertain = /unconfirmed|unclear|assumed|inferred/i.test(String(result.reason || ''));
+    const uncertain = window.PJAApplySelect && typeof window.PJAApplySelect.submittedUnverifiedReason === 'function'
+      ? window.PJAApplySelect.submittedUnverifiedReason(result.reason)
+      : /submit_unclear|submit_observation_timeout|workday_transport_failure|success_unverified|tab_lost_outcome_unknown|email_code_submit_unconfirmed|submit_unconfirmed|unconfirmed|assumed|inferred/i
+        .test(String(result.reason || ''));
     const pending = /ready_to_submit/i.test(String(result.reason || ''));
     const ledgerEvent = {
         runId: job.runId || null, jobId: job.jobId || job.id || null,

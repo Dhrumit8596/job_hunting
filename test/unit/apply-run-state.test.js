@@ -37,6 +37,27 @@ module.exports = t => {
   t.eq(noisyWrite.health, 'stalled',
     'run state: non-transition snapshot writes cannot hide a stalled handler');
 
+  const workdayStartedAt = 2_000_000;
+  const workday = {
+    ...run,
+    currentIndex: 0,
+    inFlightIndex: 0,
+    inFlightAt: workdayStartedAt,
+    lastTransitionAt: workdayStartedAt,
+    workdayAttemptTimeoutMs: 12 * 60 * 1000,
+    jobs: [{ id: 'wd', company: 'A', title: 'Process Engineer', channel: 'external',
+      strategy: 'workday', applyUrl: 'https://acme.wd1.myworkdayjobs.com/job/1' }],
+  };
+  t.eq(RunState.createSnapshot(workday,
+    { now: workdayStartedAt + 180001, clients: 1 }).health, 'waiting',
+  'run state: Workday remains active after the former three-minute cutoff');
+  t.eq(RunState.createSnapshot(workday,
+    { now: workdayStartedAt + 719999, clients: 1 }).health, 'waiting',
+  'run state: Workday remains bounded but waiting immediately inside twelve minutes');
+  t.eq(RunState.createSnapshot(workday,
+    { now: workdayStartedAt + 720001, clients: 1 }).health, 'stalled',
+  'run state: Workday becomes stalled immediately after the twelve-minute bound');
+
   const disconnected = RunState.createSnapshot(run, { now, clients: 0 });
   t.eq(disconnected.health, 'disconnected', 'run state: missing extension is explicit');
 

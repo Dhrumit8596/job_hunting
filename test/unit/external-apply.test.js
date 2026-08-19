@@ -35,20 +35,36 @@ module.exports = (t) => {
   t.ok(externalSource.includes('google\\.com$/i.test(location.hostname)') &&
     externalSource.includes('Gmail is used by the verification helper'),
   'external apply: never runs on Google/Gmail tabs used by email verification');
-  t.ok(externalSource.includes('[email-code] cdp submit after code timed out; using DOM click fallback') &&
+  t.ok(externalSource.includes('[email-code] cdp submit after code unobserved; refusing fallback click') &&
     externalSource.includes('[email-code] submit after code did not confirm') &&
     externalSource.includes('function findEmailCodeActionButton()') &&
+    externalSource.includes('function emailCodeActionIsVerificationOnly(button)') &&
     externalSource.includes('/verify|confirm|continue|next|submit.*code|send code|complete verification|confirm email/i') &&
-    externalSource.includes('code verified; clicking final submit'),
-  'external apply: post-email-code submit click is bounded and records non-confirmation');
+    externalSource.includes('code verified; clicking final submit') &&
+    externalSource.includes('if (!(await persistSubmitPending())) return { success: false, ownershipLost: true }'),
+  'external apply: post-email-code action is ownership-bound, phase-marked, bounded, and never fallback-clicked');
   t.ok(externalSource.includes('capturePostClickDiagnostic') &&
     externalSource.includes('CAPTURE_APPLY_DIAGNOSTIC') &&
     externalSource.includes('pja_last_post_click_diagnostic_pending') &&
     externalSource.includes('email_code_submit_unconfirmed') &&
-    externalSource.includes("waitForEmailCodeRecoveryOutcome(preSubmitUrl, 'post_submit_code_gate', clickedAfterCode)") &&
+    externalSource.includes("'post_submit_code_gate', clickedAfterCode, verificationOnly") &&
     externalSource.includes('if (result.diagnostic) skipped.diagnostic = result.diagnostic') &&
     externalSource.includes('diagnostic: collectPostClickPageSnapshot()'),
   'external apply: email-code submit failures persist post-click URL/DOM diagnostics before deferral');
+  t.ok(externalSource.includes('const emailCodeOwner = {') &&
+    externalSource.includes('...emailCodeOwner') &&
+    externalSource.includes('!openResp.sessionId') &&
+    externalSource.includes('const exactSession = { ...emailCodeOwner, sessionId: String(openResp.sessionId) }') &&
+    externalSource.includes("String(r.sessionId || '') === exactSession.sessionId") &&
+    externalSource.includes("type: 'CANCEL_EMAIL_CODE_SESSION'") &&
+    externalSource.includes('...exactSession'),
+  'external apply: generic email-code polling and cancellation accept only the exact opened session/run/job/route');
+  t.ok(externalSource.includes('const verificationOwnership = await readApplyOwnership()') &&
+    externalSource.includes('} else if (!(await persistSubmitPending())) return;') &&
+    externalSource.includes('initialActionAttempted: actionAttempted') &&
+    externalSource.includes('finalSubmitAttempted,') &&
+    externalSource.includes('submittedUnverifiedReason(result.reason)'),
+  'external apply: verification-only clicks stay pre-submit while any invoked final action and transport ambiguity are submitted/unverified');
   t.ok(externalSource.includes('async function buildTerminalApplyDiagnostic(job, result, applicationAt)') &&
     externalSource.includes('pja_apply_diagnostics') &&
     externalSource.includes('persistTerminalApplyDiagnostic(job, terminalDiagnostic)') &&
@@ -286,22 +302,37 @@ module.exports = (t) => {
     externalSource.includes("'workday_account_exists_wrong_password'") &&
     externalSource.includes("authResult2 === 'create_rejected_no_visible_error'"),
   'external-apply: Workday account-create/sign-in classifications are recorded as stable manual auth reasons');
-  const wdFinalSubmitBlock = externalSource.slice(
-    externalSource.indexOf('const stopBeforeFinalSubmit = await new Promise'),
+  const wdStepFinalBlock = externalSource.slice(
+    externalSource.indexOf('if (isFinalStepSubmit)'),
     externalSource.indexOf('const preClickUrl = location.href')
   );
-  t.ok(wdFinalSubmitBlock.includes('stop-before-submit at Workday final Submit') &&
-    wdFinalSubmitBlock.indexOf('stopBeforeFinalSubmit') < wdFinalSubmitBlock.indexOf("pja_wd_submitclick_"),
-  'external-apply: Workday final Submit inside the step loop honors stop-before-submit before clicking');
+  const wdUnifiedDelivery = externalSource.slice(
+    externalSource.indexOf("if (/workday\\.com|myworkdayjobs\\.com/i.test(location.hostname))", externalSource.indexOf("let workdaySubmitDelivery = ''")),
+    externalSource.indexOf("} else if (/greenhouse\\.io|ashbyhq\\.com/i.test(location.hostname))", externalSource.indexOf("let workdaySubmitDelivery = ''"))
+  );
+  t.ok(wdStepFinalBlock.includes('deferring to single-delivery final path') &&
+    wdStepFinalBlock.includes('break;') &&
+    !wdStepFinalBlock.includes('persistSubmitPending') &&
+    wdUnifiedDelivery.includes("trustedWorkdayClick(submitBtn, 'submit', { allowAdvanceFallback: false })") &&
+    !wdUnifiedDelivery.includes('submitBtn.click()'),
+  'external-apply: Workday final Submit bypasses the Next ladder and has one fail-closed trusted delivery');
   t.ok(externalSource.includes('const isWorkdayHost = /workday\\.com|myworkdayjobs\\.com/i.test(location.hostname)') &&
     externalSource.includes("reactSelectError && isWorkdayHost ? 'wd_selectinput_blocked'") &&
     externalSource.includes("explicitRequiredError ? 'missing_required' : 'submit_unclear'"),
   'external-apply: non-Workday React-select submit errors are not mislabeled wd_selectinput_blocked and explicit required errors are classified missing_required');
   t.ok(externalSource.includes('before auth starts') &&
+    externalSource.includes('const workdayPendingOwner = () => ({') &&
+    externalSource.includes("runId: job.runId || ''") &&
+    externalSource.includes("jobId: job.id || job.jobId || job.sourceJobId || ''") &&
+    externalSource.includes('applyUrl: job.applyUrl || location.href') &&
     externalSource.includes('pja_wd_pending_apply') &&
+    externalSource.includes('_wdOwnerClassify(_wdPendingApply, _wdResumeStorage)') &&
+    externalSource.includes('_wdResultMatchesPending') &&
+    externalSource.includes('_wdPendingMatchesLocalJob') &&
+    externalSource.includes('Do not overwrite that durable owner with a tab-less copy') &&
     externalSource.includes('stale') &&
     externalSource.indexOf('pja_wd_pending_apply') < externalSource.indexOf('const authResult = await window.pjaWorkdayAuth.run'),
-  'external-apply: Workday pending-apply context is written before Gmail verification starts');
+  'external-apply: Workday Gmail resume requires exact current run/job/route ownership and preserves the background-captured apply tab');
   t.ok(externalSource.includes('description entry → apply route nav attempt=') &&
     externalSource.includes('description entry → clicking Continue Application attempt=') &&
     externalSource.includes('const continueHref = continueBtn.href') &&
@@ -359,6 +390,53 @@ module.exports = (t) => {
     externalSource.includes("'workday_observation:' + observation.kind") &&
     externalSource.includes('Only explicit validation evidence makes a Workday correction/re-submit safe'),
   'external-apply: Workday observation distinguishes confirmation, blockers, validation, transport, and ambiguity without retrying a possible submission');
+  t.ok(externalSource.includes('const readApplyOwnership = () => new Promise') &&
+    externalSource.includes("['pja_ext_queue', 'pja_ext_current', 'pja_ranked_apply']") &&
+    externalSource.includes('window.PJAApplySelect.applyLifecycleOwnership') &&
+    externalSource.includes('const authDiagnosticOwnership = await readApplyOwnership()') &&
+    externalSource.includes('const postAuthOwnership = await readApplyOwnership()') &&
+    externalSource.includes('Workday auth completed after job ownership changed; stopping stale handler') &&
+    externalSource.includes('refusing stale Workday Next/Submit after exact run/job handoff') &&
+    externalSource.includes('refusing stale final Submit after exact run/job handoff') &&
+    externalSource.includes('ownershipBeforeDurableResult') &&
+    externalSource.includes("runId: job.runId || ''") &&
+    externalSource.includes('jobId: job.id || job.jobId || job.sourceJobId') &&
+    externalSource.includes('screen: authScreen'),
+  'external-apply: late Workday auth is exact-run diagnostic-only and cannot continue after queue ownership changes');
+  const submitMarkerHelper = externalSource.slice(
+    externalSource.indexOf('const persistSubmitPending = async'),
+    externalSource.indexOf('const collectApplyDomSummary')
+  );
+  const spaSubmitStart = externalSource.indexOf('const preSubmitUrl2 = location.href');
+  const genericRepairAt = externalSource.indexOf("repairAshbyRequiredFields('pre-submit')");
+  const genericPersistAt = externalSource.indexOf('persistSubmitPending(finalWorkdaySubmitKey)', genericRepairAt);
+  const optimisticWriteAt = externalSource.indexOf("pjaWriteAppliedLog(job, { status: 'submitting'", genericPersistAt);
+  const finalOwnershipAt = externalSource.indexOf('const finalClickOwnership = await readApplyOwnership()', optimisticWriteAt);
+  const finalClickAt = externalSource.indexOf("sessionStorage.setItem('pja_last_action', 'submit_clicked:'", finalOwnershipAt);
+  t.ok(submitMarkerHelper.includes("job._applyPhase = 'submit_pending'") &&
+    submitMarkerHelper.includes('after.phase !== \'submit_pending\'') &&
+    submitMarkerHelper.includes('after.submitStartedAt !== markerAt') &&
+    externalSource.indexOf('persistSubmitPending()', spaSubmitStart) < externalSource.indexOf('submitBtn2.click()', spaSubmitStart) &&
+    genericRepairAt < genericPersistAt && genericPersistAt < optimisticWriteAt &&
+    optimisticWriteAt < finalOwnershipAt && finalOwnershipAt < finalClickAt,
+  'external-apply: every initial submit is phase-marked fail-closed and generic ownership is rechecked after long/pre-click writes');
+  t.ok(externalSource.includes('const validationRetryOwnership = await readApplyOwnership()') &&
+    externalSource.includes('const sidRetryOwnership = await readApplyOwnership()') &&
+    externalSource.includes('if (!(await persistSubmitPending())) return;') &&
+    externalSource.includes('retry delivery unobserved; refusing fallback click') &&
+    !externalSource.includes('retryBtn.click()'),
+  'external-apply: post-await Next/re-submit actions recheck ownership and ambiguous submit delivery is never retried');
+  const preCodeRecoveryAt = externalSource.indexOf("recoverEmailVerificationCode('email_verification_required')");
+  const preCodeMarkerAt = externalSource.indexOf('persistSubmitPending()', preCodeRecoveryAt);
+  const preCodeClickAt = externalSource.indexOf('trustedPointClick(btn)', preCodeMarkerAt);
+  const postCodeRecoveryAt = externalSource.indexOf("recoverEmailVerificationCode('post_submit_email_code')");
+  const postCodeMarkerAt = externalSource.indexOf('persistSubmitPending()', postCodeRecoveryAt);
+  const postCodeClickAt = externalSource.indexOf('trustedPointClick(btn)', postCodeMarkerAt);
+  t.ok(preCodeRecoveryAt < preCodeMarkerAt && preCodeMarkerAt < preCodeClickAt &&
+    postCodeRecoveryAt < postCodeMarkerAt && postCodeMarkerAt < postCodeClickAt &&
+    externalSource.includes('email-code recovery completed after job handoff; refusing stale fill/click') &&
+    externalSource.includes('final submit delivery unobserved; refusing fallback click'),
+  'external-apply: both Gmail-wait branches revalidate durable ownership before any verification/final-submit action');
   t.ok(externalSource.includes("reasonHint === 'resume'") &&
     externalSource.includes('blocked advance retry: retrying resume upload') &&
     externalSource.includes("withTimeout(tryInjectResume(profile, answers), 90000, 'wd-resume-blocked-retry')"),

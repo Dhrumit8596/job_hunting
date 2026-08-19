@@ -26,10 +26,13 @@ module.exports = async (t) => {
     source.includes('Same-host Workday tabs are valid') &&
     source.includes('async function pjaRankedTabExists(tabId, job)') &&
     source.includes('chrome.tabs.get(tabId') &&
-    source.includes('in-flight tab missing; relaunching current job') &&
+    source.includes('async function pjaHandleRankedMissingTab(master, source)') &&
+    source.includes('one bounded relaunch') &&
+    source.includes("const reason = 'no_active_tab_pre_submit'") &&
+    source.includes('submitAttempted: false') &&
     source.includes('master.inFlightIndex = null') &&
     source.includes('master.inFlightTabId = null'),
-  'ranked dispatch: missing in-flight browser tab clears in-flight state so the current job can relaunch');
+  'ranked dispatch: a missing in-flight tab gets one pre-submit relaunch and then an explicit terminal event');
 
   t.ok(source.includes('reconciling stale currentIndex') &&
     source.includes("reason: 'stale_inflight_reconciled'") &&
@@ -104,14 +107,31 @@ module.exports = async (t) => {
     source.includes('master = await pjaRecoverRankedLastFailure(master)'),
   'ranked dispatch: resume recovers SuccessFactors landing-page no-submit failures as terminal no_apply_path events');
 
-  t.ok(source.includes("['pja_ext_current', 'pja_wd_auth_diag', 'pja_dbg_workday_auth']") &&
+  t.ok(source.includes("['pja_ext_current', 'pja_wd_auth_diag', 'pja_dbg_workday_auth', workdaySubmitKey]") &&
     source.includes('current._submitPending') &&
-    source.includes("submitPending ? 'submit_observation_timeout' : 'ranked_watchdog_timeout'") &&
-    source.includes('submitAttempted: submitPending') &&
-    source.includes("phase: submitPending ? 'submit_observation' : 'pre_submit'") &&
-    source.includes("status: submitPending ? 'submitted' : 'failed'") &&
-    source.includes('success: submitPending ? null : false'),
-  'ranked watchdog: a Workday submit-pending timeout remains unverified and is never converted to a retryable failure');
+    source.includes('workdaySubmitAt >= Number(ranked.inFlightAt || 0)') &&
+    source.includes('classifyMissingTabOutcome(stuck, {') &&
+    source.includes('const preSubmitProven = timeoutOutcome.kind') &&
+    source.includes("preSubmitProven ? 'ranked_watchdog_timeout' : 'submit_observation_timeout'") &&
+    source.includes("status: preSubmitProven ? 'failed' : 'submitted'") &&
+    source.includes('success: preSubmitProven ? false : null') &&
+    source.includes('submitAttempted: submitPending ? true : preSubmitProven ? false : null') &&
+    source.includes('diagnosticOwnsRankedJob(authDiag, ranked, stuck)') &&
+    source.includes('diagnosticOwnsRankedJob(authResult, ranked, stuck)'),
+  'ranked watchdog: only exact durable pre-submit phase may fail; pending or unknown outcomes remain unverified for every ATS');
+
+  t.ok(source.includes('ranked application tab disappeared after durable submit evidence') &&
+    source.includes('ranked application tab disappeared without durable pre-submit phase evidence') &&
+    source.includes("status: 'submitted', success: null, reason,") &&
+    source.includes('submitAttempted: submitPending ? true : null') &&
+    source.includes('phase: currentMatches ? current._applyPhase') &&
+    source.includes('handled: !!(currentMatches && current._handled)') &&
+    source.includes('String(current.runId || \'\') === String(master.runId || \'\')') &&
+    source.includes('submit_observation_timeout') &&
+    source.includes('tab_lost_outcome_unknown') &&
+    source.includes("phase: 'submit_observation'") &&
+    source.includes("const reason = 'no_active_tab_pre_submit'"),
+  'ranked missing-tab recovery never relaunches a job after durable submit evidence');
 
   t.ok(source.includes('function pjaMergeProfileWrite(previous, incoming') &&
     source.includes('rejected_empty_profile_overwrite') &&
@@ -176,7 +196,7 @@ module.exports = async (t) => {
     exactStatus.includes('writeApplyRunReport(reportStorage || {}, { runId })'),
   'exact-run observer returns compact owned state, retries transport gaps, and exports only from observed detail');
 
-  t.ok(source.includes("const PJA_RUNTIME_BUILD = 'apply-observer-v4'") &&
+  t.ok(source.includes("const PJA_RUNTIME_BUILD = 'apply-observer-v5'") &&
     source.includes("msg.cmd === 'pingExtension'") && source.includes("cmd: 'pingExtensionReply'") &&
     dev.includes("wsAsk('pingExtension'") && dev.includes('extensionResponsive:') &&
     dev.includes('extensionBuild:'),
@@ -219,7 +239,8 @@ module.exports = async (t) => {
   t.ok(source.includes('function pjaCompactApplyDiagnostic(value)') &&
     source.includes('const diagnostic = pjaCompactApplyDiagnostic(event.diagnostic || job.diagnostic || null)') &&
     source.includes('diagnostic: pjaCompactApplyDiagnostic(failure)') &&
-    source.includes('submit_unclear|submit_observation_timeout|workday_transport_failure|missing_required|needs_manual'),
+    source.includes('submit_unclear|submit_observation_timeout') &&
+    source.includes('workday_transport_failure|missing_required|needs_manual'),
   'ranked dispatch: per-job diagnostics survive ledger reconciliation, resume recovery, and completed-run snapshots');
 
   t.ok(source.includes("chrome.tabs.create({ url: 'about:blank', active: true }") &&
@@ -228,9 +249,27 @@ module.exports = async (t) => {
     source.includes("msg.type === 'CANCEL_EMAIL_CODE_SESSION'"),
   'background: generic Gmail code recovery stores session before Gmail navigation and supports cleanup');
 
+  t.ok(source.includes('async function pjaEmailCodeOwnerIsCurrent(owner)') &&
+    source.includes("sessionId: 'emailcode-'") &&
+    source.includes("runId: String(msg.runId || '')") &&
+    source.includes("jobId: String(msg.jobId || '')") &&
+    source.includes("applyUrl: String(msg.applyUrl || '')") &&
+    source.includes('sessionId: session.sessionId') &&
+    source.includes("reason: 'stale_email_code_session'") &&
+    source.includes('pjaEmailCodeResult(session,') &&
+    source.includes('String(session.sessionId || \'\') !== String(msg.sessionId)') &&
+    source.includes('await pjaRemoveEmailCodeSession(session)'),
+  'background: generic Gmail code open/result/cancel is scoped to an immutable session plus exact application owner');
+
+  t.ok(source.includes('const isWorkdaySession = !!(workdaySession && workdaySession.gmailTabId === tabId)') &&
+    source.includes('emailCodeSession && emailCodeSession.gmailTabId === tabId') &&
+    source.includes('if (!session) return;'),
+  'background: simultaneous Workday and generic Gmail sessions are selected by exact Gmail tab rather than key precedence');
+
   t.ok(source.includes('sameApplyTab && sameJob && applyTabAlive') &&
     source.includes("reason: 'stale_gmail_tab'") &&
-    source.includes("chrome.storage.local.remove('pja_email_code_session')"),
+    source.includes('await pjaRemoveEmailCodeSession(session)') &&
+    source.includes('await pjaRemoveEmailCodeSession(existing)'),
   'background: generic Gmail code recovery replaces abandoned sessions and ignores stale Gmail tabs');
 
   const gmailSource = fs.readFileSync(path.join(ROOT, 'content/gmail-verify.js'), 'utf8');
@@ -252,11 +291,44 @@ module.exports = async (t) => {
   t.ok(gmailSource.includes('function collectWorkdayRowEvidence(row)') &&
     gmailSource.includes('function collectOpenedWorkdayEmailEvidence()') &&
     gmailSource.includes("sendNoEmail('email_not_found', { rowCount: 0") &&
-    gmailSource.includes("chrome.runtime.sendMessage({ type: 'WD_GMAIL_FOUND_LINK', verifyUrl, evidence })") &&
+    gmailSource.includes("chrome.runtime.sendMessage({ type: 'WD_GMAIL_FOUND_LINK', verifyUrl, evidence,") &&
     source.includes('pja_wd_last_gmail_result') &&
     source.includes('targetEmail: msg.targetEmail ||') &&
     source.includes('searchQuery: session.searchQuery ||'),
   'Workday Gmail verification persists search/email/link evidence for success and failure diagnostics');
+
+  const workdayGmailHandler = source.slice(
+    source.indexOf("if (msg.type === 'WD_OPEN_GMAIL_TAB')"),
+    source.indexOf("if (msg.type === 'CAPTURE_APPLY_DIAGNOSTIC')")
+  );
+  const workdayFoundLinkHandler = source.slice(
+    source.indexOf("if (msg.type === 'WD_GMAIL_FOUND_LINK')"),
+    source.indexOf("if (msg.type === 'WD_GMAIL_NO_EMAIL_FOUND')")
+  );
+  t.ok(source.includes('async function pjaWorkdayGmailOwnerIsCurrent(owner)') &&
+    workdayGmailHandler.includes("chrome.tabs.create({ url: 'about:blank' }") &&
+    workdayGmailHandler.includes('pja_wd_gmail_session: session') &&
+    workdayGmailHandler.includes('pja_wd_pending_apply: {') &&
+    workdayGmailHandler.includes('runId: owner.runId') &&
+    workdayGmailHandler.includes('jobId: owner.jobId') &&
+    workdayGmailHandler.includes('applyUrl: owner.applyUrl') &&
+    workdayGmailHandler.includes('applyTabId') &&
+    workdayGmailHandler.includes('sessionId: session.sessionId') &&
+    workdayGmailHandler.includes('sendResponse({ ok: true, gmailTabId: tab.id, sessionId: session.sessionId })') &&
+    workdayGmailHandler.indexOf('pja_wd_gmail_session: session') <
+      workdayGmailHandler.indexOf('chrome.tabs.update(tab.id, { url: gmailUrl })') &&
+    workdayFoundLinkHandler.includes('if (!await pjaWorkdayGmailOwnerIsCurrent(session))') &&
+    workdayFoundLinkHandler.includes('chrome.tabs.update(session.applyTabId, { url: session.applyUrl })') &&
+    !workdayFoundLinkHandler.includes('pja_wd_pending_apply'),
+  'Workday Gmail flow persists an exact run/job/route/tab owner before navigation and never resumes from a newer global pending record');
+
+  t.ok(source.includes('if (owner && owner.sessionId)') &&
+    source.includes("String(active.sessionId || '') !== String(owner.sessionId)") &&
+    source.includes('sessionId: session.sessionId') &&
+    source.includes('if (!await pjaWorkdayGmailOwnerIsCurrent(session))') &&
+    source.includes('Page inspection is asynchronous') &&
+    source.includes('if (pw && await pjaWorkdayGmailOwnerIsCurrent(session))'),
+  'Workday Gmail async callbacks and password-reset side effects require the exact still-active session owner');
 
   t.ok(source.includes("chrome.storage.local.remove(['pja_email_code_result', 'pja_navigate_to']") &&
     source.includes('chrome.tabs.query({ url: `https://mail.google.com/mail/${acctPath}/*` }') &&
@@ -334,12 +406,13 @@ module.exports = async (t) => {
     source.includes('pjaScheduleRankedReinject(master.runId, master.currentIndex, tabId, 150000)'),
   'ranked dispatch: active ATS tabs get bounded guard-reset reinjection watchdogs while still in-flight');
 
-  t.ok(source.includes('PJA apply-watchdog: in-flight tab missing; redispatching current ranked job') &&
+  t.ok(source.includes("pjaHandleRankedMissingTab(ranked, 'watchdog')") &&
+    source.includes('if (!missing.terminal) await pjaDispatchRankedCurrent(missing.master)') &&
     source.includes('ranked = await pjaRecoverRankedLastFailure(ranked)') &&
     source.includes('ranked.inFlightIndex == null') &&
     source.includes('ranked.currentIndex <= (ranked.jobs || []).length') &&
     source.includes('await pjaDispatchRankedCurrent(ranked);'),
-  'apply watchdog: terminal last-failure state is reconciled and missing in-flight tabs are redispatched instead of leaving a stale active run');
+  'apply watchdog: terminal state is reconciled and missing tabs use the bounded recovery contract');
 
   t.ok(source.includes('const rankedIsWorkday = !!(rankedJob && /workday') &&
     source.includes('const configuredWorkdayCap = ranked && ranked.workdayAttemptTimeoutMs') &&

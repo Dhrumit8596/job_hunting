@@ -16,6 +16,12 @@ module.exports = async t => {
     'source safety: source client timeout and apply/handoff reserve fit the overall workflow');
   t.ok(budgets.sourcingBudgetMs < budgets.sourceClientTimeoutMs && budgets.browserBudgetMs < budgets.sourcingBudgetMs,
     'source safety: sourcing and browser work finish before their enclosing client deadlines');
+  t.eq(Safety.resolveWorkdayAttemptTimeoutMs({ e2eSafe: true }), 12 * 60 * 1000,
+    'source safety: one-click E2E Workday gets the handler-aligned twelve-minute default');
+  t.eq(Safety.resolveWorkdayAttemptTimeoutMs({ e2eSafe: true, workdayAttemptTimeoutMs: 240000 }), 240000,
+    'source safety: an explicit Workday timeout override wins over the default');
+  t.eq(Safety.resolveWorkdayAttemptTimeoutMs({ e2eSafe: false }), undefined,
+    'source safety: non-E2E planning leaves the Workday timeout unspecified');
   let impossible = '';
   try { Safety.calculateWorkflowBudgets({ workflowTimeoutMs: 60000, applyTimeoutMs: 50000,
     handoffReserveMs: 15000, minimumSourceClientMs: 10000 }); } catch (error) { impossible = error.code; }

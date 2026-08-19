@@ -25,6 +25,10 @@ module.exports = t => {
     'retry policy: submitted submit-observation timeout is blocked regardless of ledger status');
   t.eq(Policy.classifyLedgerEvent(ambiguous('submitted', 'success_unverified')).blocksAutomaticRetry, true,
     'retry policy: any submitted/unverified outcome stays non-confirmed and non-auto-retryable');
+  t.eq(Policy.classifyLedgerEvent(ambiguous('submitted', 'tab_lost_outcome_unknown')).blocksAutomaticRetry, true,
+    'retry policy: a vanished native tab with unknown submit phase is blocked from automatic retry');
+  t.eq(Policy.classifyLedgerEvent(ambiguous('submitted', 'email_code_submit_unconfirmed')).blocksAutomaticRetry, true,
+    'retry policy: a possibly-final email-code action remains unconfirmed and non-auto-retryable');
   t.eq(Policy.classifyLedgerEvent({ ...submitted, status: 'applied', reason: 'submitted_assumed',
     confirmationSource: 'page', confirmedAt: 300 }).confirmed, false,
   'retry policy: inferred page evidence is not mislabeled as confirmed by planner or report policy');

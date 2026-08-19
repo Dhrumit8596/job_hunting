@@ -3094,8 +3094,7 @@ ${(description || '').slice(0, 6000)}`;
           includeAssisted: o.includeAssisted !== false,
           perCompanyCap: o.perCompanyCap != null ? o.perCompanyCap : 2,
           e2eSafe: o.e2eSafe !== false,
-          workdayAttemptTimeoutMs: o.workdayAttemptTimeoutMs != null ? Number(o.workdayAttemptTimeoutMs)
-            : o.e2eSafe !== false ? 180000 : undefined,
+          workdayAttemptTimeoutMs: SourceSafety.resolveWorkdayAttemptTimeoutMs(o),
           coverage: coverageMode,
           coverageCount,
           requiredChannels: coverageMode ? Array.from(new Set(coverageChannels.map(x => String(x || '').trim()).filter(Boolean))) : o.requiredChannels,

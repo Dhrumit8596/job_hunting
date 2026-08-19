@@ -3,7 +3,7 @@
 // Shared pure policy for deciding whether a ledger outcome may be retried automatically. This is
 // UMD because both the MV3 service worker and the Node dev server must use the exact same rules.
 (function (root) {
-  const AMBIGUOUS_SUBMISSION_RE = /submit_unclear|submit_observation_timeout|workday_transport_failure|submit_unconfirmed|success_unverified|submitted_unverified/i;
+  const AMBIGUOUS_SUBMISSION_RE = /submit_unclear|submit_observation_timeout|workday_transport_failure|submit_unconfirmed|success_unverified|submitted_unverified|tab_lost_outcome_unknown/i;
   const EXTERNAL_BLOCKER_RE = /captcha|daily_limit|checkpoint|email_verification_required|workday_account_locked|workday_account_exists_wrong_password|workday_captcha|google_sso_only/i;
   const MANUAL_ONLY_RE = /workday_duplicate_record|ready_to_submit_review|chatbot_apply_manual|unsupported_|no_apply_path/i;
   const HOST_BLOCKER_RE = /workday_duplicate_record|workday_captcha|workday_account_locked/i;

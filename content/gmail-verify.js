@@ -8,7 +8,7 @@ console.log('PJA gmail-verify: injected into Gmail tab');
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
 function sendNoEmail(reason, evidence) {
-  chrome.storage.local.get('pja_email_code_session', d => {
+  chrome.storage.local.get(['pja_email_code_session', 'pja_wd_gmail_session'], d => {
     const details = {
       reason,
       pageUrl: location.href,
@@ -17,8 +17,15 @@ function sendNoEmail(reason, evidence) {
       hash: location.hash || '',
       evidence: evidence || null
     };
-    if (d && d.pja_email_code_session) chrome.runtime.sendMessage({ type: 'EMAIL_CODE_NOT_FOUND', ...details });
-    else chrome.runtime.sendMessage({ type: 'WD_GMAIL_NO_EMAIL_FOUND', ...details });
+    const kind = window.__pjaGmailSessionKind;
+    const sessionId = String(window.__pjaGmailSessionId || '');
+    const codeSession = d && d.pja_email_code_session;
+    const workdaySession = d && d.pja_wd_gmail_session;
+    if (kind === 'code' && codeSession && String(codeSession.sessionId || '') === sessionId) {
+      chrome.runtime.sendMessage({ type: 'EMAIL_CODE_NOT_FOUND', sessionId, ...details });
+    } else if (kind === 'workday' && workdaySession && String(workdaySession.sessionId || '') === sessionId) {
+      chrome.runtime.sendMessage({ type: 'WD_GMAIL_NO_EMAIL_FOUND', sessionId, ...details });
+    }
   });
 }
 
@@ -338,10 +345,20 @@ async function findCodeInEmailBody(maxMs = 8000, expectedLength = 8, codeSession
 
 async function main() {
   await sleep(1000);
-  const sessionData = await new Promise(r => chrome.storage.local.get('pja_email_code_session', r));
-  const codeSession = sessionData && sessionData.pja_email_code_session;
+  const sessionData = await new Promise(r => chrome.storage.local.get(
+    ['pja_email_code_session', 'pja_wd_gmail_session'], r));
+  const injectedKind = window.__pjaGmailSessionKind;
+  const injectedSessionId = String(window.__pjaGmailSessionId || '');
+  const storedCodeSession = sessionData && sessionData.pja_email_code_session;
+  const storedWorkdaySession = sessionData && sessionData.pja_wd_gmail_session;
+  const codeSession = injectedKind === 'code' && storedCodeSession &&
+    String(storedCodeSession.sessionId || '') === injectedSessionId ? storedCodeSession : null;
+  const workdaySession = injectedKind === 'workday' && storedWorkdaySession &&
+    String(storedWorkdaySession.sessionId || '') === injectedSessionId ? storedWorkdaySession : null;
+  if (!codeSession && !workdaySession) return;
   if (!isOnSearchPage()) {
-    const ready = codeSession && await waitForSearchContext(codeSession.searchQuery || '');
+    const activeSession = codeSession || workdaySession;
+    const ready = activeSession && await waitForSearchContext(activeSession.searchQuery || '');
     if (!ready) {
       console.log('PJA gmail-verify: not on search page, may be auth challenge');
       sendNoEmail('not_on_search_page');
@@ -371,6 +388,7 @@ async function main() {
       if (openEvidence?.verified) {
         console.log('PJA gmail-verify: sending EMAIL_CODE_FOUND from open email len=' + openEvidence.code.length + ' subject=' + openEvidence.subject);
         chrome.runtime.sendMessage({ type: 'EMAIL_CODE_FOUND', code: openEvidence.code, codeLength: openEvidence.code.length,
+          sessionId: codeSession.sessionId,
           evidence: { ...openEvidence, code: undefined } });
         return;
       }
@@ -394,6 +412,7 @@ async function main() {
       if (rowEvidence?.verified) {
         console.log('PJA gmail-verify: sending EMAIL_CODE_FOUND from row len=' + rowEvidence.code.length + ' subject=' + rowEvidence.subject);
         chrome.runtime.sendMessage({ type: 'EMAIL_CODE_FOUND', code: rowEvidence.code, codeLength: rowEvidence.code.length,
+          sessionId: codeSession.sessionId,
           evidence: { ...rowEvidence, code: undefined } });
         return;
       }
@@ -419,11 +438,13 @@ async function main() {
     if (!evidence?.verified) {
       console.log('PJA gmail-verify: no verification code found in top emails');
       chrome.runtime.sendMessage({ type: 'EMAIL_CODE_NOT_FOUND', reason: evidence?.code ? 'unverified_email_source' : 'code_not_found',
+        sessionId: codeSession.sessionId,
         evidence: evidence ? { ...evidence, code: undefined } : null });
       return;
     }
     console.log('PJA gmail-verify: sending EMAIL_CODE_FOUND len=' + evidence.code.length + ' subject=' + evidence.subject);
     chrome.runtime.sendMessage({ type: 'EMAIL_CODE_FOUND', code: evidence.code, codeLength: evidence.code.length,
+      sessionId: codeSession.sessionId,
       evidence: { ...evidence, code: undefined } });
     return;
   }
@@ -452,7 +473,8 @@ async function main() {
   }
 
   console.log('PJA gmail-verify: sending WD_GMAIL_FOUND_LINK');
-  chrome.runtime.sendMessage({ type: 'WD_GMAIL_FOUND_LINK', verifyUrl, evidence });
+  chrome.runtime.sendMessage({ type: 'WD_GMAIL_FOUND_LINK', verifyUrl, evidence,
+    sessionId: workdaySession && workdaySession.sessionId });
 }
 
 main().catch(err => {

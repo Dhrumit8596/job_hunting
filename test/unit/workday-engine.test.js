@@ -77,8 +77,11 @@ module.exports = (t) => {
     'workday observation: failed submit delivery is a transport failure');
   t.eq(classify({ watchdog: true, submitAttempted: false }).kind, 'watchdog_failure',
     'workday observation: pre-submit watchdog remains a failure');
-  t.eq(classify({ watchdog: true, submitAttempted: true }).reason, 'submit_observation_timeout',
-    'workday observation: post-submit watchdog is unverified and must never be retried');
+  const postSubmitWatchdog = classify({ watchdog: true, submitAttempted: true });
+  t.eq(postSubmitWatchdog.reason, 'submit_observation_timeout',
+    'workday observation: post-submit watchdog is unverified');
+  t.eq(postSubmitWatchdog.kind === 'submitted_unverified' && postSubmitWatchdog.retrySafe === false, true,
+    'workday observation: post-submit watchdog is never confirmed or retryable');
   t.eq(classify({ submitAttempted: true }).kind, 'submitted_unverified',
     'workday observation: ambiguous post-submit state remains submitted/unverified');
 

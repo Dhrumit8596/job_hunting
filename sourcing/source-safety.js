@@ -171,6 +171,13 @@
       clampedSourceTimeout: requestedSourceClientMs !== sourceClientTimeoutMs,
       clampedSourcingBudget: requestedSourcingMs !== sourcingBudgetMs };
   }
+  function resolveWorkdayAttemptTimeoutMs(options = {}) {
+    if (Object.prototype.hasOwnProperty.call(options, 'workdayAttemptTimeoutMs') &&
+        options.workdayAttemptTimeoutMs != null) {
+      return Number(options.workdayAttemptTimeoutMs);
+    }
+    return options.e2eSafe !== false ? 12 * 60 * 1000 : undefined;
+  }
   function standaloneDeadline(options = {}) {
     const now = options.now == null ? Date.now() : Number(options.now);
     const maximumBudgetMs = finitePositive(options.maximumBudgetMs, DEFAULT_STANDALONE_SOURCE_MS);
@@ -185,7 +192,7 @@
 
   const api = { SOURCE_STORAGE_KEYS, sourceError, remainingDeadlineMs, optionalRunId, sourceDecision,
     assertSourceDecision, guardedMutation, storageObserved, compactSourcingStorage, readObservedSourcingStorage,
-    withObservedSourcingStorage, calculateWorkflowBudgets, standaloneDeadline };
+    withObservedSourcingStorage, calculateWorkflowBudgets, resolveWorkdayAttemptTimeoutMs, standaloneDeadline };
   if (root) root.PJASourceSafety = api;
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
 })(typeof self !== 'undefined' ? self : (typeof globalThis !== 'undefined' ? globalThis : this));

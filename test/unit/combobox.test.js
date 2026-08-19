@@ -8,9 +8,9 @@ const path = require('path');
 const { JSDOM } = require('jsdom');
 const ROOT = path.resolve(__dirname, '../..');
 
-function load() {
+function load(url = 'https://boards.greenhouse.io/acme/jobs/1') {
   const dom = new JSDOM('<!DOCTYPE html><body></body>',
-    { url: 'https://boards.greenhouse.io/acme/jobs/1', runScripts: 'outside-only' });
+    { url, runScripts: 'outside-only' });
   const w = dom.window;
   w.chrome = { storage: { local: { get: (k, cb) => cb && cb({}), set: (o, cb) => cb && cb() } },
     runtime: { sendMessage() {}, onMessage: { addListener() {} }, getURL: p => p } };
@@ -44,6 +44,36 @@ function makeCombobox(w, id, optionTexts) {
 
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 
+function makeVisible(el) {
+  el.getBoundingClientRect = () => ({ left: 0, top: 0, right: 240, bottom: 36, width: 240, height: 36 });
+  return el;
+}
+
+function makeSmartRecruitersLocationFixture(w) {
+  w.HTMLElement.prototype.scrollIntoView = function() {};
+  const messages = [];
+  let input = null;
+  w.chrome.runtime.sendMessage = (message, callback) => {
+    messages.push(message);
+    // Force pjaCdpClickEl's immediate synthetic fallback so the fixture can observe the option
+    // click; typing/Enter remain successful trusted-operation acknowledgements.
+    if (message.type === 'CDP_TYPE_AT' && input) input.value = message.text || '';
+    if (message.type === 'LINKEDIN_TRUSTED_CLICK') callback?.({ error: 'fixture-click' });
+    else callback?.({});
+  };
+  const host = makeVisible(w.document.createElement('spl-autocomplete'));
+  host.className = 'ng-invalid';
+  const shadow = host.attachShadow({ mode: 'open' });
+  input = makeVisible(w.document.createElement('input'));
+  input.setAttribute('required', '');
+  input.setAttribute('role', 'combobox');
+  input.setAttribute('aria-label', 'Current location');
+  input.setAttribute('aria-invalid', 'true');
+  shadow.appendChild(input);
+  w.document.body.appendChild(host);
+  return { host, input, messages };
+}
+
 module.exports = async (t) => {
   const w = load();
   t.ok(typeof w.pjaFillCombobox === 'function', 'combobox: pjaFillCombobox exported');
@@ -72,6 +102,10 @@ module.exports = async (t) => {
     autofillSource.includes('setSplTextHost') &&
     autofillSource.includes('country/region-autocomplete'),
   'combobox: SmartRecruiters custom spl-input, spl-phone-field, and country autocomplete fields are filled');
+  t.ok(autofillSource.includes('requireCommittedSelection') &&
+    autofillSource.includes('locationAutocompleteHosts.includes(el)') &&
+    autofillSource.includes("getAttribute?.('aria-invalid') === 'true'"),
+  'combobox: SmartRecruiters location autocompletes require a valid committed selection and are not retried by the legacy fallback');
   t.ok(autofillSource.includes('if yes[\\s\\S]{0,30}(visa|status)') &&
     autofillSource.includes('ans = profile.visaStatus || null'),
   'combobox: Greenhouse policy react-select sweep commits conditional visa type/status fields');
@@ -199,6 +233,61 @@ module.exports = async (t) => {
     autofillSource.includes("pjaFillTextViaFiber(inp, digits, true)") &&
     autofillSource.includes("new InputEvent('beforeinput'"),
   'combobox: Greenhouse phone force-fill updates React/native state even when digits are visible');
+
+  // SmartRecruiters can mark only the inner current-location combobox as required and render its
+  // spl-select-option after trusted typing. It must stay a location (not positional Country), wait
+  // for that delayed option, and count the field only after the widget becomes valid.
+  const sr = load('https://jobs.smartrecruiters.com/Example/fixture-job');
+  const srFixture = makeSmartRecruitersLocationFixture(sr);
+  let selectedLocation = null;
+  sr.setTimeout(() => {
+    const option = makeVisible(sr.document.createElement('spl-select-option'));
+    option.textContent = 'Testville, California, United States';
+    option.addEventListener('click', () => {
+      selectedLocation = option.textContent;
+      srFixture.host.className = 'ng-valid';
+      srFixture.host.value = option.textContent;
+      srFixture.host.setAttribute('value', option.textContent);
+      srFixture.input.value = option.textContent;
+      srFixture.input.setAttribute('aria-invalid', 'false');
+    });
+    sr.document.body.appendChild(option);
+  }, 750);
+  const srFilled = await sr.pjaFillSmartRecruitersCustomFields({
+    currentLocation: 'Testville, CA', city: 'Testville', state: 'CA', country: 'United States'
+  });
+  t.eq(selectedLocation, 'Testville, California, United States',
+    'combobox: SmartRecruiters current location waits for and clicks the delayed custom option');
+  t.eq(srFilled, 1,
+    'combobox: SmartRecruiters counts the current location only after the option commits valid state');
+  t.eq(srFixture.messages.some(m => m.type === 'CDP_TYPE_AT' && m.text === 'United States'), false,
+    'combobox: explicit SmartRecruiters Current location is never misclassified as positional Country');
+
+  const srInvalid = load('https://jobs.smartrecruiters.com/Example/fixture-job-no-options');
+  const invalidFixture = makeSmartRecruitersLocationFixture(srInvalid);
+  invalidFixture.host.className = '';
+  invalidFixture.input.setAttribute('aria-invalid', 'false');
+  const invalidFilled = await srInvalid.pjaFillSmartRecruitersCustomFields({
+    currentLocation: 'Testville, CA', city: 'Testville', state: 'CA', country: 'United States'
+  });
+  t.eq(invalidFilled, 0,
+    'combobox: SmartRecruiters unchanged preexisting aria-invalid=false plus raw text is not counted without an option');
+  t.eq(invalidFixture.input.value, 'Testville, CA',
+    'combobox: SmartRecruiters stale-validity regression exercises a real raw typed value');
+  t.eq(invalidFixture.input.getAttribute('aria-invalid'), 'false',
+    'combobox: SmartRecruiters stale pre-action valid marker remains unchanged after trusted Enter');
+  t.eq(invalidFixture.host.getAttribute('data-pja-value'), null,
+    'combobox: SmartRecruiters does not mask an unresolved location with a native-value fallback');
+
+  const srNoValidity = load('https://jobs.smartrecruiters.com/Example/fixture-job-no-validity');
+  const noValidityFixture = makeSmartRecruitersLocationFixture(srNoValidity);
+  noValidityFixture.host.className = '';
+  noValidityFixture.input.removeAttribute('aria-invalid');
+  const noValidityFilled = await srNoValidity.pjaFillSmartRecruitersCustomFields({
+    currentLocation: 'Testville, CA', city: 'Testville', state: 'CA', country: 'United States'
+  });
+  t.eq(noValidityFilled, 0,
+    'combobox: trusted Enter plus raw text is not selection evidence without an explicit valid transition');
 
   // sponsorship = No -> selects the will-NOT-require option (not the require one)
   const c1 = makeCombobox(w, 'spons', ['Yes, I will require sponsorship', 'No, I will not require sponsorship']);

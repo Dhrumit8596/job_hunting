@@ -14,7 +14,7 @@ try {
 // Nano (SLM) is disabled when DEV_MODE is true.
 const DEV_MODE = true;
 const DEV_SERVER = 'http://localhost:6174';
-const PJA_RUNTIME_BUILD = 'apply-observer-v4';
+const PJA_RUNTIME_BUILD = 'apply-observer-v5';
 
 function pjaSanitizeProfileForRuntimeQueue(profile) {
   const src = profile && typeof profile === 'object' ? profile : {};
@@ -285,7 +285,8 @@ async function pjaLaunchExternalSingle(job, master) {
   const launchedAt = Date.now();
   const queue = { status: 'applying', jobs: [job], currentIndex: 0,
     results: { applied: [], skipped: [] }, runId: master.runId, startedAt: launchedAt };
-  const current = Object.assign({}, job, { returnUrl: 'https://www.linkedin.com/jobs/', runId: master.runId });
+  const current = Object.assign({}, job, { returnUrl: 'https://www.linkedin.com/jobs/',
+    runId: master.runId, _applyPhase: 'pre_submit' });
   const seed = { pja_ext_queue: queue, pja_ext_current: current,
     pja_ext_stop_before_submit: !!master.stopBeforeSubmit, pja_navigate_to: job.applyUrl,
     // Every ranked reserve is a one-job subqueue with the same runId/index. Include its canonical
@@ -369,6 +370,70 @@ function pjaSameRankedJob(job, event) {
   const norm = value => String(value || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
   return ids.some(id => eventIds.includes(id)) && norm(job && job.company) === norm(event && event.company)
     && norm(job && job.title) === norm(event && event.title);
+}
+
+async function pjaWorkdayGmailOwnerIsCurrent(owner) {
+  if (!self.PJAApplySelect?.workdayGmailOwnership) return false;
+  const storage = await new Promise(r => chrome.storage.local.get(
+    ['pja_ext_queue', 'pja_ext_current', 'pja_ranked_apply', 'pja_wd_gmail_session'], r));
+  if (!self.PJAApplySelect.workdayGmailOwnership(owner, storage)) return false;
+  if (owner && owner.sessionId) {
+    const active = storage.pja_wd_gmail_session;
+    if (!active || String(active.sessionId || '') !== String(owner.sessionId)) return false;
+  }
+  return true;
+}
+
+async function pjaRemoveWorkdayGmailSession(session) {
+  if (!session || !session.sessionId) return;
+  const { pja_wd_gmail_session: current } = await new Promise(r =>
+    chrome.storage.local.get('pja_wd_gmail_session', r));
+  if (current && current.sessionId === session.sessionId) {
+    await new Promise(r => chrome.storage.local.remove('pja_wd_gmail_session', r));
+  }
+}
+
+function pjaWorkdayVerifyResult(session, fields = {}) {
+  return {
+    sessionId: session.sessionId,
+    runId: session.runId,
+    jobId: session.jobId,
+    applyUrl: session.applyUrl,
+    hostname: session.hostname,
+    ...fields,
+  };
+}
+
+async function pjaEmailCodeSessionIsActive(session) {
+  if (!session || !session.sessionId) return false;
+  const { pja_email_code_session: current } = await new Promise(r =>
+    chrome.storage.local.get('pja_email_code_session', r));
+  return !!current && String(current.sessionId || '') === String(session.sessionId);
+}
+
+async function pjaRemoveEmailCodeSession(session) {
+  if (!await pjaEmailCodeSessionIsActive(session)) return;
+  await new Promise(r => chrome.storage.local.remove('pja_email_code_session', r));
+}
+
+function pjaEmailCodeResult(session, fields = {}) {
+  return {
+    sessionId: session.sessionId,
+    runId: session.runId,
+    jobId: session.jobId,
+    applyUrl: session.applyUrl,
+    hostname: session.hostname,
+    company: session.company,
+    title: session.title,
+    ...fields,
+  };
+}
+
+async function pjaEmailCodeOwnerIsCurrent(owner) {
+  if (!self.PJAApplySelect?.emailCodeOwnership) return false;
+  const storage = await new Promise(r => chrome.storage.local.get(
+    ['pja_ext_queue', 'pja_ext_current', 'pja_ranked_apply', 'pja_email_code_session'], r));
+  return self.PJAApplySelect.emailCodeOwnership(owner, storage);
 }
 
 function pjaRankedStopsOnTarget(master) {
@@ -944,8 +1009,10 @@ async function pjaRecoverRankedLastFailure(master) {
   const reason = String(failure.reason || '');
   const isSuccessFactors = /successfactors|talentcommunity/i.test(String(job.ats || job.channel || '') + ' ' + String(job.applyUrl || ''));
   const recoveredReason = isSuccessFactors && reason === 'no_submit_btn' ? 'no_apply_path' : reason;
-  if (!/^(no_apply_path|no_submit_btn|posting_not_found|apply_btn_no_form|no_apply_btn_on_description|submit_unclear|submit_observation_timeout|workday_transport_failure|missing_required|needs_manual|captcha|captcha_or_antibot|email_verification_required|auth_blocked|wd_selectinput_blocked|workday_duplicate_record|workday_account_locked|workday_account_exists_wrong_password|workday_captcha|workday_auth_sign_in_error|unsupported_strategy|unsupported_apply_strategy|stuck_budget|handler_timeout|watchdog_timeout|stuck_watchdog|ranked_watchdog_timeout|success_unverified|no_submit_after_spa)$/.test(reason)) return master;
-  const uncertain = /submit_unclear|submit_observation_timeout/i.test(reason);
+  if (!/^(no_apply_path|no_submit_btn|posting_not_found|apply_btn_no_form|no_apply_btn_on_description|submit_unclear|submit_observation_timeout|email_code_submit_unconfirmed|workday_transport_failure|missing_required|needs_manual|captcha|captcha_or_antibot|email_verification_required|auth_blocked|wd_selectinput_blocked|workday_duplicate_record|workday_account_locked|workday_account_exists_wrong_password|workday_captcha|workday_auth_sign_in_error|unsupported_strategy|unsupported_apply_strategy|stuck_budget|handler_timeout|watchdog_timeout|stuck_watchdog|ranked_watchdog_timeout|success_unverified|no_submit_after_spa|no_active_tab_pre_submit|tab_lost_outcome_unknown)$/.test(reason)) return master;
+  const uncertain = self.PJAApplySelect && typeof self.PJAApplySelect.submittedUnverifiedReason === 'function'
+    ? self.PJAApplySelect.submittedUnverifiedReason(reason)
+    : /submit_unclear|submit_observation_timeout|workday_transport_failure|success_unverified|tab_lost_outcome_unknown|email_code_submit_unconfirmed|submit_unconfirmed|unconfirmed|assumed|inferred/i.test(reason);
   const skipped = /captcha|ready_to_submit/i.test(reason);
   const event = {
     runId: master.runId,
@@ -974,6 +1041,102 @@ async function pjaRecoverRankedLastFailure(master) {
     await pjaSetLocal({ pja_ranked_apply: master });
   }
   return master;
+}
+
+async function pjaHandleRankedMissingTab(master, source) {
+  const job = master && master.jobs && master.jobs[master.currentIndex];
+  if (!job || !self.PJAApplySelect?.missingTabRecoveryDecision) {
+    return { master, terminal: false };
+  }
+  const workdaySubmitKey = 'pja_wd_submitclick_' + (job.id || job.jobId || '');
+  const submitState = await new Promise(r => chrome.storage.local.get(
+    ['pja_ext_current', workdaySubmitKey], r));
+  const current = submitState.pja_ext_current;
+  const workdaySubmitAt = Number(submitState[workdaySubmitKey] || 0);
+  const isWorkday = /workday\.com|myworkdayjobs\.com|workday/i.test(
+    String(job.applyUrl || '') + ' ' + String(job.ats || job.channel || job.strategy || ''));
+  const currentMatches = !!(current && pjaSameRankedJob(current, job) &&
+    String(current.runId || '') === String(master.runId || ''));
+  const submitPending = !!(currentMatches && current._submitPending) ||
+    (isWorkday && workdaySubmitAt >= Number(master.inFlightAt || 0) && workdaySubmitAt <= Date.now());
+  const tabOutcome = self.PJAApplySelect.classifyMissingTabOutcome
+    ? self.PJAApplySelect.classifyMissingTabOutcome(job, {
+      currentMatches,
+      submitPending,
+      phase: currentMatches ? current._applyPhase : '',
+      handled: !!(currentMatches && current._handled),
+    })
+    : { kind: 'submitted_unverified', reason: 'tab_lost_outcome_unknown' };
+  if (tabOutcome.kind === 'submitted_unverified') {
+    const reason = tabOutcome.reason;
+    const diagnostic = pjaCompactApplyDiagnostic({
+      schemaVersion: 1,
+      phase: 'submit_observation',
+      reason,
+      ats: job.ats || job.strategy || '',
+      hostname: pjaRankedApplyHostname(job.applyUrl),
+      url: job.applyUrl,
+      formSummary: submitPending
+        ? 'ranked application tab disappeared after durable submit evidence'
+        : 'ranked application tab disappeared without durable pre-submit phase evidence',
+      visibleErrors: [String(source || (submitPending ? 'missing_tab_after_submit' : 'missing_tab_outcome_unknown'))],
+      capturedAt: Date.now(),
+    });
+    await pjaRestoreRankedFailureState(job, reason, master);
+    await pjaAppendApplicationEvent({
+      runId: master.runId, jobId: job.jobId || job.id, applyUrl: job.applyUrl,
+      company: job.company, title: job.title, channel: job.channel || job.ats,
+      status: 'submitted', success: null, reason,
+      submitAttempted: submitPending ? true : null,
+      phase: 'submit_observation', diagnostic,
+      applicationAt: job.applicationAt || master.inFlightAt || Date.now(), occurredAt: Date.now(),
+    });
+    const latest = await new Promise(r => chrome.storage.local.get('pja_ranked_apply', r));
+    return { master: latest.pja_ranked_apply || master, terminal: true };
+  }
+  const decision = self.PJAApplySelect.missingTabRecoveryDecision(master, job, { limit: 1 });
+  master.missingTabRecovery = decision.tracker;
+  if (decision.action === 'relaunch') {
+    console.warn('PJA ranked apply: in-flight tab missing; one bounded relaunch', master.currentIndex, source || 'unknown');
+    master.inFlightIndex = null;
+    master.inFlightTabId = null;
+    master.inFlightAt = null;
+    master.updatedAt = Date.now();
+    await pjaSetLocal({ pja_ranked_apply: master });
+    return { master, terminal: false };
+  }
+
+  const reason = 'no_active_tab_pre_submit';
+  const diagnostic = pjaCompactApplyDiagnostic({
+    schemaVersion: 1,
+    phase: 'pre_submit',
+    reason,
+    ats: job.ats || job.strategy || '',
+    hostname: pjaRankedApplyHostname(job.applyUrl),
+    url: job.applyUrl,
+    formSummary: 'ranked application tab disappeared twice before any submit evidence',
+    visibleErrors: [String(source || 'missing_tab_recovery_exhausted')],
+    capturedAt: Date.now(),
+  });
+  await pjaRestoreRankedFailureState(job, reason, master);
+  await pjaAppendApplicationEvent({
+    runId: master.runId,
+    jobId: job.jobId || job.id,
+    applyUrl: job.applyUrl,
+    company: job.company,
+    title: job.title,
+    channel: job.channel || job.ats,
+    status: 'failed',
+    success: false,
+    reason,
+    submitAttempted: false,
+    phase: 'pre_submit',
+    diagnostic,
+    applicationAt: job.applicationAt || master.inFlightAt || Date.now(),
+    occurredAt: Date.now(),
+  });
+  const latest = await new Promise(r => chrome.storage.local.get('pja_ranked_apply', r));
+  return { master: latest.pja_ranked_apply || master, terminal: true };
 }
 
 async function pjaDispatchRankedCurrent(master) {
@@ -1032,11 +1195,9 @@ async function pjaDispatchRankedCurrent(master) {
   }
   if (master.inFlightIndex === master.currentIndex) {
     if (await pjaRankedTabExists(master.inFlightTabId, master.jobs[master.currentIndex])) return master;
-    console.warn('PJA ranked apply: in-flight tab missing; relaunching current job', master.currentIndex);
-    master.inFlightIndex = null;
-    master.inFlightTabId = null;
-    master.inFlightAt = null;
-    await pjaSetLocal({ pja_ranked_apply: master });
+    const missing = await pjaHandleRankedMissingTab(master, 'dispatch');
+    if (missing.terminal) return missing.master;
+    master = missing.master;
   }
   const job = Object.assign({}, master.jobs[master.currentIndex], { runId: master.runId,
     applicationAt: Date.now(), rankedRun: true });
@@ -1155,12 +1316,8 @@ async function pjaApplyWatchdogTick() {
   }
   if (ranked && ranked.status === 'applying' && ranked.inFlightIndex === ranked.currentIndex &&
       ranked.inFlightTabId && !await pjaRankedTabExists(ranked.inFlightTabId, ranked.jobs && ranked.jobs[ranked.currentIndex])) {
-    console.warn('PJA apply-watchdog: in-flight tab missing; redispatching current ranked job', ranked.currentIndex);
-    ranked.inFlightIndex = null;
-    ranked.inFlightTabId = null;
-    ranked.inFlightAt = null;
-    await pjaSetLocal({ pja_ranked_apply: ranked });
-    await pjaDispatchRankedCurrent(ranked);
+    const missing = await pjaHandleRankedMissingTab(ranked, 'watchdog');
+    if (!missing.terminal) await pjaDispatchRankedCurrent(missing.master);
     return;
   }
   const rankedJob = ranked && ranked.jobs && ranked.jobs[ranked.currentIndex];
@@ -1176,31 +1333,48 @@ async function pjaApplyWatchdogTick() {
       Date.now() - (ranked.inFlightAt || Date.now()) > rankedCapMs) {
     const stuck = ranked.jobs[ranked.currentIndex];
     if (stuck) {
+      const workdaySubmitKey = 'pja_wd_submitclick_' + (stuck.id || stuck.jobId || '');
       const extState = await new Promise(r => chrome.storage.local.get(
-        ['pja_ext_current', 'pja_wd_auth_diag', 'pja_dbg_workday_auth'], r));
+        ['pja_ext_current', 'pja_wd_auth_diag', 'pja_dbg_workday_auth', workdaySubmitKey], r));
       const current = extState.pja_ext_current;
-      const submitPending = !!(rankedIsWorkday && current && pjaSameRankedJob(current, stuck) && current._submitPending);
-      const timeoutReason = submitPending ? 'submit_observation_timeout' : 'ranked_watchdog_timeout';
+      const workdaySubmitAt = Number(extState[workdaySubmitKey] || 0);
+      const currentMatches = !!(current && pjaSameRankedJob(current, stuck) &&
+        String(current.runId || '') === String(ranked.runId || ''));
+      const submitPending = !!(currentMatches && current._submitPending) || !!(rankedIsWorkday &&
+        workdaySubmitAt >= Number(ranked.inFlightAt || 0) && workdaySubmitAt <= Date.now());
+      const timeoutOutcome = self.PJAApplySelect.classifyMissingTabOutcome
+        ? self.PJAApplySelect.classifyMissingTabOutcome(stuck, {
+          currentMatches,
+          submitPending,
+          phase: currentMatches ? current._applyPhase : '',
+          handled: !!(currentMatches && current._handled),
+        })
+        : { kind: 'submitted_unverified' };
+      const preSubmitProven = timeoutOutcome.kind === 'pre_submit';
+      const timeoutReason = preSubmitProven ? 'ranked_watchdog_timeout' : 'submit_observation_timeout';
       const stuckHost = pjaRankedApplyHostname(stuck.applyUrl);
       const authDiag = extState.pja_wd_auth_diag || null;
       const authResult = extState.pja_dbg_workday_auth || null;
-      const authDiagOwned = !!(rankedIsWorkday && authDiag &&
-        pjaRankedApplyHostname(authDiag.url) === stuckHost);
-      const authResultOwned = !!(rankedIsWorkday && authResult &&
-        pjaRankedApplyHostname(authResult.url) === stuckHost);
+      const authDiagOwned = !!(rankedIsWorkday && self.PJAApplySelect?.diagnosticOwnsRankedJob &&
+        self.PJAApplySelect.diagnosticOwnsRankedJob(authDiag, ranked, stuck));
+      const authResultOwned = !!(rankedIsWorkday && self.PJAApplySelect?.diagnosticOwnsRankedJob &&
+        self.PJAApplySelect.diagnosticOwnsRankedJob(authResult, ranked, stuck));
       const diagnostic = pjaCompactApplyDiagnostic({
         schemaVersion: 1,
-        phase: submitPending ? 'submit_observation' : 'pre_submit',
+        phase: preSubmitProven ? 'pre_submit' : 'submit_observation',
         reason: timeoutReason,
         ats: stuck.ats || stuck.strategy || '',
         hostname: stuckHost,
         url: stuck.applyUrl,
         visibleErrors: authDiagOwned && Array.isArray(authDiag.errors) ? authDiag.errors : [],
-        formSummary: submitPending
-          ? 'ranked watchdog expired while explicit submit observation was pending'
+        formSummary: !preSubmitProven
+          ? submitPending
+            ? 'ranked watchdog expired while explicit submit observation was pending'
+            : 'ranked watchdog expired without durable pre-submit phase evidence'
           : authDiagOwned || authResultOwned
             ? 'ranked watchdog expired before submit during Workday auth/form handling' +
-              (authDiagOwned && authDiag.screen ? ' screen=' + authDiag.screen : '') +
+              (authResultOwned && authResult.screen ? ' screen=' + authResult.screen :
+                authDiagOwned && authDiag.screen ? ' screen=' + authDiag.screen : '') +
               (authResultOwned && authResult.result ? ' authResult=' + authResult.result : '')
             : 'ranked watchdog expired with explicit no-submit state',
         capturedAt: Date.now(),
@@ -1209,9 +1383,10 @@ async function pjaApplyWatchdogTick() {
       await pjaRestoreRankedFailureState(stuck, timeoutReason, ranked);
       await pjaAppendApplicationEvent({ runId: ranked.runId,
         jobId: stuck.jobId || stuck.id, applyUrl: stuck.applyUrl, company: stuck.company, title: stuck.title,
-        channel: stuck.channel, status: submitPending ? 'submitted' : 'failed', success: submitPending ? null : false,
-        reason: timeoutReason, submitAttempted: submitPending,
-        phase: submitPending ? 'submit_observation' : 'pre_submit', diagnostic,
+        channel: stuck.channel, status: preSubmitProven ? 'failed' : 'submitted',
+        success: preSubmitProven ? false : null,
+        reason: timeoutReason, submitAttempted: submitPending ? true : preSubmitProven ? false : null,
+        phase: preSubmitProven ? 'pre_submit' : 'submit_observation', diagnostic,
         applicationAt: stuck.applicationAt || ranked.inFlightAt, occurredAt: Date.now() });
     }
     return;
@@ -2319,7 +2494,7 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
     files: ['content/fiber-main.js']
   }).then(() => {
     chrome.storage.local.set({ pja_fiber_inject_ok: { tabId, url: tab.url, ts: Date.now() } });
-  }).catch(err => {
+  }).catch(async err => {
     chrome.storage.local.set({ pja_fiber_inject_err: { tabId, url: tab.url, err: String(err), ts: Date.now() } });
   });
 });
@@ -2359,35 +2534,50 @@ chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
   const data = await new Promise(r =>
     chrome.storage.local.get(['pja_wd_gmail_session', 'pja_email_code_session'], r)
   );
-  const session = data.pja_wd_gmail_session || data.pja_email_code_session;
-  if (!session || session.gmailTabId !== tabId) return;
+  const workdaySession = data.pja_wd_gmail_session;
+  const emailCodeSession = data.pja_email_code_session;
+  const isWorkdaySession = !!(workdaySession && workdaySession.gmailTabId === tabId);
+  const session = isWorkdaySession ? workdaySession
+    : emailCodeSession && emailCodeSession.gmailTabId === tabId ? emailCodeSession : null;
+  if (!session) return;
   if (Date.now() - session.startedAt > 180000) {
-    if (data.pja_email_code_session) chrome.storage.local.remove('pja_email_code_session');
+    if (isWorkdaySession) await pjaRemoveWorkdayGmailSession(session);
+    else await pjaRemoveEmailCodeSession(session);
     return;
   }
   console.log('PJA bg: injecting gmail-verify.js into Gmail tab', tabId);
   await chrome.scripting.executeScript({
     target: { tabId },
-    func: () => { try { delete window.__pjaGmailVerifyRunning; } catch (_) { window.__pjaGmailVerifyRunning = false; } }
+    func: (kind, sessionId) => {
+      try { delete window.__pjaGmailVerifyRunning; } catch (_) { window.__pjaGmailVerifyRunning = false; }
+      window.__pjaGmailSessionKind = kind;
+      window.__pjaGmailSessionId = sessionId;
+    },
+    args: [isWorkdaySession ? 'workday' : 'code', session.sessionId]
   }).catch(() => {});
   chrome.scripting.executeScript({
     target: { tabId },
     files: ['content/gmail-verify.js']
-  }).catch(err => {
+  }).catch(async err => {
     console.error('PJA bg: gmail-verify injection failed', err);
-    if (data.pja_email_code_session) {
-      chrome.storage.local.set({
-        pja_email_code_result: { hostname: session.hostname, company: session.company, success: false, reason: 'inject_failed', ts: Date.now() }
-      });
-      chrome.storage.local.remove('pja_email_code_session');
+    if (!isWorkdaySession) {
+      if (await pjaEmailCodeSessionIsActive(session)) {
+        await chrome.storage.local.set({
+          pja_email_code_result: pjaEmailCodeResult(session,
+            { success: false, reason: 'inject_failed', ts: Date.now() })
+        });
+      }
+      await pjaRemoveEmailCodeSession(session);
     } else {
-      chrome.storage.local.set({
-        pja_wd_verify_result: { hostname: session.hostname, success: false, reason: 'inject_failed', ts: Date.now() }
+      const injectResult = pjaWorkdayVerifyResult(session, {
+        success: false, reason: 'inject_failed', ts: Date.now()
       });
-      if (session.applyTabId) {
+      const ownerCurrent = await pjaWorkdayGmailOwnerIsCurrent(session);
+      if (ownerCurrent) await chrome.storage.local.set({ pja_wd_verify_result: injectResult });
+      if (ownerCurrent && session.applyTabId) {
         chrome.tabs.sendMessage(session.applyTabId, { type: 'WD_VERIFY_COMPLETE', success: false }).catch(() => {});
       }
-      chrome.storage.local.remove('pja_wd_gmail_session');
+      await pjaRemoveWorkdayGmailSession(session);
     }
   });
 });
@@ -4738,10 +4928,25 @@ ${questionList}`;
         chrome.storage.local.get('pja_wd_gmail_session', r)
       );
       if (existing && Date.now() - existing.startedAt < 120000) {
-        sendResponse({ ok: false, reason: 'gmail_flow_in_progress' });
-        return;
+        if (await pjaWorkdayGmailOwnerIsCurrent(existing)) {
+          sendResponse({ ok: false, reason: 'gmail_flow_in_progress' });
+          return;
+        }
+        if (existing.gmailTabId) chrome.tabs.remove(existing.gmailTabId).catch(() => {});
+        await pjaRemoveWorkdayGmailSession(existing);
       }
       const applyTabId = _sender.tab?.id;
+      const owner = {
+        runId: String(msg.runId || ''),
+        jobId: String(msg.jobId || ''),
+        applyUrl: String(msg.applyUrl || ''),
+        hostname: String(msg.hostname || ''),
+        applyTabId,
+      };
+      if (!applyTabId || !await pjaWorkdayGmailOwnerIsCurrent(owner)) {
+        sendResponse({ ok: false, reason: 'stale_or_unowned_apply_tab' });
+        return;
+      }
       // Use the configured Gmail account index (u/N) so we open the right inbox
       const { pja_gmail_account_index: gmailIdx } = await new Promise(r =>
         chrome.storage.local.get('pja_gmail_account_index', r)
@@ -4749,21 +4954,52 @@ ${questionList}`;
       const acctPath = `u/${gmailIdx ?? 3}`;
       const gmailUrl = `https://mail.google.com/mail/${acctPath}/#search/${encodeURIComponent(msg.searchQuery)}`;
       console.log('PJA bg: opening Gmail', gmailUrl);
-      const tab = await new Promise(r => chrome.tabs.create({ url: gmailUrl }, r));
-      // Store BEFORE tab loads — top-level onUpdated listener reads this
-      await new Promise(r => chrome.storage.local.set({
-        pja_wd_gmail_session: {
+      // Stage the tab on about:blank so the exact immutable session is durable before Gmail can
+      // finish loading and trigger the top-level injection listener.
+      const tab = await new Promise(r => chrome.tabs.create({ url: 'about:blank' }, r));
+      const session = {
+          sessionId: 'wdgmail-' + Date.now() + '-' + Math.random().toString(36).slice(2, 10),
           gmailTabId: tab.id,
           applyTabId,
-          hostname: msg.hostname,
+          runId: owner.runId,
+          jobId: owner.jobId,
+          applyUrl: owner.applyUrl,
+          hostname: owner.hostname,
           purpose: msg.purpose,
           searchQuery: msg.searchQuery,
           targetEmail: msg.targetEmail || '',
           acctPath,
           startedAt: Date.now()
+      };
+      if (!await pjaWorkdayGmailOwnerIsCurrent(owner)) {
+        chrome.tabs.remove(tab.id).catch(() => {});
+        sendResponse({ ok: false, reason: 'apply_owner_changed_before_gmail_session' });
+        return;
+      }
+      await new Promise(r => chrome.storage.local.set({
+        pja_wd_gmail_session: session,
+        // Enrich the pending owner with the dispatcher tab captured from message.sender. Ranked
+        // resume acceptance requires this exact tab and cannot be satisfied by a duplicate tab.
+        pja_wd_pending_apply: {
+          runId: owner.runId, jobId: owner.jobId, applyUrl: owner.applyUrl,
+          hostname: owner.hostname, applyTabId, sessionId: session.sessionId, ts: Date.now()
         }
       }, r));
-      sendResponse({ ok: true, gmailTabId: tab.id });
+      if (!await pjaWorkdayGmailOwnerIsCurrent(session)) {
+        await pjaRemoveWorkdayGmailSession(session);
+        chrome.tabs.remove(tab.id).catch(() => {});
+        sendResponse({ ok: false, reason: 'apply_owner_changed_after_gmail_session' });
+        return;
+      }
+      try {
+        await chrome.tabs.update(tab.id, { url: gmailUrl });
+      } catch (_) {
+        await pjaRemoveWorkdayGmailSession(session);
+        chrome.tabs.remove(tab.id).catch(() => {});
+        sendResponse({ ok: false, reason: 'gmail_navigation_failed' });
+        return;
+      }
+      sendResponse({ ok: true, gmailTabId: tab.id, sessionId: session.sessionId });
     })();
     return true;
   }
@@ -4860,20 +5096,32 @@ ${questionList}`;
         chrome.storage.local.get('pja_email_code_session', r)
       );
       const applyTabId = _sender.tab?.id;
+      const owner = {
+        runId: String(msg.runId || ''),
+        jobId: String(msg.jobId || ''),
+        applyUrl: String(msg.applyUrl || ''),
+        applyTabId,
+      };
+      if (!applyTabId || !await pjaEmailCodeOwnerIsCurrent(owner)) {
+        sendResponse({ ok: false, reason: 'stale_or_unowned_apply_tab' });
+        return;
+      }
       if (existing && Date.now() - existing.startedAt < 120000) {
         const sameApplyTab = existing.applyTabId === applyTabId;
-        const sameJob = String(existing.company || '') === String(msg.company || '') &&
-          String(existing.title || '') === String(msg.title || '');
+        const sameJob = String(existing.runId || '') === owner.runId &&
+          String(existing.jobId || '') === owner.jobId &&
+          String(existing.applyUrl || '') === owner.applyUrl;
         const applyTabAlive = existing.applyTabId ? await pjaRankedTabExists(existing.applyTabId) : false;
         if (sameApplyTab && sameJob && applyTabAlive) {
-          sendResponse({ ok: false, reason: 'gmail_code_flow_in_progress' });
+          sendResponse({ ok: true, reused: true, gmailTabId: existing.gmailTabId,
+            sessionId: existing.sessionId });
           return;
         }
-        if (existing.gmailTabId) chrome.tabs.remove(existing.gmailTabId).catch(() => {});
-        await chrome.storage.local.remove('pja_email_code_session');
+        if (existing.gmailTabId && !existing.reusedGmailTab) chrome.tabs.remove(existing.gmailTabId).catch(() => {});
+        await pjaRemoveEmailCodeSession(existing);
       }
-      const { pja_gmail_account_index: gmailIdx } = await new Promise(r =>
-        chrome.storage.local.get('pja_gmail_account_index', r)
+      const { pja_gmail_account_index: gmailIdx, pja_wd_gmail_session: workdayGmailSession } = await new Promise(r =>
+        chrome.storage.local.get(['pja_gmail_account_index', 'pja_wd_gmail_session'], r)
       );
       const acctPath = `u/${gmailIdx ?? 3}`;
       const query = String(msg.searchQuery || '(security code OR verification code OR "confirm you are human" OR "confirm your email") newer_than:30m');
@@ -4881,7 +5129,8 @@ ${questionList}`;
       console.log('PJA bg: opening Gmail for code', gmailUrl);
       await new Promise(r => chrome.storage.local.remove(['pja_email_code_result', 'pja_navigate_to'], r));
       const existingTabs = await new Promise(r => chrome.tabs.query({ url: `https://mail.google.com/mail/${acctPath}/*` }, r));
-      let tab = existingTabs && existingTabs[0];
+      let tab = existingTabs && existingTabs.find(candidate =>
+        !workdayGmailSession || candidate.id !== workdayGmailSession.gmailTabId);
       const reusedGmailTab = !!tab;
       if (!tab) {
         // Create a blank tab first, store the session, then navigate. If Gmail loads before the
@@ -4891,9 +5140,13 @@ ${questionList}`;
         await chrome.tabs.update(tab.id, { active: true }).catch(() => {});
       }
       const session = {
+        sessionId: 'emailcode-' + Date.now() + '-' + Math.random().toString(36).slice(2, 10),
         mode: 'code',
         gmailTabId: tab.id,
         applyTabId,
+        runId: owner.runId,
+        jobId: owner.jobId,
+        applyUrl: owner.applyUrl,
         hostname: msg.hostname || '',
         company: msg.company || '',
         title: msg.title || '',
@@ -4903,6 +5156,11 @@ ${questionList}`;
         reusedGmailTab,
         startedAt: Date.now()
       };
+      if (!await pjaEmailCodeOwnerIsCurrent(owner)) {
+        if (!reusedGmailTab) chrome.tabs.remove(tab.id).catch(() => {});
+        sendResponse({ ok: false, reason: 'apply_owner_changed_before_gmail_session' });
+        return;
+      }
       await new Promise(r => chrome.storage.local.set({
         pja_email_code_session: {
           ...session
@@ -4913,26 +5171,40 @@ ${questionList}`;
           ts: Date.now()
         }
       }, r));
+      if (!await pjaEmailCodeOwnerIsCurrent(session)) {
+        await pjaRemoveEmailCodeSession(session);
+        if (!reusedGmailTab) chrome.tabs.remove(tab.id).catch(() => {});
+        sendResponse({ ok: false, reason: 'apply_owner_changed_after_gmail_session' });
+        return;
+      }
       chrome.tabs.update(tab.id, { url: gmailUrl }).catch(async e => {
-        await chrome.storage.local.set({
-          pja_email_code_result: { success: false, reason: 'gmail_navigation_failed', ts: Date.now(),
-            hostname: session.hostname, company: session.company, title: session.title }
-        });
-        chrome.storage.local.remove('pja_email_code_session');
+        if (await pjaEmailCodeSessionIsActive(session)) {
+          await chrome.storage.local.set({
+            pja_email_code_result: pjaEmailCodeResult(session,
+              { success: false, reason: 'gmail_navigation_failed', ts: Date.now() })
+          });
+        }
+        await pjaRemoveEmailCodeSession(session);
         console.error('PJA bg: Gmail code navigation failed', e.message);
       });
       setTimeout(async () => {
         const d = await new Promise(r => chrome.storage.local.get('pja_email_code_session', r));
         const live = d.pja_email_code_session;
-        if (!live || live.gmailTabId !== tab.id || Date.now() - live.startedAt > 90000) return;
+        if (!live || live.sessionId !== session.sessionId || live.gmailTabId !== tab.id ||
+            Date.now() - live.startedAt > 90000) return;
         await chrome.scripting.executeScript({
           target: { tabId: tab.id },
-          func: () => { try { delete window.__pjaGmailVerifyRunning; } catch (_) { window.__pjaGmailVerifyRunning = false; } }
+          func: (sessionId) => {
+            try { delete window.__pjaGmailVerifyRunning; } catch (_) { window.__pjaGmailVerifyRunning = false; }
+            window.__pjaGmailSessionKind = 'code';
+            window.__pjaGmailSessionId = sessionId;
+          },
+          args: [session.sessionId]
         }).catch(() => {});
         chrome.scripting.executeScript({ target: { tabId: tab.id }, files: ['content/gmail-verify.js'] })
           .catch(() => {});
       }, 8000);
-      sendResponse({ ok: true, gmailTabId: tab.id });
+      sendResponse({ ok: true, gmailTabId: tab.id, sessionId: session.sessionId });
     })();
     return true;
   }
@@ -4942,12 +5214,19 @@ ${questionList}`;
       const { pja_email_code_session: session } = await new Promise(r =>
         chrome.storage.local.get('pja_email_code_session', r)
       );
+      if (!session || !msg.sessionId || String(session.sessionId || '') !== String(msg.sessionId) ||
+          String(session.runId || '') !== String(msg.runId || '') ||
+          String(session.jobId || '') !== String(msg.jobId || '') ||
+          String(session.applyUrl || '') !== String(msg.applyUrl || '')) {
+        sendResponse({ ok: false, reason: 'stale_email_code_session' });
+        return;
+      }
       if (session?.gmailTabId && !session.reusedGmailTab) chrome.tabs.remove(session.gmailTabId).catch(() => {});
       await chrome.storage.local.set({
-        pja_email_code_result: { success: false, reason: msg.reason || 'cancelled', ts: Date.now(),
-          hostname: session?.hostname || '', company: session?.company || '', title: session?.title || '' }
+        pja_email_code_result: pjaEmailCodeResult(session,
+          { success: false, reason: msg.reason || 'cancelled', ts: Date.now() })
       });
-      chrome.storage.local.remove('pja_email_code_session');
+      await pjaRemoveEmailCodeSession(session);
       sendResponse({ ok: true });
     })();
     return true;
@@ -4960,7 +5239,14 @@ ${questionList}`;
         chrome.storage.local.get('pja_email_code_session', r)
       );
       if (!session) { sendResponse({ ok: false, reason: 'no_session' }); return; }
-      if (session.gmailTabId !== gmailTabId) { sendResponse({ ok: false, reason: 'stale_gmail_tab' }); return; }
+      if (!msg.sessionId || String(session.sessionId || '') !== String(msg.sessionId) ||
+          session.gmailTabId !== gmailTabId) {
+        sendResponse({ ok: false, reason: 'stale_gmail_tab' }); return;
+      }
+      if (!await pjaEmailCodeOwnerIsCurrent(session)) {
+        await pjaRemoveEmailCodeSession(session);
+        sendResponse({ ok: false, reason: 'stale_apply_owner' }); return;
+      }
       const senderTab = gmailTabId ? await new Promise(r => chrome.tabs.get(gmailTabId, t => r(chrome.runtime.lastError ? null : t))) : null;
       if (!/mail\.google\.com/i.test(String(senderTab?.url || msg.pageUrl || ''))) {
         sendResponse({ ok: false, reason: 'sender_not_gmail' });
@@ -4986,33 +5272,31 @@ ${questionList}`;
         snippet: String(evidence.snippet || '').slice(0, 600),
       } : null;
       if (!/^[A-Z0-9]{6,10}$/.test(code) || (expectedLength && code.length !== expectedLength)) {
+        const invalidResult = pjaEmailCodeResult(session,
+          { success: false, reason: 'invalid_code_shape', ts: Date.now(), evidence: compactEvidence });
         await chrome.storage.local.set({
-          pja_email_code_result: { success: false, reason: 'invalid_code_shape', ts: Date.now(),
-            hostname: session.hostname, company: session.company, evidence: compactEvidence },
-          pja_last_email_code_result: { success: false, reason: 'invalid_code_shape', ts: Date.now(),
-            hostname: session.hostname, company: session.company, title: session.title, evidence: compactEvidence }
+          pja_email_code_result: invalidResult,
+          pja_last_email_code_result: invalidResult
         });
       } else if (!verifiedEvidence) {
-        const rejectResult = { success: false, reason: 'unverified_email_source', codeLength: code.length,
-          ts: Date.now(), hostname: session.hostname, company: session.company, title: session.title,
-          evidence: compactEvidence };
+        const rejectResult = pjaEmailCodeResult(session,
+          { success: false, reason: 'unverified_email_source', codeLength: code.length,
+            ts: Date.now(), evidence: compactEvidence });
         await chrome.storage.local.set({
           pja_email_code_result: rejectResult,
           pja_last_email_code_result: rejectResult
         });
       } else {
-        const successPublic = { success: true, codeLength: code.length, ts: Date.now(),
-          hostname: session.hostname, company: session.company, title: session.title,
-          evidence: compactEvidence };
+        const successPublic = pjaEmailCodeResult(session,
+          { success: true, codeLength: code.length, ts: Date.now(), evidence: compactEvidence });
         await chrome.storage.local.set({
-          pja_email_code_result: { success: true, code, codeLength: code.length, ts: Date.now(),
-            hostname: session.hostname, company: session.company, title: session.title, evidence: compactEvidence },
+          pja_email_code_result: { ...successPublic, code },
           pja_last_email_code_result: successPublic
         });
       }
       if (gmailTabId && !session.reusedGmailTab) chrome.tabs.remove(gmailTabId).catch(() => {});
       if (session.applyTabId) chrome.tabs.update(session.applyTabId, { active: true }).catch(() => {});
-      chrome.storage.local.remove('pja_email_code_session');
+      await pjaRemoveEmailCodeSession(session);
       sendResponse({ ok: true });
     })();
     return true;
@@ -5025,20 +5309,27 @@ ${questionList}`;
         chrome.storage.local.get('pja_email_code_session', r)
       );
       if (!session) { sendResponse({ ok: false, reason: 'no_session' }); return; }
-      if (session.gmailTabId !== gmailTabId) { sendResponse({ ok: false, reason: 'stale_gmail_tab' }); return; }
+      if (!msg.sessionId || String(session.sessionId || '') !== String(msg.sessionId) ||
+          session.gmailTabId !== gmailTabId) {
+        sendResponse({ ok: false, reason: 'stale_gmail_tab' }); return;
+      }
+      if (!await pjaEmailCodeOwnerIsCurrent(session)) {
+        await pjaRemoveEmailCodeSession(session);
+        sendResponse({ ok: false, reason: 'stale_apply_owner' }); return;
+      }
       const senderTab = gmailTabId ? await new Promise(r => chrome.tabs.get(gmailTabId, t => r(chrome.runtime.lastError ? null : t))) : null;
       if (!/mail\.google\.com/i.test(String(senderTab?.url || msg.pageUrl || ''))) {
         await chrome.storage.local.set({
-          pja_last_email_code_result: { success: false, reason: 'sender_not_gmail', ts: Date.now(),
-            hostname: session.hostname, company: session.company, title: session.title,
+          pja_last_email_code_result: pjaEmailCodeResult(session, {
+            success: false, reason: 'sender_not_gmail', ts: Date.now(),
             pageUrl: msg.pageUrl || senderTab?.url || '', pageTitle: msg.pageTitle || senderTab?.title || '',
-            hasSearchInput: !!msg.hasSearchInput, hash: msg.hash || '' }
+            hasSearchInput: !!msg.hasSearchInput, hash: msg.hash || '' })
         });
         sendResponse({ ok: false, reason: 'sender_not_gmail' });
         return;
       }
-      const failureResult = { success: false, reason: msg.reason || 'code_not_found', ts: Date.now(),
-          hostname: session.hostname, company: session.company, title: session.title,
+      const failureResult = pjaEmailCodeResult(session, {
+          success: false, reason: msg.reason || 'code_not_found', ts: Date.now(),
           pageUrl: msg.pageUrl || '', pageTitle: msg.pageTitle || '', hasSearchInput: !!msg.hasSearchInput,
           hash: msg.hash || '',
           evidence: msg.evidence && typeof msg.evidence === 'object' ? {
@@ -5054,14 +5345,14 @@ ${questionList}`;
             pageUrl: String(msg.evidence.pageUrl || '').slice(0, 300),
             pageTitle: String(msg.evidence.pageTitle || '').slice(0, 200),
             snippet: String(msg.evidence.snippet || '').slice(0, 600),
-          } : null };
+          } : null });
       await chrome.storage.local.set({
         pja_email_code_result: failureResult,
         pja_last_email_code_result: failureResult
       });
       if (gmailTabId && !session.reusedGmailTab) chrome.tabs.remove(gmailTabId).catch(() => {});
       if (session.applyTabId) chrome.tabs.update(session.applyTabId, { active: true }).catch(() => {});
-      chrome.storage.local.remove('pja_email_code_session');
+      await pjaRemoveEmailCodeSession(session);
       sendResponse({ ok: true });
     })();
     return true;
@@ -5076,6 +5367,14 @@ ${questionList}`;
         chrome.storage.local.get('pja_wd_gmail_session', r)
       );
       if (!session) { sendResponse({ ok: false, reason: 'no_session' }); return; }
+      if (!msg.sessionId || String(session.sessionId || '') !== String(msg.sessionId) ||
+          !gmailTabId || session.gmailTabId !== gmailTabId) {
+        sendResponse({ ok: false, reason: 'stale_gmail_tab' }); return;
+      }
+      if (!await pjaWorkdayGmailOwnerIsCurrent(session)) {
+        await pjaRemoveWorkdayGmailSession(session);
+        sendResponse({ ok: false, reason: 'stale_apply_owner' }); return;
+      }
 
       const verifyTab = await new Promise(r => chrome.tabs.create({ url: verifyUrl }, r));
 
@@ -5085,19 +5384,17 @@ ${questionList}`;
         verifyDone = true;
         chrome.tabs.remove(verifyTab.id).catch(() => {});
         chrome.tabs.remove(gmailTabId).catch(() => {});
-        await chrome.storage.local.set({
-          pja_wd_verify_result: { hostname: session.hostname, success: false, reason: 'verify_tab_timeout', ts: Date.now(),
-            evidence: { ...(evidence || {}), searchQuery: session.searchQuery || '', targetEmail: session.targetEmail || '' } },
-          pja_wd_last_gmail_result: { hostname: session.hostname, success: false, reason: 'verify_tab_timeout', ts: Date.now(),
-            evidence: { ...(evidence || {}), searchQuery: session.searchQuery || '', targetEmail: session.targetEmail || '' } }
-        });
-        const { pja_wd_pending_apply: pending } = await new Promise(r =>
-          chrome.storage.local.get('pja_wd_pending_apply', r)
-        );
-        if (pending?.applyUrl && session.applyTabId) {
-          chrome.tabs.update(session.applyTabId, { url: pending.applyUrl }).catch(() => {});
+        const timeoutResult = pjaWorkdayVerifyResult(session, { success: false,
+          reason: 'verify_tab_timeout', ts: Date.now(),
+          evidence: { ...(evidence || {}), searchQuery: session.searchQuery || '', targetEmail: session.targetEmail || '' } });
+        const ownerCurrent = await pjaWorkdayGmailOwnerIsCurrent(session);
+        await chrome.storage.local.set(ownerCurrent
+          ? { pja_wd_verify_result: timeoutResult, pja_wd_last_gmail_result: timeoutResult }
+          : { pja_wd_last_gmail_result: timeoutResult });
+        if (ownerCurrent && session.applyUrl && session.applyTabId) {
+          chrome.tabs.update(session.applyTabId, { url: session.applyUrl }).catch(() => {});
         }
-        chrome.storage.local.remove('pja_wd_gmail_session');
+        await pjaRemoveWorkdayGmailSession(session);
       }, 30000);
 
       const verifyListener = async (tid, changeInfo, tab) => {
@@ -5114,6 +5411,19 @@ ${questionList}`;
           });
           pageText = res?.[0]?.result || '';
         } catch(e) {}
+        // Page inspection is asynchronous. A watchdog may have advanced/replaced this Gmail
+        // session while it was in flight; abort before any tenant-account mutation or click.
+        if (!await pjaWorkdayGmailOwnerIsCurrent(session)) {
+          if (!verifyDone) {
+            verifyDone = true;
+            clearTimeout(verifyTimeout);
+            chrome.tabs.onUpdated.removeListener(verifyListener);
+            chrome.tabs.remove(verifyTab.id).catch(() => {});
+            chrome.tabs.remove(gmailTabId).catch(() => {});
+          }
+          await pjaRemoveWorkdayGmailSession(session);
+          return;
+        }
 
         // Check for expired link
         if (/link.*expired|token.*invalid|link.*no longer valid/i.test(pageText)) {
@@ -5126,17 +5436,22 @@ ${questionList}`;
           const { pja_workday_accounts: accounts } = await new Promise(r =>
             chrome.storage.local.get('pja_workday_accounts', r)
           );
+          if (!await pjaWorkdayGmailOwnerIsCurrent(session)) {
+            await pjaRemoveWorkdayGmailSession(session);
+            return;
+          }
           if (accounts?.[session.hostname]) {
             delete accounts[session.hostname];
             await chrome.storage.local.set({ pja_workday_accounts: accounts });
           }
-          await chrome.storage.local.set({
-            pja_wd_verify_result: { hostname: session.hostname, success: false, reason: 'link_expired', ts: Date.now(),
-              evidence: { ...(evidence || {}), searchQuery: session.searchQuery || '', targetEmail: session.targetEmail || '' } },
-            pja_wd_last_gmail_result: { hostname: session.hostname, success: false, reason: 'link_expired', ts: Date.now(),
-              evidence: { ...(evidence || {}), searchQuery: session.searchQuery || '', targetEmail: session.targetEmail || '' } }
-          });
-          chrome.storage.local.remove('pja_wd_gmail_session');
+          const expiredResult = pjaWorkdayVerifyResult(session, { success: false,
+            reason: 'link_expired', ts: Date.now(),
+            evidence: { ...(evidence || {}), searchQuery: session.searchQuery || '', targetEmail: session.targetEmail || '' } });
+          const ownerCurrent = await pjaWorkdayGmailOwnerIsCurrent(session);
+          await chrome.storage.local.set(ownerCurrent
+            ? { pja_wd_verify_result: expiredResult, pja_wd_last_gmail_result: expiredResult }
+            : { pja_wd_last_gmail_result: expiredResult });
+          await pjaRemoveWorkdayGmailSession(session);
           return;
         }
 
@@ -5146,8 +5461,8 @@ ${questionList}`;
           const { pja_job_password: pw } = await new Promise(r =>
             chrome.storage.local.get('pja_job_password', r)
           );
-          if (pw) {
-            chrome.scripting.executeScript({
+          if (pw && await pjaWorkdayGmailOwnerIsCurrent(session)) {
+            await chrome.scripting.executeScript({
               target: { tabId: verifyTab.id },
               world: 'MAIN',
               func: (password) => {
@@ -5161,11 +5476,19 @@ ${questionList}`;
                   setter.call(pwFields[1], password);
                   pwFields[1].dispatchEvent(new InputEvent('input', { bubbles: true }));
                 }
-                const btn = document.querySelector('[data-automation-id="changePasswordSubmitButton"]') ||
-                  document.querySelector('button[type=submit]');
-                if (btn) setTimeout(() => btn.click(), 500);
               },
               args: [pw]
+            }).catch(() => {});
+            await new Promise(r => setTimeout(r, 500));
+            if (!await pjaWorkdayGmailOwnerIsCurrent(session)) return;
+            await chrome.scripting.executeScript({
+              target: { tabId: verifyTab.id },
+              world: 'MAIN',
+              func: () => {
+                const btn = document.querySelector('[data-automation-id="changePasswordSubmitButton"]') ||
+                  document.querySelector('button[type=submit]');
+                if (btn) btn.click();
+              }
             }).catch(() => {});
             return; // wait for next navigation after form submission
           }
@@ -5178,22 +5501,19 @@ ${questionList}`;
         chrome.tabs.onUpdated.removeListener(verifyListener);
         setTimeout(() => chrome.tabs.remove(verifyTab.id).catch(() => {}), 2000);
         chrome.tabs.remove(gmailTabId).catch(() => {});
-        await chrome.storage.local.set({
-          pja_wd_verify_result: { hostname: session.hostname, success: true, ts: Date.now(),
-            evidence: { ...(evidence || {}), searchQuery: session.searchQuery || '', targetEmail: session.targetEmail || '',
-              verifyHost: (() => { try { return new URL(verifyUrl).hostname; } catch (_) { return ''; } })() } },
-          pja_wd_last_gmail_result: { hostname: session.hostname, success: true, ts: Date.now(),
-            evidence: { ...(evidence || {}), searchQuery: session.searchQuery || '', targetEmail: session.targetEmail || '',
-              verifyHost: (() => { try { return new URL(verifyUrl).hostname; } catch (_) { return ''; } })() } }
-        });
-        // Navigate apply tab back to applyUrl for a clean resume
-        const { pja_wd_pending_apply: pending } = await new Promise(r =>
-          chrome.storage.local.get('pja_wd_pending_apply', r)
-        );
-        if (pending?.applyUrl && session.applyTabId) {
-          chrome.tabs.update(session.applyTabId, { url: pending.applyUrl }).catch(() => {});
+        const successResult = pjaWorkdayVerifyResult(session, { success: true, ts: Date.now(),
+          evidence: { ...(evidence || {}), searchQuery: session.searchQuery || '', targetEmail: session.targetEmail || '',
+            verifyHost: (() => { try { return new URL(verifyUrl).hostname; } catch (_) { return ''; } })() } });
+        const ownerCurrent = await pjaWorkdayGmailOwnerIsCurrent(session);
+        await chrome.storage.local.set(ownerCurrent
+          ? { pja_wd_verify_result: successResult, pja_wd_last_gmail_result: successResult }
+          : { pja_wd_last_gmail_result: successResult });
+        // Resume only the immutable exact-owned tab/URL captured when Gmail opened. Never read a
+        // newer global pending record from another Workday job.
+        if (ownerCurrent && session.applyUrl && session.applyTabId) {
+          chrome.tabs.update(session.applyTabId, { url: session.applyUrl }).catch(() => {});
         }
-        chrome.storage.local.remove('pja_wd_gmail_session');
+        await pjaRemoveWorkdayGmailSession(session);
       };
 
       chrome.tabs.onUpdated.addListener(verifyListener);
@@ -5209,6 +5529,10 @@ ${questionList}`;
       );
       if (!session) { sendResponse({ ok: false }); return; }
       const gmailTabId = _sender.tab?.id;
+      if (!msg.sessionId || String(session.sessionId || '') !== String(msg.sessionId) ||
+          !gmailTabId || gmailTabId !== session.gmailTabId) {
+        sendResponse({ ok: false, reason: 'stale_gmail_tab' }); return;
+      }
       if (gmailTabId) chrome.tabs.remove(gmailTabId).catch(() => {});
       // Persist the failure reason to pja_dbg (pja_wd_verify_result is cleared right after read).
       try {
@@ -5217,23 +5541,16 @@ ${questionList}`;
         arr.push('[WD] gmail-verify NO_EMAIL reason=' + (msg.reason || 'email_not_found'));
         await new Promise(r => chrome.storage.local.set({ pja_dbg: arr }, r));
       } catch (_) {}
-      await chrome.storage.local.set({
-        pja_wd_verify_result: {
-          hostname: session.hostname, success: false,
-          reason: msg.reason || 'email_not_found', ts: Date.now(),
-          evidence: { ...(msg.evidence || {}), pageUrl: msg.pageUrl || '', pageTitle: msg.pageTitle || '',
-            hash: msg.hash || '', hasSearchInput: !!msg.hasSearchInput,
-            searchQuery: session.searchQuery || '', targetEmail: session.targetEmail || '' }
-        },
-        pja_wd_last_gmail_result: {
-          hostname: session.hostname, success: false,
-          reason: msg.reason || 'email_not_found', ts: Date.now(),
-          evidence: { ...(msg.evidence || {}), pageUrl: msg.pageUrl || '', pageTitle: msg.pageTitle || '',
-            hash: msg.hash || '', hasSearchInput: !!msg.hasSearchInput,
-            searchQuery: session.searchQuery || '', targetEmail: session.targetEmail || '' }
-        }
-      });
-      chrome.storage.local.remove('pja_wd_gmail_session');
+      const noEmailResult = pjaWorkdayVerifyResult(session, { success: false,
+        reason: msg.reason || 'email_not_found', ts: Date.now(),
+        evidence: { ...(msg.evidence || {}), pageUrl: msg.pageUrl || '', pageTitle: msg.pageTitle || '',
+          hash: msg.hash || '', hasSearchInput: !!msg.hasSearchInput,
+          searchQuery: session.searchQuery || '', targetEmail: session.targetEmail || '' } });
+      const ownerCurrent = await pjaWorkdayGmailOwnerIsCurrent(session);
+      await chrome.storage.local.set(ownerCurrent
+        ? { pja_wd_verify_result: noEmailResult, pja_wd_last_gmail_result: noEmailResult }
+        : { pja_wd_last_gmail_result: noEmailResult });
+      await pjaRemoveWorkdayGmailSession(session);
       sendResponse({ ok: true });
     })();
     return true;

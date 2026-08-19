@@ -125,6 +125,8 @@ function workdayAuthScreenSummary(label) {
 }
 
 async function persistWorkdayAuthSnapshot(label, fields) {
+  // Phase snapshots intentionally carry no run/job identity. Auth can outlive a queue handoff on a
+  // reused tenant host; the caller writes one immutable exact-owner result after run() returns.
   const diagnostic = { ts: Date.now(), ...workdayAuthScreenSummary(label), ...(fields || {}) };
   try {
     await new Promise(r => chrome.storage.local.set({
@@ -366,6 +368,14 @@ async function wdPollCreateAccount(maxMs = 15000) {
 
 // ── Gmail verification flow ───────────────────────────────────────────────
 
+function sameWorkdayVerifyOwner(a, b) {
+  return !!(a && b) && !!a.runId && !!a.jobId && !!a.applyUrl &&
+    String(a.runId) === String(b.runId || '') &&
+    String(a.jobId) === String(b.jobId || '') &&
+    String(a.applyUrl) === String(b.applyUrl || '') &&
+    (!b.sessionId || !!a.sessionId && String(a.sessionId) === String(b.sessionId));
+}
+
 async function runGmailVerify(email, purpose, hostname) {
   // Some tenants (Bloom Energy) DON'T auto-send the verification email — the verify page has a
   // "request a verification email" / "resend" control that must be clicked first, else the
@@ -397,13 +407,31 @@ async function runGmailVerify(email, purpose, hostname) {
     ? [emailClause, '(from:(workday.com OR myworkday.com OR myworkdayjobs.com) OR subject:(reset password))'].filter(Boolean).join(' OR ') + ' newer_than:20m'
     : [emailClause, '(from:(workday.com OR myworkday.com OR myworkdayjobs.com) OR subject:(verify OR verification OR "confirm your email" OR activate OR "email address"))'].filter(Boolean).join(' OR ') + ' newer_than:20m';
 
+  const { pja_wd_pending_apply: pendingOwner } = await new Promise(r =>
+    chrome.storage.local.get('pja_wd_pending_apply', r)
+  );
+  const owner = pendingOwner && pendingOwner.hostname === hostname ? {
+    sessionId: pendingOwner.sessionId || '',
+    runId: pendingOwner.runId || '',
+    jobId: pendingOwner.jobId || '',
+    applyUrl: pendingOwner.applyUrl || '',
+    hostname,
+  } : null;
+  if (!owner || !owner.runId || !owner.jobId || !owner.applyUrl) {
+    dbg('runGmailVerify: exact run/job/apply owner unavailable; refusing Gmail flow');
+    return false;
+  }
+
   const { pja_wd_gmail_session: existingSession } = await new Promise(r =>
     chrome.storage.local.get('pja_wd_gmail_session', r)
   );
-  if (existingSession && existingSession.hostname === hostname &&
+  if (existingSession && sameWorkdayVerifyOwner(existingSession, owner) &&
       Date.now() - existingSession.startedAt < 120000) {
     dbg('runGmailVerify: gmail flow already in progress, waiting');
-    return await waitForVerifyComplete(hostname, 90000);
+    return await waitForVerifyComplete({ ...owner, sessionId: existingSession.sessionId }, 90000);
+  }
+  if (existingSession && Date.now() - existingSession.startedAt < 120000) {
+    dbg('runGmailVerify: different/stale Gmail session present; background will validate and evict if unowned');
   }
 
   await new Promise(r => chrome.storage.local.remove('pja_wd_verify_result', r));
@@ -416,6 +444,9 @@ async function runGmailVerify(email, purpose, hostname) {
       hostname,
       purpose,
       targetEmail,
+      runId: owner.runId,
+      jobId: owner.jobId,
+      applyUrl: owner.applyUrl,
     }, resolve)
   );
 
@@ -425,7 +456,11 @@ async function runGmailVerify(email, purpose, hostname) {
     return false;
   }
 
-  const result = await waitForVerifyResult(hostname, 90000);
+  if (!resp.sessionId) {
+    dbg('runGmailVerify: exact Gmail session unavailable; refusing unscoped wait');
+    return false;
+  }
+  const result = await waitForVerifyResult({ ...owner, sessionId: resp.sessionId }, 90000);
   const verified = result?.success === true;
   dbg('runGmailVerify: waitForVerifyComplete → ' + verified +
     (result?.reason ? ' reason=' + result.reason : '') +
@@ -440,23 +475,23 @@ async function runGmailVerify(email, purpose, hostname) {
   return verified;
 }
 
-async function waitForVerifyResult(hostname, timeoutMs) {
+async function waitForVerifyResult(owner, timeoutMs) {
   const t0 = Date.now();
   while (Date.now() - t0 < timeoutMs) {
     await sleep(2000);
     const { pja_wd_verify_result: result } = await new Promise(r =>
       chrome.storage.local.get('pja_wd_verify_result', r)
     );
-    if (result && result.hostname === hostname && result.ts > t0) {
+    if (result && result.hostname === owner.hostname && sameWorkdayVerifyOwner(result, owner) && result.ts > t0) {
       await new Promise(r => chrome.storage.local.remove('pja_wd_verify_result', r));
       return result;
     }
   }
-  return { hostname, success: false, reason: 'verify_wait_timeout', ts: Date.now() };
+  return { ...owner, success: false, reason: 'verify_wait_timeout', ts: Date.now() };
 }
 
-async function waitForVerifyComplete(hostname, timeoutMs) {
-  const result = await waitForVerifyResult(hostname, timeoutMs);
+async function waitForVerifyComplete(owner, timeoutMs) {
+  const result = await waitForVerifyResult(owner, timeoutMs);
   return result.success === true;
 }
 
@@ -1046,6 +1081,7 @@ async function lifecycle(profile) {
   };
 }
 
-window.pjaWorkdayAuth = { run, lifecycle, pjaWorkdayTenantEmail, _detectScreen: detectScreen };
+window.pjaWorkdayAuth = { run, lifecycle, pjaWorkdayTenantEmail, _detectScreen: detectScreen,
+  _sameWorkdayVerifyOwner: sameWorkdayVerifyOwner };
 console.log('PJA: workday-auth.js loaded on', location.hostname);
 })();

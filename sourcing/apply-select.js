@@ -446,6 +446,151 @@
     return ids[0] ? `id:${ids[0]}` : (roleKey(job) ? `role:${roleKey(job)}` : '');
   }
 
+  function sameLifecycleJob(a, b) {
+    if (!a || !b) return false;
+    const aid = String(a.id || a.jobId || a.sourceJobId || '').trim();
+    const bid = String(b.id || b.jobId || b.sourceJobId || '').trim();
+    if (aid && bid) return aid === bid;
+    const aUrl = applyUrlKey(a.applyUrl || a.listingUrl || '');
+    const bUrl = applyUrlKey(b.applyUrl || b.listingUrl || '');
+    return !!aUrl && aUrl === bUrl;
+  }
+
+  // Pure exact-owner contract shared by the long-running external handler. A job identity match is
+  // insufficient: the same posting can appear in a later run while an older coroutine is waking up.
+  function applyLifecycleOwnership(job, storage = {}) {
+    if (!job) return { owns: false, handled: false };
+    const queue = storage.pja_ext_queue || null;
+    const current = storage.pja_ext_current || null;
+    const ranked = storage.pja_ranked_apply || null;
+    const queueJob = queue && queue.jobs && queue.jobs[queue.currentIndex || 0];
+    const rankedJob = ranked && ranked.jobs && ranked.jobs[ranked.currentIndex || 0];
+    const jobRunId = String(job.runId || '');
+    const queueRunMatches = !jobRunId || String(queue && queue.runId || '') === jobRunId;
+    const currentRunMatches = !jobRunId || String(current && current.runId || '') === jobRunId;
+    const queueOwns = !!queue && queue.status === 'applying' && queueRunMatches &&
+      sameLifecycleJob(queueJob, job);
+    const currentOwns = currentRunMatches && sameLifecycleJob(current, job);
+    const rankedOwns = !job.rankedRun || !!ranked && ranked.status === 'applying' && !!jobRunId &&
+      String(ranked.runId || '') === jobRunId && sameLifecycleJob(rankedJob, job);
+    return {
+      owns: queueOwns && rankedOwns && currentOwns,
+      handled: currentOwns && !!current._handled,
+      phase: currentOwns ? String(current._applyPhase || '') : '',
+      submitPending: !!(currentOwns && current._submitPending),
+      submitStartedAt: currentOwns ? Number(current._submitStartedAt || 0) : 0,
+    };
+  }
+
+  // A ranked tab can disappear during a browser handoff. Permit one bounded, pre-submit relaunch,
+  // then terminate the job instead of resetting inFlightAt forever. The tracker is scoped to the
+  // exact run/index/job identity so it cannot leak a recovery budget across queue entries.
+  function missingTabRecoveryDecision(master, job, opts = {}) {
+    const limit = Math.max(0, Number.isFinite(Number(opts.limit)) ? Number(opts.limit) : 1);
+    const runId = String(master && master.runId || '');
+    const idx = Math.max(0, Number(master && master.currentIndex) || 0);
+    const jobKey = queueJobKey(job);
+    const prior = master && master.missingTabRecovery || {};
+    const same = String(prior.runId || '') === runId && Number(prior.idx) === idx &&
+      String(prior.jobKey || '') === jobKey;
+    const count = same ? Math.max(0, Number(prior.count) || 0) : 0;
+    const tracker = { runId, idx, jobKey, count: count + 1 };
+    return count < limit
+      ? { action: 'relaunch', tracker, count: tracker.count, limit }
+      : { action: 'fail', tracker: { ...tracker, count }, count, limit };
+  }
+
+  // A vanished tab is relaunchable only when the handler persisted an affirmative pre-submit
+  // phase for this exact run/job. Exact ownership by itself is not phase evidence: a tab can vanish
+  // after a submit while recordResult is between clearing _submitPending and writing its terminal
+  // ledger event. Native handlers do not currently persist this marker, so they remain ambiguous.
+  function classifyMissingTabOutcome(job, input = {}) {
+    if (input.submitPending === true) {
+      return { kind: 'submitted_unverified', reason: 'submit_observation_timeout' };
+    }
+    const channel = String(job && (job.channel || job.ats || job.strategy) || '').toLowerCase();
+    const nativeWithoutPhaseMarker = /linkedin_easy_apply|indeed_apply|linkedin|indeed/.test(channel);
+    if (input.currentMatches !== true || input.phase !== 'pre_submit' ||
+        input.handled === true || nativeWithoutPhaseMarker) {
+      return { kind: 'submitted_unverified', reason: 'tab_lost_outcome_unknown' };
+    }
+    return { kind: 'pre_submit', reason: '' };
+  }
+
+  // Workday auth diagnostics are asynchronous and tenant hosts are reused by many jobs. Host-only
+  // correlation can combine an old create-account snapshot with a later job's sign-in result.
+  // Require exact run/job identity, current-attempt time, and (when present) the expected host.
+  function diagnosticOwnsRankedJob(fact, master, job) {
+    if (!fact || !master || !job) return false;
+    if (!fact.runId || String(fact.runId) !== String(master.runId || '')) return false;
+    const expectedIds = [job.id, job.jobId, job.sourceJobId]
+      .map(value => String(value == null ? '' : value).trim()).filter(Boolean);
+    if (!fact.jobId || !expectedIds.includes(String(fact.jobId).trim())) return false;
+    const ts = Number(fact.ts || fact.capturedAt || 0);
+    if (!Number.isFinite(ts) || ts < Number(master.inFlightAt || 0)) return false;
+    let expectedHost = '', factHost = String(fact.hostname || '').toLowerCase();
+    try { expectedHost = new URL(job.applyUrl || '').hostname.toLowerCase(); } catch (_) {}
+    if (!factHost && fact.url) {
+      try { factHost = new URL(fact.url).hostname.toLowerCase(); } catch (_) {}
+    }
+    return !expectedHost || !factHost || expectedHost === factHost;
+  }
+
+  // Workday Gmail verification is an asynchronous cross-tab flow. A tenant hostname is not an
+  // owner: two jobs can reuse it while an old Gmail/verification tab is still alive. Require the
+  // immutable run, stable job, apply URL, and (for ranked runs) exact dispatcher tab.
+  function workdayGmailOwnership(owner, storage = {}) {
+    if (!owner || !owner.runId || !owner.jobId || !owner.applyUrl) return false;
+    const current = storage.pja_ext_current || null;
+    const ranked = storage.pja_ranked_apply || null;
+    if (!current || String(current.runId || '') !== String(owner.runId)) return false;
+    const currentIds = [current.id, current.jobId, current.sourceJobId]
+      .map(value => String(value == null ? '' : value).trim()).filter(Boolean);
+    if (!currentIds.includes(String(owner.jobId).trim())) return false;
+    if (applyUrlKey(current.applyUrl || '') !== applyUrlKey(owner.applyUrl || '')) return false;
+    if (!applyLifecycleOwnership(current, storage).owns) return false;
+    if (current.rankedRun) {
+      if (owner.applyTabId == null || !ranked ||
+          Number(ranked.inFlightTabId) !== Number(owner.applyTabId)) return false;
+    }
+    return true;
+  }
+
+  // Pure accounting boundary for email-code gates. A verification-only click is not an
+  // application submission; ambiguity begins once a potentially-final trusted action was invoked,
+  // a later final Submit was invoked, or the application had already been submitted. A local CDP
+  // acknowledgement timeout cannot prove the browser-side click did not land later.
+  function emailCodeSubmitRisk(input = {}) {
+    if (input.explicitConfirmation === true) return false;
+    return input.priorSubmit === true || input.finalSubmitAttempted === true ||
+      (input.initialActionAttempted === true && input.verificationOnly !== true);
+  }
+
+  function submittedUnverifiedReason(reason) {
+    return /submit_unclear|submit_observation_timeout|workday_transport_failure|success_unverified|tab_lost_outcome_unknown|email_code_submit_unconfirmed|submit_unconfirmed|unconfirmed|assumed|inferred/i
+      .test(String(reason || ''));
+  }
+
+  // Generic ATS email-code recovery has the same cross-tab risk as Workday verification. Require
+  // the immutable application owner and the exact Gmail session before accepting a code/result.
+  function emailCodeOwnership(owner, storage = {}) {
+    if (!owner || !owner.runId || !owner.jobId || !owner.applyUrl || owner.applyTabId == null) return false;
+    const current = storage.pja_ext_current || null;
+    const ranked = storage.pja_ranked_apply || null;
+    if (!current || String(current.runId || '') !== String(owner.runId)) return false;
+    const currentIds = [current.id, current.jobId, current.sourceJobId]
+      .map(value => String(value == null ? '' : value).trim()).filter(Boolean);
+    if (!currentIds.includes(String(owner.jobId).trim())) return false;
+    if (applyUrlKey(current.applyUrl || '') !== applyUrlKey(owner.applyUrl || '')) return false;
+    if (!applyLifecycleOwnership(current, storage).owns) return false;
+    if (current.rankedRun && (!ranked || Number(ranked.inFlightTabId) !== Number(owner.applyTabId))) return false;
+    if (owner.sessionId) {
+      const session = storage.pja_email_code_session || null;
+      if (!session || String(session.sessionId || '') !== String(owner.sessionId)) return false;
+    }
+    return true;
+  }
+
   // Service-worker watchdog decision (pure). The content-script setTimeout watchdog is unreliable on
   // backgrounded tabs (MV3 throttling), so the SW polls this on a chrome.alarm. Given the queue, the
   // last-seen tracker `wd` ({runId, idx, startedAt}), and now, it decides whether to reset the timer
@@ -475,6 +620,7 @@
   const NEEDS_MANUAL = new Set(['workday_captcha', 'captcha', 'captcha_or_antibot', 'captcha_after_submit', 'email_verification_required',
     'linkedin_checkpoint', 'daily_limit', 'linkedin_daily_limit', 'chatbot_apply_manual',
     'ready_to_submit_review', 'stuck_budget', 'handler_timeout', 'success_unverified', 'unsupported_strategy',
+    'no_active_tab_pre_submit', 'tab_lost_outcome_unknown',
     'ownership_lost_ext_current_advanced',
     // These are stable ATS/UI blockers observed in live runs. Retrying them three times only
     // burns the batch budget; defer for manual review and let the queue advance immediately.
@@ -483,7 +629,8 @@
     'workday_account_exists_wrong_password', 'workday_duplicate_record',
     // Submit was attempted but acceptance could not be observed. Never retry an application that
     // may already exist; keep it visible for evidence reconciliation instead.
-    'submit_unclear', 'submit_observation_timeout', 'workday_transport_failure']);
+    'submit_unclear', 'submit_observation_timeout', 'workday_transport_failure',
+    'email_code_submit_unconfirmed']);
 
   // Everything else (missing_required, apply_btn_no_form,
   // watchdog_timeout, no_apply_btn_on_description, no_submit_after_spa, workday_auth_*) is TRANSIENT:
@@ -521,7 +668,10 @@
 
   const API = { buildApplySet, buildApplyPlan, resultToState, poolStatus, roleKey, applyUrlKey, linkedinJobId, stableRecordId,
     recordIdentityIds, appliedIdentity, greenhouseEmbedFallback, exceededBudget, externalJobBudgetOptions, queueJobKey,
-    watchdogDecision, unsupportedAutonomousApplyReason, applyCapabilityStatus, hasUsableDescription,
+    sameLifecycleJob, applyLifecycleOwnership, watchdogDecision, missingTabRecoveryDecision,
+    classifyMissingTabOutcome, diagnosticOwnsRankedJob, workdayGmailOwnership,
+    emailCodeSubmitRisk, emailCodeOwnership, submittedUnverifiedReason,
+    unsupportedAutonomousApplyReason, applyCapabilityStatus, hasUsableDescription,
     evidenceMaterialGaps, hasCurrentScoringPolicy, timestampMs, browserFreshnessAt };
   if (root) root.PJAApplySelect = API;
   if (typeof module !== 'undefined' && module.exports) module.exports = API;

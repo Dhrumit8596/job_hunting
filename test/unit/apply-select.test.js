@@ -5,7 +5,10 @@ require(path.resolve(__dirname, '../../sourcing/detect-ats'));
 const Evidence = require(path.resolve(__dirname, '../../scoring-evidence'));
 const { buildApplySet, buildApplyPlan, resultToState, poolStatus, roleKey, greenhouseEmbedFallback, exceededBudget,
   externalJobBudgetOptions,
-  watchdogDecision, queueJobKey, unsupportedAutonomousApplyReason, applyCapabilityStatus,
+  watchdogDecision, queueJobKey, applyLifecycleOwnership, missingTabRecoveryDecision,
+  classifyMissingTabOutcome, diagnosticOwnsRankedJob, workdayGmailOwnership,
+  emailCodeSubmitRisk, emailCodeOwnership, submittedUnverifiedReason,
+  unsupportedAutonomousApplyReason, applyCapabilityStatus,
   hasUsableDescription, applyUrlKey, linkedinJobId, browserFreshnessAt } = require(path.resolve(__dirname, '../../sourcing/apply-select'));
 
 function corpus(entries) {
@@ -271,6 +274,12 @@ module.exports = (t) => {
   t.eq(resultToState('workday_duplicate_record', 0).status, 'needs_manual', 'Workday duplicate draft record → manual deferral');
   t.eq(resultToState('ownership_lost_ext_current_advanced', 0).status, 'needs_manual',
     'ranked ownership loss is manual/non-retryable instead of an inferred failure');
+  t.eq(resultToState('no_active_tab_pre_submit', 0).status, 'needs_manual',
+    'exhausted missing-tab recovery is visible and never automatically retried');
+  t.eq(resultToState('tab_lost_outcome_unknown', 0).status, 'needs_manual',
+    'ambiguous missing-tab acceptance is never automatically retried');
+  t.eq(resultToState('email_code_submit_unconfirmed', 0).status, 'needs_manual',
+    'possibly-final email-code action without confirmation is never automatically retried');
   t.eq(resultToState('missing_required', 0).status, 'sourced', 'transient first fail → stays sourced (retry)');
   t.eq(resultToState('missing_required', 0).retry, true, 'transient marks retry');
   t.eq(resultToState('missing_required', 0, 1).status, 'needs_manual', 'E2E-safe maxAttempts=1 defers transient first fail');
@@ -316,6 +325,129 @@ module.exports = (t) => {
     'wd: one-job reserve with same run/index resets by canonical job identity');
   t.ok(queueJobKey(rankedA.jobs[0]) !== queueJobKey(rankedB.jobs[0]),
     'wd: tenant-local raw IDs do not collide when routes differ');
+
+  const missingFirst = missingTabRecoveryDecision(rankedA, rankedA.jobs[0]);
+  t.eq(missingFirst.action, 'relaunch', 'ranked missing tab: first loss gets one bounded relaunch');
+  const missingSecond = missingTabRecoveryDecision({ ...rankedA, missingTabRecovery: missingFirst.tracker }, rankedA.jobs[0]);
+  t.eq(missingSecond.action, 'fail', 'ranked missing tab: a second loss terminalizes instead of resetting forever');
+  t.eq(missingTabRecoveryDecision({ ...rankedA, currentIndex: 1, missingTabRecovery: missingFirst.tracker },
+    { id: 'other', company: 'A', title: 'Other', applyUrl: 'https://a.example/apply/other' }).action, 'relaunch',
+  'ranked missing tab: recovery count is scoped to exact queue identity');
+  t.eq(classifyMissingTabOutcome({ channel: 'linkedin_easy_apply' },
+    { currentMatches: true, submitPending: false }).kind, 'submitted_unverified',
+  'ranked missing tab: LinkedIn without a durable phase marker is ambiguous and never relaunched');
+  t.eq(classifyMissingTabOutcome({ channel: 'external', ats: 'greenhouse' },
+    { currentMatches: true, submitPending: false, phase: 'pre_submit' }).kind, 'pre_submit',
+  'ranked missing tab: exact external current with a durable pre-submit phase can use bounded recovery');
+  t.eq(classifyMissingTabOutcome({ channel: 'external', ats: 'greenhouse' },
+    { currentMatches: true, submitPending: false }).reason, 'tab_lost_outcome_unknown',
+  'ranked missing tab: exact external ownership without phase evidence remains ambiguous');
+  t.eq(classifyMissingTabOutcome({ channel: 'external', ats: 'greenhouse' },
+    { currentMatches: true, submitPending: false, phase: 'pre_submit', handled: true }).reason,
+  'tab_lost_outcome_unknown',
+  'ranked missing tab: handled-result window is never relaunched even if an old pre-submit marker remains');
+  t.eq(classifyMissingTabOutcome({ channel: 'external', ats: 'workday' },
+    { currentMatches: false, submitPending: false }).reason, 'tab_lost_outcome_unknown',
+  'ranked missing tab: lost exact external ownership is preserved as ambiguous');
+  t.eq(classifyMissingTabOutcome({ channel: 'external', ats: 'workday' },
+    { currentMatches: true, submitPending: true }).reason, 'submit_observation_timeout',
+  'ranked missing tab: durable submit evidence remains submitted/unverified');
+
+  const lifecycleJob = { id: 'workday:R1', runId: 'run-1', rankedRun: true,
+    applyUrl: 'https://acme.wd1.myworkdayjobs.com/job/R1' };
+  const lifecycleStorage = {
+    pja_ext_queue: { runId: 'run-1', status: 'applying', currentIndex: 0, jobs: [{ ...lifecycleJob }] },
+    pja_ext_current: { ...lifecycleJob },
+    pja_ranked_apply: { runId: 'run-1', status: 'applying', currentIndex: 0, jobs: [{ ...lifecycleJob }] },
+  };
+  t.eq(applyLifecycleOwnership(lifecycleJob, lifecycleStorage).owns, true,
+    'apply lifecycle: exact queue/current/ranked run and job own the coroutine');
+  const submitLifecycle = applyLifecycleOwnership(lifecycleJob, {
+    ...lifecycleStorage,
+    pja_ext_current: { ...lifecycleJob, _applyPhase: 'submit_pending',
+      _submitPending: true, _submitStartedAt: 7001 },
+  });
+  t.eq({ phase: submitLifecycle.phase, pending: submitLifecycle.submitPending,
+    startedAt: submitLifecycle.submitStartedAt },
+  { phase: 'submit_pending', pending: true, startedAt: 7001 },
+  'apply lifecycle: durable submit marker fields are returned for exact post-write verification');
+  const laterRunStorage = {
+    pja_ext_queue: { ...lifecycleStorage.pja_ext_queue, runId: 'run-2', jobs: [{ ...lifecycleJob, runId: 'run-2' }] },
+    pja_ext_current: { ...lifecycleJob, runId: 'run-2' },
+    pja_ranked_apply: { ...lifecycleStorage.pja_ranked_apply, runId: 'run-2', jobs: [{ ...lifecycleJob, runId: 'run-2' }] },
+  };
+  t.eq(applyLifecycleOwnership(lifecycleJob, laterRunStorage).owns, false,
+    'apply lifecycle: same posting in a later run cannot revive an older coroutine');
+  t.eq(applyLifecycleOwnership(lifecycleJob, {
+    ...lifecycleStorage,
+    pja_ranked_apply: { ...lifecycleStorage.pja_ranked_apply,
+      currentIndex: 0, jobs: [{ id: 'workday:R2', runId: 'run-1' }] },
+  }).owns, false,
+  'apply lifecycle: ranked master advancing to another job stops the stale handler');
+
+  const gmailOwner = { sessionId: 'wd-session-1', runId: 'run-1', jobId: 'workday:R1',
+    applyUrl: lifecycleJob.applyUrl, applyTabId: 77 };
+  const gmailStorage = {
+    ...lifecycleStorage,
+    pja_ranked_apply: { ...lifecycleStorage.pja_ranked_apply, inFlightTabId: 77 },
+    pja_wd_gmail_session: { ...gmailOwner },
+  };
+  t.eq(workdayGmailOwnership(gmailOwner, gmailStorage), true,
+    'Workday Gmail: exact run/job/URL/dispatcher tab owns the cross-tab verification flow');
+  t.eq(workdayGmailOwnership({ ...gmailOwner, runId: 'run-2' }, gmailStorage), false,
+    'Workday Gmail: stale run cannot resume a newer application');
+  t.eq(workdayGmailOwnership({ ...gmailOwner, applyTabId: 78 }, gmailStorage), false,
+    'Workday Gmail: stale apply tab cannot create a duplicate handler for the same job');
+  t.eq(workdayGmailOwnership({ ...gmailOwner, applyTabId: undefined }, gmailStorage), false,
+    'Workday Gmail: ranked resume requires an explicit dispatcher tab, not only job identity');
+  t.eq(workdayGmailOwnership({ ...gmailOwner,
+    applyUrl: 'https://other.wd1.myworkdayjobs.com/job/R1' }, gmailStorage), false,
+  'Workday Gmail: same raw requisition on a different route is not the same owner');
+  const gmailAfterSessionRemoval = { ...gmailStorage };
+  delete gmailAfterSessionRemoval.pja_wd_gmail_session;
+  t.eq(workdayGmailOwnership(gmailOwner, gmailAfterSessionRemoval), true,
+    'Workday Gmail: durable pending/result ownership remains valid after the completed Gmail session is removed');
+
+  const emailOwner = { sessionId: 'email-session-1', runId: 'run-1', jobId: 'workday:R1',
+    applyUrl: lifecycleJob.applyUrl, applyTabId: 77 };
+  const emailStorage = { ...gmailStorage, pja_email_code_session: { ...emailOwner } };
+  t.eq(emailCodeOwnership(emailOwner, emailStorage), true,
+    'email code: exact run/job/route/tab/session owns the Gmail result');
+  t.eq(emailCodeOwnership({ ...emailOwner, sessionId: 'email-session-2' }, emailStorage), false,
+    'email code: a replaced session cannot consume the prior session result');
+  t.eq(emailCodeOwnership({ ...emailOwner, applyTabId: 78 }, emailStorage), false,
+    'email code: a duplicate ranked apply tab cannot own the code flow');
+  t.eq(emailCodeSubmitRisk({ verificationOnly: true, initialActionAttempted: true }), false,
+    'email code accounting: a delivered verification-only action is still pre-submit');
+  t.eq(emailCodeSubmitRisk({ verificationOnly: false, initialActionAttempted: true }), true,
+    'email code accounting: a delivered possibly-final action is submitted/unverified without confirmation');
+  t.eq(emailCodeSubmitRisk({ verificationOnly: true, initialActionAttempted: true,
+    finalSubmitAttempted: true }), true,
+  'email code accounting: final Submit after verification creates submission ambiguity');
+  t.eq(emailCodeSubmitRisk({ priorSubmit: true }), true,
+    'email code accounting: a post-submit verification failure preserves the earlier ambiguous submit');
+  t.eq(emailCodeSubmitRisk({ priorSubmit: true, explicitConfirmation: true }), false,
+    'email code accounting: explicit confirmation is not categorized as unverified');
+  for (const reason of ['submit_observation_timeout', 'workday_transport_failure',
+    'success_unverified', 'tab_lost_outcome_unknown', 'email_code_submit_unconfirmed']) {
+    t.eq(submittedUnverifiedReason(reason), true,
+      `outcome accounting: ${reason} maps to submitted/unverified`);
+  }
+
+  const diagMaster = { runId: 'run-exact', currentIndex: 0, inFlightAt: 5000 };
+  const diagJob = { id: 'workday:R1', jobId: 'R1', applyUrl: 'https://acme.wd1.myworkdayjobs.com/job/R1' };
+  const exactFact = { runId: 'run-exact', jobId: 'workday:R1',
+    url: 'https://acme.wd1.myworkdayjobs.com/apply', ts: 5001 };
+  t.eq(diagnosticOwnsRankedJob(exactFact, diagMaster, diagJob), true,
+    'ranked diagnostics: exact run/job/current-attempt fact is owned');
+  t.eq(diagnosticOwnsRankedJob({ ...exactFact, runId: 'old-run' }, diagMaster, diagJob), false,
+    'ranked diagnostics: another run is ignored');
+  t.eq(diagnosticOwnsRankedJob({ ...exactFact, jobId: 'workday:R2' }, diagMaster, diagJob), false,
+    'ranked diagnostics: another job is ignored');
+  t.eq(diagnosticOwnsRankedJob({ ...exactFact, ts: 4999 }, diagMaster, diagJob), false,
+    'ranked diagnostics: stale pre-attempt fact is ignored');
+  t.eq(diagnosticOwnsRankedJob({ ...exactFact, url: 'https://other.wd1.myworkdayjobs.com/apply' }, diagMaster, diagJob), false,
+    'ranked diagnostics: another Workday tenant is ignored');
 
   t.eq(greenhouseEmbedFallback('https://job-boards.greenhouse.io/peakenergy/jobs/4913996007', 'https://peakenergy.com/careers?gh_jid=4913996007'), 'https://boards.greenhouse.io/embed/job_app?for=peakenergy&token=4913996007', 'GH corporate redirect -> embedded application');
   t.eq(greenhouseEmbedFallback('https://job-boards.greenhouse.io/peakenergy/jobs/4913996007', 'https://peakenergy.com/careers?gh_jid=999'), '', 'GH fallback requires matching job id');
