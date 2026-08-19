@@ -102,6 +102,10 @@ pure modules are:
 - `scoring-frontier.js` — cached-score reuse and token-bounded advancement into unscored candidates.
 - `apply-progress.js` — exact-run snapshot and bounded transition events from queue/ledger state.
 - `apply-recovery-policy.js` — deterministic wait/inspect/resume/stop/report actions.
+- `ledger-retry-policy.js` — one browser/Node classifier for confirmed, submitted/unverified,
+  retryable failure, manual-only failure, and external blocker outcomes.
+- `sourcing/source-safety.js` — fail-closed storage observation plus workflow/source/browser
+  budgets and exact-run ownership/deadline decisions.
 
 When planning finds no eligible queue, the terminal run control retains compact `planningDrops`
 (exact total/reason counts plus at most 12 sanitized examples). Exact-run export therefore preserves
@@ -170,6 +174,15 @@ Key rules:
 - A high score is not enough: the apply gate also checks direct evidence, conflicts, confidence,
   status, attempts, blocked tenants, location, per-company caps, and prior applications.
 - Planning drops are expected output. Every rejected candidate should have a deterministic reason.
+- Unified sourcing observes profile/preferences and deduplication storage through a bounded retry;
+  a transport read that exposes no profile/preferences keys fails `/source-v2` before discovery.
+- Exact-run `/source-v2` work carries its `runId` and an absolute sourcing deadline. Ownership is
+  checked before browser discovery, between scans/adapters, and immediately before import. The MV3
+  import boundary checks the same run-control token again, so an expired, terminal, or non-owned
+  source worker cannot add or retire IndexedDB records. Standalone `/source-v2` is still supported,
+  but has a capped deadline and claims no exact-run ownership.
+- Browser per-scan time is clamped or the scan plan is truncated so scheduled worst-case work fits
+  its total browser budget; the browser budget ends before the source client and overall workflow.
 
 ## Ranked apply dispatch
 
@@ -214,6 +227,7 @@ extracted into independent files.
 | Native channels | `content/auto-apply.js`, `content/indeed-apply.js` | LinkedIn Easy Apply and Indeed Apply state machines. |
 | External ATS | `content/external-apply.js`, `workday-auth.js`, `workday-engine.js`, `apply-account.js` | External form execution, Workday auth, recovery, terminal diagnostics. |
 | Evidence | `application-ledger.js`, `confirmation-tracker.js` | Outcome reduction/audit and optional email reconciliation. |
+| Retry/source safety | `ledger-retry-policy.js`, `sourcing/source-safety.js`, `sourcing/browser-discovery.js` | Shared ledger suppression/report policy; exact sourcing budgets, ownership, deadline, and bounded browser-plan decisions. |
 | UI | `content/content.js`, `popup/*`, `shortlist/*`, `settings/*` | Sidebar, pipeline/review UI, local profile/resume/answers. |
 
 ## Storage and ownership
@@ -234,6 +248,11 @@ extracted into independent files.
 Every terminal result must carry a `runId` and stable job identity. Content scripts may finish late
 after a watchdog or recovered tab has advanced; ownership checks prevent those stale results from
 mutating the next job.
+
+Submitted/unverified ledger outcomes are never confirmation. Ambiguous submit observation,
+transport, duplicate-record, or historical ranked-watchdog outcomes remain visible for manual
+reconciliation and are excluded from automatic planning even if sourcing refreshes their corpus
+state back to `sourced`. Planning and developer reporting use the same retry classifier.
 
 ## Loaded, reachable, shadow, and historical code
 

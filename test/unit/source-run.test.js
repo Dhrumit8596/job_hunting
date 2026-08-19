@@ -77,4 +77,20 @@ module.exports = async (t) => {
   const states = Object.values(store.state);
   t.eq(states.every(s => s.scoreKind === 'heuristic' && !!s.descriptionFingerprint), true,
     'source-run: source scores are marked heuristic with JD fingerprint');
+
+  let adapterCalls = 0, guardCalls = 0, stopped = '';
+  try {
+    await sourceAll({ sources: [], discoveryAdapters: {
+      first: { async fetchJobs() { adapterCalls += 1; return []; } },
+      second: { async fetchJobs() { adapterCalls += 1; return []; } },
+    }, guard: async stage => {
+      guardCalls += 1;
+      if (stage === 'before_discovery_adapter_second') {
+        const error = new Error('source_ownership_lost'); error.code = 'source_ownership_lost'; throw error;
+      }
+    } });
+  } catch (error) { stopped = error.code; }
+  t.eq({ adapterCalls, stopped, guarded: guardCalls > 2 },
+    { adapterCalls: 1, stopped: 'source_ownership_lost', guarded: true },
+  'source-run: ownership is rechecked between expensive discovery adapters and stops later work');
 };

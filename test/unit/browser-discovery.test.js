@@ -1,6 +1,7 @@
 'use strict';
 
-const { boundedQueries, buildBrowserDiscoveryPlan, scanTerminal } = require('../../sourcing/browser-discovery');
+const { boundedQueries, buildBrowserDiscoveryPlan, scanTerminal, boundDiscoveryPlan,
+  runBoundedDiscoveryPlan } = require('../../sourcing/browser-discovery');
 
 module.exports = async t => {
   t.eq(boundedQueries(['Process Engineer', ' process  engineer ', 'Quality Engineer'], 12),
@@ -40,4 +41,36 @@ module.exports = async t => {
   t.eq({ terminal: paused.terminal, status: paused.status, reason: paused.reason },
     { terminal: true, status: 'paused', reason: 'challenge' },
   'browser discovery: Indeed challenge is terminal and never bypassed');
+
+  const full = buildBrowserDiscoveryPlan({
+    queries: Array.from({ length: 20 }, (_, index) => `Engineer ${index + 1}`),
+    targetLocation: { city: 'Santa Clara', state: 'CA' }, maxQueries: 20,
+  });
+  const budgeted = boundDiscoveryPlan(full, { totalBudgetMs: 20 * 60 * 1000,
+    perQueryTimeoutMs: 120000, minimumPerItemMs: 5000 });
+  t.ok(budgeted.plan.length <= 40 &&
+    budgeted.perQueryTimeoutMs * budgeted.plan.length <= budgeted.totalBudgetMs,
+  'browser discovery: 20 queries across two sources cannot exceed the total sourcing budget');
+  t.eq(budgeted.clamped, true,
+    'browser discovery: impossible requested per-query time is safely clamped to the total budget');
+
+  let launches = 0, guardCalls = 0;
+  const deadlineStopped = await runBoundedDiscoveryPlan(full.slice(0, 4), {
+    totalBudgetMs: 40000, perQueryTimeoutMs: 10000, minimumPerItemMs: 1000,
+    guard: async () => ({ ok: ++guardCalls <= 2, code: 'sourcing_deadline_exceeded' }),
+    runItem: async item => { launches += 1; return { source: item.source, query: item.query, status: 'done' }; },
+  });
+  t.eq({ launches, error: deadlineStopped.terminalError },
+    { launches: 2, error: 'sourcing_deadline_exceeded' },
+  'browser discovery: deadline expiration stops scheduling additional scans');
+
+  launches = 0; guardCalls = 0;
+  const ownershipStopped = await runBoundedDiscoveryPlan(full.slice(0, 4), {
+    totalBudgetMs: 40000, perQueryTimeoutMs: 10000, minimumPerItemMs: 1000,
+    guard: async () => ({ ok: ++guardCalls <= 1, code: 'source_ownership_lost' }),
+    runItem: async item => { launches += 1; return { source: item.source, query: item.query, status: 'done' }; },
+  });
+  t.eq({ launches, error: ownershipStopped.terminalError },
+    { launches: 1, error: 'source_ownership_lost' },
+  'browser discovery: ownership loss stops scheduling additional scans');
 };

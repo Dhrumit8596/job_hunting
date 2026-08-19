@@ -75,4 +75,73 @@ function scanTerminal(storage, item, startedAt) {
   return { terminal: false, status: 'running' };
 }
 
-module.exports = { boundedQueries, buildBrowserDiscoveryPlan, matchingCoverage, scanTerminal };
+function boundDiscoveryPlan(plan, options = {}) {
+  const input = Array.isArray(plan) ? plan.slice() : [];
+  const totalBudgetMs = Math.max(1, Number(options.totalBudgetMs) || 1);
+  const requested = Math.max(1, Number(options.perQueryTimeoutMs) || 120000);
+  const minimum = Math.max(1, Number(options.minimumPerItemMs) || 5000);
+  if (!input.length) return { plan: [], perQueryTimeoutMs: Math.min(requested, totalBudgetMs),
+    totalBudgetMs, scheduledWorstCaseMs: 0, truncated: 0, clamped: requested > totalBudgetMs };
+  let bounded = input;
+  let perQueryTimeoutMs = Math.min(requested, Math.floor(totalBudgetMs / input.length));
+  if (perQueryTimeoutMs < minimum) {
+    const maxItems = Math.floor(totalBudgetMs / minimum);
+    if (maxItems < 1) {
+      const error = new Error('browser discovery budget is too small for one bounded scan');
+      error.code = 'invalid_sourcing_timeout_budget';
+      throw error;
+    }
+    bounded = input.slice(0, maxItems);
+    perQueryTimeoutMs = Math.min(requested, Math.floor(totalBudgetMs / bounded.length));
+  }
+  return { plan: bounded, perQueryTimeoutMs, totalBudgetMs,
+    scheduledWorstCaseMs: bounded.length * perQueryTimeoutMs,
+    truncated: input.length - bounded.length,
+    clamped: perQueryTimeoutMs !== requested };
+}
+
+async function runBoundedDiscoveryPlan(plan, options = {}) {
+  const bounded = boundDiscoveryPlan(plan, options);
+  const guard = options.guard || (async () => ({ ok: true }));
+  const runItem = options.runItem;
+  if (typeof runItem !== 'function') throw new Error('runBoundedDiscoveryPlan requires runItem');
+  const blockedSources = new Set(), scans = [];
+  const requestedQueries = Array.from(new Set((plan || []).map(item => item.query)));
+  const queries = Array.from(new Set(bounded.plan.map(item => item.query)));
+  for (const query of queries) {
+    const active = bounded.plan.filter(item => item.query === query && !blockedSources.has(item.source));
+    active.sort((a, b) => (a.source === 'indeed' ? -1 : 1) - (b.source === 'indeed' ? -1 : 1));
+    for (const item of active) {
+      const decision = await guard('before_source_query_launch', item);
+      if (!decision || decision.ok !== true) {
+        return { requestedQueries, scheduledQueries: queries, scans, blockedSources: Array.from(blockedSources),
+          terminalError: decision && decision.code || 'source_ownership_lost', budget: bounded };
+      }
+      const row = await runItem(item, { perQueryTimeoutMs: bounded.perQueryTimeoutMs, guard });
+      scans.push(row);
+      if (row && row.terminalError) {
+        return { requestedQueries, scheduledQueries: queries, scans, blockedSources: Array.from(blockedSources),
+          terminalError: row.terminalError, budget: bounded };
+      }
+      if (row && row.source === 'indeed' && /^(paused|failed)$/i.test(String(row.status || '')) &&
+          /challenge|captcha|verification/i.test(String(row.reason || ''))) blockedSources.add(row.source);
+    }
+    for (const item of bounded.plan.filter(item => item.query === query && blockedSources.has(item.source))) {
+      if (!scans.some(row => row.source === item.source && row.query === item.query)) {
+        scans.push({ source: item.source, query: item.query, status: 'skipped_source_blocked' });
+      }
+    }
+  }
+  return { requestedQueries, scheduledQueries: queries, scans, blockedSources: Array.from(blockedSources),
+    budget: bounded, totals: scans.reduce((acc, row) => {
+      acc.collected += Number(row.collected || 0);
+      acc.easyApply += Number(row.easyApply || 0);
+      acc.external += Number(row.external || 0);
+      if (row.status === 'done') acc.completed++;
+      else acc.incomplete++;
+      return acc;
+    }, { collected: 0, easyApply: 0, external: 0, completed: 0, incomplete: 0 }) };
+}
+
+module.exports = { boundedQueries, buildBrowserDiscoveryPlan, matchingCoverage, scanTerminal,
+  boundDiscoveryPlan, runBoundedDiscoveryPlan };

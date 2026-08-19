@@ -97,7 +97,7 @@ function pjaMergeAppliedLog(log, entries) {
 
 // Aggregate every source of "already applied" from storage for dedupe: the durable applied log
 // (primary), plus pja_jobs and the current queue's results (belt-and-suspenders).
-function pjaCollectAppliedRecords(storage) {
+function pjaCollectAppliedRecords(storage, options = {}) {
   const s = storage || {};
   const recs = [];
   for (const j of (s.pja_applied_log || [])) {
@@ -108,6 +108,20 @@ function pjaCollectAppliedRecords(storage) {
   }
   const r = s.pja_ext_queue && s.pja_ext_queue.results;
   if (r) for (const x of (r.applied || [])) recs.push(x);
+  const ledgerEvents = s.pja_application_ledger && s.pja_application_ledger.events
+    ? Object.values(s.pja_application_ledger.events) : [];
+  let retryPolicy = null;
+  try { retryPolicy = require('../ledger-retry-policy'); } catch (_) {}
+  const blocked = retryPolicy ? new Set(retryPolicy.blockedLedgerRecords(ledgerEvents, options)) : new Set();
+  for (const event of ledgerEvents) {
+    if (!event) continue;
+    if (retryPolicy) {
+      const classification = retryPolicy.classifyLedgerEvent(event);
+      if (classification.confirmed || blocked.has(event)) recs.push(event);
+    } else if (/^(applied|submitted|submitting|success|confirmed)$/i.test(String(event.status || event.result || ''))) {
+      recs.push(event);
+    }
+  }
   return recs;
 }
 

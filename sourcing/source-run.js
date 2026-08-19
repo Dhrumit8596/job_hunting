@@ -156,12 +156,15 @@ async function sourceAll(opts = {}) {
   const stateFor = j => ({ fitScore: prescore(j), scoreKind: 'heuristic',
     descriptionFingerprint: descriptionFingerprint(j.description) });
   const report = { modalityA: {}, modalityB: {} };
+  const guard = typeof opts.guard === 'function' ? opts.guard : async () => {};
 
   // --- Modality A: API registry ---
+  await guard('before_source_all_registry');
   const a = await fetchAll(sources, { concurrency: opts.concurrency || 8, timeoutMs: 12000,
     queries, nationwideUS: opts.nationwideUS === true,
     targetLocation: opts.targetLocation, targetRadiusMiles: opts.targetRadiusMiles,
     locationStrictness: opts.locationStrictness, remotePolicy: opts.remotePolicy });
+  await guard('after_source_all_registry');
   const filterOpts = { nationwideUS: opts.nationwideUS === true,
     targetLocation: opts.targetLocation, targetRadiusMiles: opts.targetRadiusMiles,
     locationStrictness: opts.locationStrictness, remotePolicy: opts.remotePolicy };
@@ -182,8 +185,10 @@ async function sourceAll(opts = {}) {
   const target = opts.targetLocation && typeof opts.targetLocation === 'object' ? opts.targetLocation : {};
   const locationQuery = [target.city, target.state].filter(Boolean).join(', ') || target.label || target.zip || undefined;
   for (const name of Object.keys(discoveryAdapters)) {
+    await guard('before_discovery_adapter_' + name);
     const jobs = await discoveryAdapters[name].fetchJobs(null, { queries, timeoutMs: 15000,
       locationQuery, targetRadiusMiles: opts.targetRadiusMiles });
+    await guard('after_discovery_adapter_' + name);
     bFetched += jobs.length;
     const elig = autonomousApplyFilter(filterJobs(jobs, filterOpts), opts.autonomousApplyOnly === true);
     bEligible += elig.length;
@@ -197,6 +202,7 @@ async function sourceAll(opts = {}) {
   // --- Modality C: browser captures (LinkedIn / Indeed / Glassdoor) ---
   // Their content scripts write normalized-enough records into pja_shortlist. Folding them into
   // the same corpus makes source-v2—not a separate legacy list—the ranking source of truth.
+  await guard('before_browser_capture_merge');
   const allCaptured = normalizeBrowserJobs(opts.browserJobs || []);
   const browserNow = opts.now != null ? Number(opts.now) : Date.now();
   const browserMaxAge = opts.maxBrowserAgeMs != null ? Number(opts.maxBrowserAgeMs) : null;
@@ -224,6 +230,7 @@ async function sourceAll(opts = {}) {
     added: cRes.added, enriched: cRes.enriched, dupById: cRes.dupById, dupByRole: cRes.dupByRole };
 
   // --- exclude already-applied, then gate ---
+  await guard('before_source_finalize');
   const removed = excludeApplied(store, applied);
   report.excludedApplied = removed;
   report.gate = gateReport(store, { target: opts.target || 200 });

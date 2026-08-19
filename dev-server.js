@@ -30,6 +30,7 @@ const ApplyRunControl = require('./apply-run-control');
 const ApplyReportHealth = require('./apply-report-health');
 const LocalJsonClient = require('./local-json-client');
 const ScoringFrontier = require('./scoring-frontier');
+const SourceSafety = require('./sourcing/source-safety');
 const { decideRecovery } = require('./apply-recovery-policy');
 
 const PORT = Number(process.env.PJA_DEV_PORT || 6174);
@@ -321,6 +322,36 @@ function getStorageFromExtension(keys, timeoutMs = 4000) {
   });
 }
 
+async function readSourcingStorage() {
+  return SourceSafety.readObservedSourcingStorage(
+    (keys, timeoutMs) => getStorageFromExtension(keys, timeoutMs),
+    { attempts: 3, timeoutMs: 5000, retryDelayMs: 500 });
+}
+
+async function sourcingGuardDecision(options = {}) {
+  const deadlineMs = Number(options.deadlineMs);
+  const runId = String(options.runId || '').trim();
+  if (!runId) return SourceSafety.sourceDecision({ deadlineMs, now: Date.now() });
+  const connected = Array.from(wsClients).some(client => client.readyState === 1);
+  if (!connected) return SourceSafety.sourceDecision({ runId, deadlineMs, now: Date.now(), connected: false });
+  const remaining = SourceSafety.remainingDeadlineMs(deadlineMs);
+  if (!remaining) return SourceSafety.sourceDecision({ runId, deadlineMs, now: Date.now(), connected: true });
+  const storage = await getStorageFromExtension(['pja_apply_run_control'], Math.min(5000, remaining));
+  return SourceSafety.sourceDecision({ runId, deadlineMs, now: Date.now(), connected: true,
+    controlObserved: Object.prototype.hasOwnProperty.call(storage || {}, 'pja_apply_run_control'),
+    control: storage && storage.pja_apply_run_control });
+}
+
+async function assertSourcingAllowed(options = {}, stage = '') {
+  const decision = await sourcingGuardDecision(options);
+  if (!decision.ok) {
+    const error = SourceSafety.sourceError(decision.code, decision.code, decision.statusCode);
+    error.stage = stage;
+    throw error;
+  }
+  return decision;
+}
+
 async function getBrowserShortlistFromExtension(timeoutMs = 20000) {
   const data = await wsAsk('getBrowserShortlist', {}, 'browserShortlistReply', timeoutMs);
   if (data && Array.isArray(data.jobs)) return data.jobs;
@@ -355,14 +386,21 @@ async function waitForBrowserChannelCoverage(channels, options = {}) {
   const wanted = new Set((channels || []).map(x => String(x || '').trim()).filter(Boolean));
   if (!wanted.size) return { requested: [], skipped: true };
   const startedAt = Date.now();
-  const timeoutMs = Math.max(5000, Number(options.timeoutMs) || 180000);
+  const requestedTimeoutMs = Math.max(5000, Number(options.timeoutMs) || 180000);
+  const timeoutMs = options.deadlineMs
+    ? Math.max(1, Math.min(requestedTimeoutMs, SourceSafety.remainingDeadlineMs(options.deadlineMs)))
+    : requestedTimeoutMs;
   const minPerChannel = Math.max(1, Number(options.minPerChannel) || 1);
   const maxAgeMs = options.maxAgeMs != null ? Number(options.maxAgeMs) : 48 * 60 * 60 * 1000;
-  let lastJobs = await getBrowserShortlistFromExtension(30000);
+  const remaining = () => options.deadlineMs
+    ? SourceSafety.remainingDeadlineMs(options.deadlineMs) : timeoutMs - (Date.now() - startedAt);
+  let lastJobs = await getBrowserShortlistFromExtension(Math.max(250, Math.min(30000, remaining())));
   let lastCounts = browserChannelCounts(lastJobs, { maxAgeMs });
   const launches = [];
   const launch = async (source, url, launchOptions = {}) => {
-    const resp = await postLocalJson('/start-scan', { source, url, fast: launchOptions.fast !== false }, 15000);
+    if (options.guard) SourceSafety.assertSourceDecision(await options.guard('before_coverage_launch'));
+    const resp = await postLocalJson('/start-scan', { source, url, fast: launchOptions.fast !== false },
+      Math.max(250, Math.min(15000, remaining())));
     launches.push({ source, ok: resp.ok && resp.data && resp.data.ok !== false, status: resp.status,
       error: resp.data && resp.data.error || null, url, fast: launchOptions.fast !== false });
   };
@@ -379,9 +417,11 @@ async function waitForBrowserChannelCoverage(channels, options = {}) {
   }
   let terminal = {};
   while (Date.now() - startedAt < timeoutMs) {
-    lastJobs = await getBrowserShortlistFromExtension(30000);
+    if (options.guard) SourceSafety.assertSourceDecision(await options.guard('during_coverage_observation'));
+    lastJobs = await getBrowserShortlistFromExtension(Math.max(250, Math.min(30000, remaining())));
     lastCounts = browserChannelCounts(lastJobs, { maxAgeMs });
-    const storage = await getStorageFromExtension(['pja_scan_coverage', 'pja_indeed_scan'], 5000);
+    const storage = await getStorageFromExtension(['pja_scan_coverage', 'pja_indeed_scan'],
+      Math.max(250, Math.min(5000, remaining())));
     const scanCoverage = Array.isArray(storage.pja_scan_coverage) ? storage.pja_scan_coverage : [];
     const recentLinkedIn = scanCoverage.slice().reverse().find(x => x && x.source === 'linkedin' && Number(x.ts) >= startedAt);
     const indeedScan = storage.pja_indeed_scan || null;
@@ -399,7 +439,8 @@ async function waitForBrowserChannelCoverage(channels, options = {}) {
     const linkedInDone = !wanted.has('linkedin_easy_apply') || ready || terminal.linkedin;
     const indeedDone = !wanted.has('indeed_apply') || ready || terminal.indeed && /^(done|failed|paused)$/i.test(terminal.indeed.status || '');
     if (ready || (linkedInDone && indeedDone)) break;
-    await new Promise(r => setTimeout(r, 5000));
+    const pauseMs = Math.max(0, Math.min(5000, remaining()));
+    if (pauseMs) await new Promise(r => setTimeout(r, pauseMs));
   }
   return { requested: Array.from(wanted), launches, counts: lastCounts, terminal,
     elapsedMs: Date.now() - startedAt };
@@ -408,33 +449,44 @@ async function waitForBrowserChannelCoverage(channels, options = {}) {
 async function runBrowserDiscoveryQueries(options = {}) {
   const BrowserDiscovery = require('./sourcing/browser-discovery');
   const plan = BrowserDiscovery.buildBrowserDiscoveryPlan(options);
-  // One page per source/title is intentionally cheap. LinkedIn and Indeed run as a pair for each
-  // title, so the full configured title set still fits inside the normal sourcing admission window.
-  const timeoutMs = Math.max(30000, Math.min(150000, Number(options.perQueryTimeoutMs) || 120000));
-  const byQuery = [], blockedSources = new Set();
-  const runItem = async item => {
+  const guard = options.guard || (async () => ({ ok: true }));
+  const runItem = async (item, bounded) => {
     const startedAt = Date.now();
+    const timeoutMs = bounded.perQueryTimeoutMs;
     const launchBody = { source: item.source, url: item.url, fast: item.fast, discovery: true,
       scanOptions: item.scanOptions };
-    let launch = await postLocalJson('/start-scan', launchBody, 15000);
+    const launchTimeout = () => Math.max(250, Math.min(15000,
+      timeoutMs - (Date.now() - startedAt), SourceSafety.remainingDeadlineMs(options.deadlineMs)));
+    let launch = await postLocalJson('/start-scan', launchBody, launchTimeout());
     // MV3 may reconnect while a long browser sweep is in progress. A zero-client launch is not a
     // scan attempt: wait briefly for the existing extension to reconnect and retry exactly once.
     if (!launch.ok || !launch.data || launch.data.ok === false || !(launch.data.pushed > 0)) {
-      const reconnectDeadline = Date.now() + 15000;
+      const reconnectDeadline = Math.min(Date.now() + 15000, startedAt + timeoutMs,
+        Number(options.deadlineMs) || Infinity);
       while (Date.now() < reconnectDeadline && !Array.from(wsClients).some(c => c.readyState === 1)) {
+        const decision = await guard('during_extension_reconnect', item);
+        if (!decision || !decision.ok) return { source: item.source, query: item.query,
+          status: 'cancelled', terminalError: decision && decision.code || 'source_ownership_lost' };
         await new Promise(r => setTimeout(r, 1000));
       }
-      if (Array.from(wsClients).some(c => c.readyState === 1)) {
-        launch = await postLocalJson('/start-scan', launchBody, 15000);
+      if (Date.now() < startedAt + timeoutMs && Array.from(wsClients).some(c => c.readyState === 1)) {
+        launch = await postLocalJson('/start-scan', launchBody, launchTimeout());
       }
     }
     let terminal = { terminal: false, status: 'launch_failed', reason: 'extension_disconnected_or_launch_rejected' };
     if (launch.ok && launch.data && launch.data.ok !== false && launch.data.pushed > 0) {
       while (Date.now() - startedAt < timeoutMs) {
-        const storage = await getStorageFromExtension(['pja_scan_coverage', 'pja_linkedin_scan', 'pja_indeed_scan'], 5000);
+        const decision = await guard('during_scan_observation', item);
+        if (!decision || !decision.ok) return { source: item.source, query: item.query,
+          status: 'cancelled', terminalError: decision && decision.code || 'source_ownership_lost' };
+        const observationRemaining = Math.max(250, Math.min(5000,
+          timeoutMs - (Date.now() - startedAt), SourceSafety.remainingDeadlineMs(options.deadlineMs)));
+        const storage = await getStorageFromExtension(['pja_scan_coverage', 'pja_linkedin_scan', 'pja_indeed_scan'], observationRemaining);
         terminal = BrowserDiscovery.scanTerminal(storage, item, startedAt);
         if (terminal.terminal) break;
-        await new Promise(r => setTimeout(r, 3000));
+        const pauseMs = Math.max(0, Math.min(3000, timeoutMs - (Date.now() - startedAt),
+          SourceSafety.remainingDeadlineMs(options.deadlineMs)));
+        if (pauseMs) await new Promise(r => setTimeout(r, pauseMs));
       }
       if (!terminal.terminal) terminal = { terminal: true, status: 'timeout', reason: 'per_query_timeout' };
     }
@@ -444,31 +496,14 @@ async function runBrowserDiscoveryQueries(options = {}) {
       easyApply: Number(coverage.easyApply || coverage.indeedApply || terminal.scan && terminal.scan.indeedApply || 0),
       external: Number(coverage.external || 0), elapsedMs: Date.now() - startedAt };
   };
-  const queries = Array.from(new Set(plan.map(item => item.query)));
-  for (const query of queries) {
-    const active = plan.filter(item => item.query === query && !blockedSources.has(item.source));
-    const skipped = plan.filter(item => item.query === query && blockedSources.has(item.source))
-      .map(item => ({ source: item.source, query: item.query, status: 'skipped_source_blocked' }));
-    // Chrome heavily throttles inactive search tabs. Run the two platforms serially (Indeed first
-    // so a challenge blocks it once), leaving the owned LinkedIn tab active for its bounded scan.
-    active.sort((a, b) => (a.source === 'indeed' ? -1 : 1) - (b.source === 'indeed' ? -1 : 1));
-    const rows = [];
-    for (const item of active) rows.push(await runItem(item));
-    byQuery.push(...rows, ...skipped);
-    for (const row of rows) {
-      if (row.source === 'indeed' && /^(paused|failed)$/i.test(String(row.status || '')) &&
-          /challenge|captcha|verification/i.test(String(row.reason || ''))) blockedSources.add(row.source);
-    }
-  }
-  return { requestedQueries: queries, scans: byQuery,
-    blockedSources: Array.from(blockedSources), totals: byQuery.reduce((acc, row) => {
-      acc.collected += Number(row.collected || 0);
-      acc.easyApply += Number(row.easyApply || 0);
-      acc.external += Number(row.external || 0);
-      if (row.status === 'done') acc.completed++;
-      else acc.incomplete++;
-      return acc;
-    }, { collected: 0, easyApply: 0, external: 0, completed: 0, incomplete: 0 }) };
+  return BrowserDiscovery.runBoundedDiscoveryPlan(plan, {
+    totalBudgetMs: options.totalBudgetMs,
+    deadlineMs: options.deadlineMs,
+    perQueryTimeoutMs: Math.max(5000, Math.min(150000, Number(options.perQueryTimeoutMs) || 120000)),
+    minimumPerItemMs: 5000,
+    guard,
+    runItem,
+  });
 }
 
 // Push storage to the extension (returns count of clients written).
@@ -1079,19 +1114,19 @@ function developerRecommendation(row = {}) {
   return 'Inspect grouped rows, ledger tail, and debug tail; classify as code fix vs external/manual blocker.';
 }
 
-function summarizeBlockedFromLedger(storage = {}) {
-  const events = storage.pja_application_ledger && storage.pja_application_ledger.events
+function summarizeBlockedFromLedger(storage = {}, options = {}) {
+  let events = storage.pja_application_ledger && storage.pja_application_ledger.events
     ? Object.values(storage.pja_application_ledger.events) : [];
-  const manualBlockerRe = /captcha|daily_limit|checkpoint|email_verification_required|workday_duplicate_record|workday_account_locked|workday_account_exists_wrong_password|workday_captcha|google_sso_only|ready_to_submit_review|chatbot_apply_manual|unsupported_|no_apply_path/i;
-  const workdayTenantRe = /workday_duplicate_record|workday_captcha|workday_account_locked/i;
-  const blockedRows = events
-    .filter(e => e && /^(failed|skipped|needs_manual|blocked)$/i.test(String(e.status || '')) &&
-      manualBlockerRe.test(String(e.reason || e.status || '')))
-    .map(e => compactReportJob(e, e.status || 'blocked'));
-  const hostOf = url => { try { return new URL(String(url || '')).hostname.toLowerCase(); } catch (_) { return ''; } };
+  if (options.runId) events = events.filter(event => event && event.runId === options.runId);
+  const retryPolicy = require('./ledger-retry-policy');
+  const summary = retryPolicy.summarizeLedgerEvents(events);
+  const blockedRows = summary.blocked.map(({ event, classification }) => ({
+    ...compactReportJob(event, event.status || 'blocked'),
+    retryCategory: classification.category,
+  }));
   const hostRows = events
-    .filter(e => e && workdayTenantRe.test(String(e.reason || e.status || '')))
-    .map(e => ({ host: hostOf(e.applyUrl || e.url), reason: safeReportText(e.reason || e.status || ''), row: compactReportJob(e, e.status || 'blocked') }))
+    .filter(e => retryPolicy.blockedHosts([e]).length)
+    .map(e => ({ host: retryPolicy.hostOf(e.applyUrl || e.url), reason: safeReportText(e.reason || e.status || ''), row: compactReportJob(e, e.status || 'blocked') }))
     .filter(e => e.host);
   const hosts = groupedReportRows(hostRows, e => e.host).map(g => ({
     host: g.key,
@@ -1107,7 +1142,7 @@ function summarizeBlockedFromLedger(storage = {}) {
     count: g.count,
     recommendation: developerRecommendation(g.example || {}),
   }));
-  return { records: blockedRows.length, hosts, reasons };
+  return { records: blockedRows.length, categories: summary.categories, hosts, reasons };
 }
 
 function renderApplyRunReport(storage, options = {}) {
@@ -1166,6 +1201,7 @@ function renderApplyRunReport(storage, options = {}) {
   const fixClusters = buildFixClusters(problemRows, diagnostics);
   const fixOpportunities = buildFixOpportunities(runId, fixClusters, planningDropRows);
   const coverageMatrix = buildStrategyCoverageMatrix(ranked);
+  const retrySummary = summarizeBlockedFromLedger(storage || {}, { runId });
   const lines = [];
   lines.push(`# Apply run report — ${runId}`);
   lines.push('');
@@ -1210,6 +1246,36 @@ function renderApplyRunReport(storage, options = {}) {
   if (storage && storage.pja_profile_restored_from_backup) lines.push('- Profile backup recovery: yes');
   if (storage && storage.pja_profile_write_rejected) lines.push(`- Last rejected profile write: ${safeReportText(storage.pja_profile_write_rejected.reason || '')}`);
   lines.push('');
+  if (retrySummary.records || Object.values(retrySummary.categories || {}).some(Boolean)) {
+    lines.push('## Ledger retry and reconciliation policy');
+    lines.push('');
+    lines.push('Submitted/unverified outcomes are not confirmations and are blocked from automatic retry when submission acceptance is ambiguous.');
+    lines.push('');
+    lines.push('| Classification | Events | Automatic retry |');
+    lines.push('| --- | ---: | --- |');
+    const categoryLabels = {
+      confirmed: ['Confirmed by explicit evidence', 'blocked as already applied'],
+      submitted_unverified_blocked: ['Submitted/unverified — manual reconciliation', 'blocked'],
+      failed_retryable: ['Failed — bounded retry policy may apply', 'eligible only under normal retry gates'],
+      failed_manual: ['Failed — manual-only', 'blocked'],
+      skipped_manual: ['Skipped/manual', 'manual'],
+      external_blocker: ['External account/CAPTCHA blocker', 'blocked'],
+    };
+    for (const [category, [label, retry]] of Object.entries(categoryLabels)) {
+      lines.push(`| ${label} | ${Number(retrySummary.categories && retrySummary.categories[category] || 0)} | ${retry} |`);
+    }
+    lines.push('');
+    if (retrySummary.reasons.length) {
+      lines.push('### Blocked/manual reconciliation reasons');
+      lines.push('');
+      lines.push('| Reason | Count | Recommendation |');
+      lines.push('| --- | ---: | --- |');
+      for (const row of retrySummary.reasons) {
+        lines.push(`| ${safeReportText(row.reason)} | ${row.count} | ${safeReportText(row.recommendation)} |`);
+      }
+      lines.push('');
+    }
+  }
   const plannedRows = ranked && Array.isArray(ranked.jobs)
     ? ranked.jobs.slice(0, 80).map(row => compactReportJob(row, 'planned')) : [];
   if (plannedRows.length && /planned|applying|paused|aborted|blocked/i.test(String(ranked && ranked.status || ''))) {
@@ -2607,21 +2673,9 @@ ${(description || '').slice(0, 6000)}`;
         const write = o.write !== false;
         const sources = (o.sources) || JSON.parse(fs.readFileSync(__dirname + '/sourcing/sources.json', 'utf8')).sources;
 
-        // Dedupe against already-applied: durable applied log (survives queue overwrites) +
-        // pja_jobs + current queue results.
-        let st = {};
-        for (let attempt = 0; attempt < 3; attempt += 1) {
-          st = await getStorageFromExtension(['pja_profile', 'pja_prefs', 'pja_jobs', 'pja_ext_queue', 'pja_applied_log'],
-            attempt === 0 ? 5000 : 10000);
-          const sourceStorageReadObserved = st && (Object.prototype.hasOwnProperty.call(st, 'pja_profile') ||
-            Object.prototype.hasOwnProperty.call(st, 'pja_prefs'));
-          if (sourceStorageReadObserved) break;
-          if (attempt < 2) await new Promise(r => setTimeout(r, 500));
-        }
-        if (!st || (!Object.prototype.hasOwnProperty.call(st, 'pja_profile') &&
-            !Object.prototype.hasOwnProperty.call(st, 'pja_prefs'))) {
-          throw new Error('source profile/preferences storage unavailable; refusing to broaden search defaults');
-        }
+        // Dedupe and search preferences require an observed extension storage response. The same
+        // bounded fail-closed helper protects both this legacy review path and unified /source-v2.
+        const st = (await readSourcingStorage()).storage;
         const browserJobs = await getBrowserShortlistFromExtension(30000);
         const { pjaCollectAppliedRecords } = require('./sourcing/dedupe');
         const applied = pjaCollectAppliedRecords(st);
@@ -2667,8 +2721,8 @@ ${(description || '').slice(0, 6000)}`;
             .map(j => ({ score: j.fitScore, company: j.company, title: j.title, location: j.location })) }));
       } catch (e) {
         console.error('[PJA] /source error:', e.message);
-        res.writeHead(500, CORS);
-        res.end(JSON.stringify({ success: false, error: e.message }));
+        res.writeHead(e.statusCode || 500, CORS);
+        res.end(JSON.stringify({ success: false, error: e.code || e.message }));
       }
     });
     return;
@@ -2691,6 +2745,12 @@ ${(description || '').slice(0, 6000)}`;
       applyRunAdmission = true;
       try {
         const o = body ? JSON.parse(body) : {};
+        const workflowBudgets = SourceSafety.calculateWorkflowBudgets({
+          workflowTimeoutMs: o.workflowTimeoutMs,
+          sourceTimeoutMs: o.sourceTimeoutMs,
+          sourcingBudgetMs: o.sourcingBudgetMs,
+          applyTimeoutMs: o.applyTimeoutMs,
+        });
         requestedRunId = safeReportId(o.runId || `apply-${Date.now()}`);
         let admissionPreflight = null;
         if (o.preflight !== false) {
@@ -2724,7 +2784,7 @@ ${(description || '').slice(0, 6000)}`;
           try {
             const worker = await postLocalJson('/apply-all-internal', Object.assign({}, o, {
               runId: requestedRunId, preflight: false, _ownedRunControl: true,
-            }), Number(o.workflowTimeoutMs) || 45 * 60 * 1000);
+            }), workflowBudgets.workflowTimeoutMs);
             const failed = !worker.ok || worker.data && worker.data.success === false;
             if (failed) {
               await persistApplyRunControl({ runId: requestedRunId, status: 'failed', phase: 'terminal',
@@ -2776,6 +2836,12 @@ ${(description || '').slice(0, 6000)}`;
       try {
         const o = body ? JSON.parse(body) : {};
         const requestedRunId = safeReportId(o.runId || `apply-${Date.now()}`);
+        const workflowBudgets = SourceSafety.calculateWorkflowBudgets({
+          workflowTimeoutMs: o.workflowTimeoutMs,
+          sourceTimeoutMs: o.sourceTimeoutMs,
+          sourcingBudgetMs: o.sourcingBudgetMs,
+          applyTimeoutMs: o.applyTimeoutMs,
+        });
         if (o.preflight !== false) {
           const preflight = await oneClickPreflight(o);
           if (!preflight.ok) {
@@ -2814,6 +2880,14 @@ ${(description || '').slice(0, 6000)}`;
           browserDiscoveryMaxPages: o.browserDiscoveryMaxPages,
           browserDiscoveryPerQueryTimeoutMs: o.browserDiscoveryPerQueryTimeoutMs,
         };
+        if (o._ownedRunControl) {
+          sourceBody.runId = requestedRunId;
+          sourceBody.sourcingBudgetMs = workflowBudgets.sourcingBudgetMs;
+          sourceBody.sourcingDeadlineMs = Date.now() + workflowBudgets.sourcingBudgetMs;
+          sourceBody.browserDiscoveryBudgetMs = workflowBudgets.browserBudgetMs;
+        }
+        if (o.retryBlocked === true) sourceBody.retryBlocked = true;
+        if (Array.isArray(o.retryBlockedHosts)) sourceBody.retryBlockedHosts = o.retryBlockedHosts;
         if (o.targetLocation && typeof o.targetLocation === 'object') sourceBody.targetLocation = o.targetLocation;
         if (o.targetRadiusMiles != null) sourceBody.targetRadiusMiles = Number(o.targetRadiusMiles);
         if (o.remotePolicy != null) sourceBody.remotePolicy = o.remotePolicy;
@@ -2868,14 +2942,18 @@ ${(description || '').slice(0, 6000)}`;
         delete applyBody.browserDiscoveryMaxPages;
         delete applyBody.browserDiscoveryPerQueryTimeoutMs;
         delete applyBody.queryFamilies;
+        delete applyBody.sourcingBudgetMs;
+        delete applyBody.workflowTimeoutMs;
+        delete applyBody.sourceTimeoutMs;
+        delete applyBody.applyTimeoutMs;
 
         let sourceResp = { ok: true, skipped: true, status: 200, data: { note: 'source:false' } };
         if (o.source !== false) {
-          sourceResp = await postLocalJson('/source-v2', sourceBody, Number(o.sourceTimeoutMs) ||
-            (sourceBody.browserDiscovery ? 35 * 60 * 1000 : 15 * 60 * 1000));
+          sourceResp = await postLocalJson('/source-v2', sourceBody, workflowBudgets.sourceClientTimeoutMs);
           if (!sourceResp.ok || sourceResp.data && sourceResp.data.success === false) {
             res.writeHead(sourceResp.status || 502, CORS);
             res.end(JSON.stringify({ success: false, stage: 'source-v2', sourceOptions: sourceBody,
+              error: sourceResp.data && sourceResp.data.error || `source_v2_http_${sourceResp.status}`,
               source: sourceResp.data }));
             return;
           }
@@ -2892,7 +2970,7 @@ ${(description || '').slice(0, 6000)}`;
         }
 
         if (o._ownedRunControl) await persistApplyRunControl({ runId: requestedRunId, status: 'planning', phase: 'planning' });
-        const applyResp = await postLocalJson('/apply-run', applyBody, Number(o.applyTimeoutMs) || 20 * 60 * 1000);
+        const applyResp = await postLocalJson('/apply-run', applyBody, workflowBudgets.applyTimeoutMs);
         res.writeHead(applyResp.status || (applyResp.ok ? 200 : 502), CORS);
         const startedRunId = applyResp.data && applyResp.data.runId || requestedRunId;
         res.end(JSON.stringify({ success: !!(applyResp.ok && (!applyResp.data || applyResp.data.success !== false)),
@@ -2926,9 +3004,21 @@ ${(description || '').slice(0, 6000)}`;
       try {
         const o = body ? JSON.parse(body) : {};
         const write = o.write !== false;
-        const st = await getStorageFromExtension(['pja_profile', 'pja_prefs', 'pja_jobs', 'pja_ext_queue', 'pja_applied_log']);
+        const sourceWindow = SourceSafety.standaloneDeadline({
+          deadlineMs: o.sourcingDeadlineMs,
+          sourcingBudgetMs: o.sourcingBudgetMs,
+          maximumBudgetMs: o.runId ? Number(o.sourcingBudgetMs) || 25 * 60 * 1000 : 25 * 60 * 1000,
+        });
+        const guardOptions = { runId: safeReportId(o.runId || ''), deadlineMs: sourceWindow.deadlineMs };
+        await assertSourcingAllowed(guardOptions, 'before_source_storage');
+        const sourceResult = await SourceSafety.withObservedSourcingStorage(
+          (keys, timeoutMs) => getStorageFromExtension(keys, timeoutMs),
+          async (st, storageRead) => {
         const { pjaCollectAppliedRecords, appliedIdentity } = require('./sourcing/dedupe');
-        const applied = appliedIdentity(pjaCollectAppliedRecords(st));
+        const applied = appliedIdentity(pjaCollectAppliedRecords(st, {
+          retryBlocked: o.retryBlocked === true,
+          retryBlockedHosts: Array.isArray(o.retryBlockedHosts) ? o.retryBlockedHosts : [],
+        }));
 
         const { sourceAll } = require('./sourcing/source-run');
         const sourceList = o.autonomousApplyOnly === true
@@ -2956,13 +3046,24 @@ ${(description || '').slice(0, 6000)}`;
           : [];
         const requiredChannels = Array.isArray(o.requiredChannels) ? o.requiredChannels
           .map(x => String(x || '').trim()).filter(Boolean) : [];
+        const guard = stage => sourcingGuardDecision(guardOptions, stage);
+        const assertGuard = async stage => SourceSafety.assertSourceDecision(await guard(stage));
+        await assertGuard('before_browser_discovery');
         const browserDiscovery = o.browserDiscovery === true
           ? await runBrowserDiscoveryQueries({ queries,
             targetLocation, targetRadiusMiles,
             maxQueries: o.browserDiscoveryMaxQueries != null ? Number(o.browserDiscoveryMaxQueries) : 20,
             maxPages: o.browserDiscoveryMaxPages != null ? Number(o.browserDiscoveryMaxPages) : 1,
             perQueryTimeoutMs: o.browserDiscoveryPerQueryTimeoutMs != null
-              ? Number(o.browserDiscoveryPerQueryTimeoutMs) : 120000 }) : null;
+              ? Number(o.browserDiscoveryPerQueryTimeoutMs) : 120000,
+            totalBudgetMs: Math.min(Number(o.browserDiscoveryBudgetMs) || Math.floor(sourceWindow.budgetMs * 0.8),
+              Math.max(1, SourceSafety.remainingDeadlineMs(sourceWindow.deadlineMs))),
+            deadlineMs: sourceWindow.deadlineMs,
+            guard }) : null;
+        if (browserDiscovery && browserDiscovery.terminalError) {
+          throw SourceSafety.sourceError(browserDiscovery.terminalError, browserDiscovery.terminalError,
+            browserDiscovery.terminalError === 'sourcing_deadline_exceeded' ? 408 : 409);
+        }
         const browserScan = o.coverage === true && requiredChannels.some(c => /^(linkedin_easy_apply|indeed_apply)$/.test(c))
           ? await waitForBrowserChannelCoverage(requiredChannels.filter(c => /^(linkedin_easy_apply|indeed_apply)$/.test(c)), {
             queries,
@@ -2971,8 +3072,12 @@ ${(description || '').slice(0, 6000)}`;
             minPerChannel: o.coverageCount != null ? Number(o.coverageCount) || 1 : 1,
             timeoutMs: o.browserScanTimeoutMs != null ? Number(o.browserScanTimeoutMs) : 180000,
             maxAgeMs: o.maxBrowserAgeMs != null ? Number(o.maxBrowserAgeMs) : 48 * 60 * 60 * 1000,
+            deadlineMs: sourceWindow.deadlineMs,
+            guard,
           }) : null;
+        await assertGuard('before_browser_shortlist_read');
         const browserJobs = await getBrowserShortlistFromExtension(30000);
+        await assertGuard('before_source_all');
         const { store, report } = await sourceAll({ sources: sourceList, appliedIdentity: applied, target: o.target || 200,
           autonomousApplyOnly: o.autonomousApplyOnly === true,
           nationwideUS: willing && !/^hard$/i.test(String(locationStrictness || '')),
@@ -2983,18 +3088,31 @@ ${(description || '').slice(0, 6000)}`;
           remotePolicy,
           browserJobs,
           discoveryAdapters,
-          maxBrowserAgeMs: o.maxBrowserAgeMs != null ? Number(o.maxBrowserAgeMs) : 48 * 60 * 60 * 1000 });
+          maxBrowserAgeMs: o.maxBrowserAgeMs != null ? Number(o.maxBrowserAgeMs) : 48 * 60 * 60 * 1000,
+          guard: assertGuard });
         if (browserScan) report.browserScan = browserScan;
         if (browserDiscovery) report.browserDiscovery = browserDiscovery;
 
         let wrote = 0;
         if (write) {
+          await assertGuard('before_corpus_import');
+          const importTimeoutMs = Math.max(250, Math.min(120000,
+            SourceSafety.remainingDeadlineMs(sourceWindow.deadlineMs)));
           const imported = await wsAsk('importCorpus', { index: store.index, state: store.state,
+            runId: guardOptions.runId || null,
+            deadlineMs: sourceWindow.deadlineMs,
             // Only retire records absent from this run when the fresh corpus itself passed its
             // supply/quality gate; a transient partial run must not wipe healthy prior coverage.
             replaceMissing: report.gate.pass || (o.autonomousApplyOnly === true &&
-              report.gate.atLeastTarget && report.gate.atLeast2Modalities && report.gate.hasDirectSource) }, 'importCorpusReply', 120000);
-          if (!imported || imported.error || imported.ok === false) throw new Error('corpus import failed: ' + ((imported && imported.error) || 'no acknowledgement'));
+              report.gate.atLeastTarget && report.gate.atLeast2Modalities && report.gate.hasDirectSource) }, 'importCorpusReply', importTimeoutMs);
+          if (!imported || imported.error || imported.ok === false) {
+            const importReason = imported && imported.error || 'corpus_import_unacknowledged';
+            if (/^(source_ownership_lost|sourcing_deadline_exceeded|extension_disconnected)$/.test(importReason)) {
+              throw SourceSafety.sourceError(importReason, importReason,
+                importReason === 'sourcing_deadline_exceeded' ? 408 : importReason === 'extension_disconnected' ? 503 : 409);
+            }
+            throw new Error('corpus import failed: ' + importReason);
+          }
           wrote = imported.imported != null ? imported.imported : Object.keys(store.index).length;
           report.import = {
             imported: wrote,
@@ -3006,13 +3124,16 @@ ${(description || '').slice(0, 6000)}`;
             retired: Number(imported.retired || 0),
           };
         }
+        return { wrote, report, storageReadAttempts: storageRead.attempts };
+          }, { attempts: 3, timeoutMs: 5000, retryDelayMs: 500 });
+        const { wrote, report } = sourceResult;
         console.log(`[PJA] /source-v2: unique=${report.gate.uniqueIds} modalities=${report.gate.modalities.join('+')} gate=${report.gate.pass ? 'PASS' : 'FAIL'}`);
         res.writeHead(200, CORS);
         res.end(JSON.stringify({ success: true, wrote, report }));
       } catch (e) {
         console.error('[PJA] /source-v2 error:', e.message);
-        res.writeHead(500, CORS);
-        res.end(JSON.stringify({ success: false, error: e.message }));
+        res.writeHead(e.statusCode || 500, CORS);
+        res.end(JSON.stringify({ success: false, error: e.code || e.message }));
       }
     });
     return;
@@ -3183,6 +3304,8 @@ ${(description || '').slice(0, 6000)}`;
           requireEvidence: !rescore && requireEvidence, maxGaps,
           retryDeferred: e2eSafe ? false : undefined,
           maxAttempts: e2eSafe ? 1 : undefined,
+          retryBlocked: o.retryBlocked === true,
+          retryBlockedHosts: Array.isArray(o.retryBlockedHosts) ? o.retryBlockedHosts : [],
           candidateFingerprint: !rescore ? runtimeCandidateFingerprint : undefined,
           explainDrops: true, dropLimit: o.dropLimit != null ? o.dropLimit : 200 }, 'applySetReply', 60000);
         let jobs = (setResp && setResp.jobs) || [];

@@ -4,7 +4,8 @@
 // failure can never brick the whole service worker. Order matters: apply-select needs detect-ats.
 try {
   importScripts('cdp-selfheal.js', 'idb-store.js', 'sourcing/detect-ats.js', 'sourcing/apply-select.js',
-    'content/apply-router.js', 'application-ledger.js');
+    'content/apply-router.js', 'application-ledger.js', 'ledger-retry-policy.js',
+    'sourcing/source-safety.js');
 } catch (e) { console.error('PJA: module load failed', e); }
 
 // ── Dev mode ──────────────────────────────────────────────────────────────────
@@ -84,24 +85,18 @@ async function pjaBuildApplySet(opts) {
   ]);
   const recs = [...(st.pja_applied_log || []).filter(x => !x || !x.status || /^(applied|submitted|submitting|success|confirmed)$/i.test(String(x.status))),
     ...(st.pja_jobs || []).filter(x => x && /^(applied|submitted|success|confirmed)$/i.test(String(x.status || x.result || '')))];
-  // Ledger outcomes that are manual-only or could follow a submit attempt must remain terminal
-  // even when a later sourcing import refreshes the corpus row back to `sourced`. Historical
-  // ranked watchdog failures predate the explicit submit-observation classifier, so retrying one
-  // could duplicate an application whose confirmation was merely lost.
-  const manualBlockerRe = /captcha|daily_limit|checkpoint|email_verification_required|workday_duplicate_record|workday_account_locked|workday_account_exists_wrong_password|workday_captcha|google_sso_only|ready_to_submit_review|chatbot_apply_manual|unsupported_|no_apply_path|submit_unclear|submit_observation_timeout|workday_transport_failure|ranked_watchdog_timeout/i;
   const ledgerEvents = st.pja_application_ledger && st.pja_application_ledger.events
     ? Object.values(st.pja_application_ledger.events) : [];
-  const hostOf = url => { try { return new URL(String(url || '')).hostname.toLowerCase(); } catch (_) { return ''; } };
-  const retryBlockedHosts = new Set((opts && Array.isArray(opts.retryBlockedHosts) ? opts.retryBlockedHosts : [])
-    .map(h => String(h || '').trim().toLowerCase()).filter(Boolean));
-  const blockedRecords = opts && opts.retryBlocked === true ? [] : ledgerEvents
-    .filter(e => e && /^(failed|skipped|needs_manual|blocked)$/i.test(String(e.status || '')) &&
-      manualBlockerRe.test(String(e.reason || e.status || '')) &&
-      !retryBlockedHosts.has(hostOf(e.applyUrl || e.url)));
-  const blockedHosts = opts && opts.retryBlocked === true ? [] : Array.from(new Set(ledgerEvents
-    .filter(e => e && /workday_duplicate_record|workday_captcha|workday_account_locked/i.test(String(e.reason || e.status || '')))
-    .map(e => hostOf(e.applyUrl || e.url)).filter(Boolean)))
-    .filter(host => !retryBlockedHosts.has(host));
+  if (self.PJALedgerRetryPolicy) {
+    recs.push(...ledgerEvents.filter(event =>
+      self.PJALedgerRetryPolicy.classifyLedgerEvent(event).confirmed));
+  }
+  const retryPolicyOptions = { retryBlocked: opts && opts.retryBlocked === true,
+    retryBlockedHosts: opts && Array.isArray(opts.retryBlockedHosts) ? opts.retryBlockedHosts : [] };
+  const blockedRecords = self.PJALedgerRetryPolicy
+    ? self.PJALedgerRetryPolicy.blockedLedgerRecords(ledgerEvents, retryPolicyOptions) : ledgerEvents;
+  const blockedHosts = self.PJALedgerRetryPolicy
+    ? self.PJALedgerRetryPolicy.blockedHosts(ledgerEvents, retryPolicyOptions) : [];
   const selectOpts = {
     threshold: opts && opts.threshold != null ? opts.threshold : 70,
     dailyCap: opts && opts.dailyCap != null ? opts.dailyCap : 30,
@@ -1220,11 +1215,23 @@ if (DEV_MODE) {
             } else if (msg.cmd === 'importCorpus') {
               // Description-rich corpora go directly to IndexedDB over this acknowledged WS path.
               // Avoid mirroring multi-megabyte posting text into chrome.storage's small quota.
+              // Re-check durable run ownership at the mutation boundary: a server-side timeout or
+              // newer admission must not allow a stale source worker to write or retire records.
               (async () => {
                 let data;
-                try { data = Object.assign({ ok: true }, await pjaIngestCorpus(msg.index || {}, msg.state || {},
-                  { replaceMissing: msg.replaceMissing === true })); }
-                catch (e) { data = { ok: false, error: e.message }; }
+                try {
+                  const ownership = msg.runId ? await new Promise(resolve =>
+                    chrome.storage.local.get('pja_apply_run_control', resolve)) : {};
+                  const decision = self.PJASourceSafety.sourceDecision({
+                    runId: msg.runId || '', deadlineMs: msg.deadlineMs, now: Date.now(), connected: true,
+                    controlObserved: !msg.runId || Object.prototype.hasOwnProperty.call(ownership, 'pja_apply_run_control'),
+                    control: ownership.pja_apply_run_control,
+                  });
+                  const imported = await self.PJASourceSafety.guardedMutation(decision, () =>
+                    pjaIngestCorpus(msg.index || {}, msg.state || {},
+                      { replaceMissing: msg.replaceMissing === true }));
+                  data = Object.assign({ ok: true }, imported);
+                } catch (e) { data = { ok: false, error: e.code || e.message }; }
                 _wsReloadSocket.send(JSON.stringify({ cmd: 'importCorpusReply', reqId: msg.reqId, data }));
               })();
             } else if (msg.cmd === 'getStorage') {

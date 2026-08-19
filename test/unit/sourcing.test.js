@@ -111,6 +111,13 @@ module.exports = (t) => {
     pja_applied_log: log,
     pja_ext_queue: { results: { applied: [{ company: 'Gamma', title: 'Equipment Engineer' }],
       skipped: [{ company: 'Skipped Co', title: 'Process Engineer' }] } },
+    pja_application_ledger: { events: {
+      ambiguous: { company: 'Ledger Co', title: 'Validation Engineer', jobId: 'L-1',
+        applyUrl: 'https://ledger.wd1.myworkdayjobs.com/jobs/L-1',
+        status: 'submitted', reason: 'submit_observation_timeout' },
+      retryable: { company: 'Retry Co', title: 'Test Engineer', jobId: 'L-2',
+        status: 'failed', reason: 'missing_required' },
+    } },
   };
   const recs = pjaCollectAppliedRecords(storage);
   const keys = appliedKeySet(recs);
@@ -119,6 +126,16 @@ module.exports = (t) => {
   t.ok(keys.has(jobKey({ company: 'Gamma', title: 'Equipment Engineer' })), 'collectApplied: current-queue role deduped');
   t.eq(keys.has(jobKey({ company: 'Skipped Co', title: 'Process Engineer' })), false, 'collectApplied: skipped job is not falsely treated as applied');
   t.eq(keys.has(jobKey({ company: 'Not Applied', title: 'Quality Engineer' })), false, 'collectApplied: non-applied pipeline job is not excluded');
+  t.ok(recs.some(row => row.jobId === 'L-1'),
+    'collectApplied: ambiguous submitted ledger event is suppressed during unified sourcing');
+  t.eq(recs.some(row => row.jobId === 'L-2'), false,
+    'collectApplied: ordinary retryable ledger failure is not permanently excluded during sourcing');
+  t.eq(pjaCollectAppliedRecords(storage, { retryBlockedHosts: ['other.example.com'] })
+    .some(row => row.jobId === 'L-1'), true,
+  'collectApplied: unrelated host override does not bypass an ambiguous ledger record');
+  t.eq(pjaCollectAppliedRecords(storage, { retryBlockedHosts: ['ledger.wd1.myworkdayjobs.com'] })
+    .some(row => row.jobId === 'L-1'), false,
+  'collectApplied: existing host-scoped operator override reaches unified sourcing deduplication');
   const exactApplied = appliedIdentity([{ company: 'Acme', title: 'Process Engineer', jobId: 'r1' },
     { company: 'Legacy', title: 'Quality Engineer' }]);
   t.ok(exactApplied.exactIds.has('r1'), 'appliedIdentity: exact job id retained');

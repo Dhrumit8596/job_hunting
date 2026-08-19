@@ -166,19 +166,23 @@ module.exports = (t) => {
     dev.includes('SUPPORTED_ADJACENT_SEARCH_TITLES') &&
     dev.includes('extension_disconnected_or_launch_rejected') &&
     dev.includes('reconnectDeadline') &&
-    dev.includes('35 * 60 * 1000') &&
-    dev.includes('120000') &&
+    dev.includes('SourceSafety.calculateWorkflowBudgets') &&
+    dev.includes('workflowBudgets.sourceClientTimeoutMs') &&
+    dev.includes('sourceBody.sourcingDeadlineMs') &&
+    dev.includes('sourceBody.browserDiscoveryBudgetMs') &&
     dev.includes('browserScan') &&
     dev.includes("await launch('linkedin'") &&
     dev.includes("{ fast: false }") &&
     dev.includes('targetLocation') &&
     dev.includes('targetRadiusMiles') &&
     dev.includes('deriveTargetLocationOptions') &&
-    dev.includes('source profile/preferences storage unavailable; refusing to broaden search defaults') &&
-    dev.includes('sourceStorageReadObserved') &&
+    dev.includes('SourceSafety.readObservedSourcingStorage') &&
+    dev.includes('await assertSourcingAllowed(guardOptions') &&
+    dev.includes("await assertGuard('before_corpus_import')") &&
+    dev.includes('runId: guardOptions.runId || null') &&
     dev.includes('outside_target_location') &&
     dev.includes('isEligibleTargetLocation') &&
-    dev.includes("['pja_profile', 'pja_prefs', 'pja_jobs'") &&
+    dev.includes('function readSourcingStorage()') &&
     dev.includes("!/^hard$/i.test(String(locationStrictness || ''))") &&
     dev.includes('## Planned apply queue') &&
     dev.includes('counts.hydrated = hydrated') &&

@@ -15,6 +15,8 @@ Every planned job must become one of:
 - **planning drop** — never launched, with a reason such as score/evidence/location/status/route gate.
 
 A click, redirect, missing form, or `_handled` flag alone must never become confirmed.
+Submitted/unverified is also non-auto-retryable: it remains visible for manual reconciliation so a
+missing confirmation cannot turn into a duplicate application after a sourcing refresh.
 
 ## Evidence path
 
@@ -76,6 +78,12 @@ a ranked queue.
 Loopback transport errors name the internal endpoint and explicit timeout. The bare message
 `fetch failed` is not an acceptable terminal diagnostic because it hides Node's transport cause.
 
+Exact sourcing reports terminalize ownership and deadline failures distinctly:
+`source_ownership_lost`, `sourcing_deadline_exceeded`, and `extension_disconnected`. Browser
+discovery stops scheduling at those boundaries. Even if an already-open search tab finishes late,
+the service worker rechecks the same run-control token and deadline immediately before IndexedDB
+import, so the stale operation cannot import or retire corpus rows.
+
 `/source-v2` reports a sanitized `quality` object for every run: known/unknown posting freshness,
 7/30-day freshness counts, full-description coverage, supported-ATS coverage, deduplication merges,
 prior-application exclusions, and heuristic-priority candidates. Heuristic priority must never be
@@ -95,6 +103,7 @@ Workday and SmartRecruiters detail misses carry normalized hydration statuses/re
 | Workday auth/account/verification | `workday-auth.js`, `workday-engine.js`, Workday branch in external engine; marked duplicate-record draft retries terminalize before refill as `workday_duplicate_record` |
 | `no_apply_path`, `apply_btn_no_form`, dead posting | source apply URL, router signals, external preflight/navigation branch |
 | `submit_unclear`, unverified confirmation | channel submit detector, `application-ledger.js`, confirmation rules |
+| `submit_observation_timeout`, `workday_transport_failure`, ambiguous historical `ranked_watchdog_timeout` | manual reconciliation; shared `ledger-retry-policy.js` blocks automatic retry and drives the developer blocked summary |
 | `trusted_click_failed` | LinkedIn CDP transport (`background.js`); diagnostic includes the exact modal heading and action |
 | LinkedIn `stuck` | `content/auto-apply.js`; terminal only after contact-control blur settle (never dialog-level Escape), trusted mouse, and one trusted-keyboard recovery; the ledger diagnostic includes populated/invalid controls, action disabled state, CDP transport, DOM landing acknowledgement, and bounded hit-target metadata |
 | `stuck_watchdog`, handler timeout | handler lifecycle first; watchdog only reports/advances |

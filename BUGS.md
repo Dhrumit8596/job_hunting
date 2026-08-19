@@ -1,7 +1,7 @@
 # Bug Report — Job Application Assistant
 
 **Original audit:** 2026-05-31 (autofill correctness, test-form accuracy, e2e on real ATS).
-**Status refresh:** 2026-07-10 — **all 10 items below are RESOLVED in code.** This file is kept
+**Status refresh:** 2026-08-18 — **all 12 items below are RESOLVED in code.** This file is kept
 as a regression guard: the fixes are load-bearing and easy to re-break, so each entry records
 what the bug was, where the fix now lives, and (where present) the test that pins it.
 
@@ -26,6 +26,7 @@ what the bug was, where the fix now lives, and (where present) the test that pin
 | 9 | content.js | listener guard `__pjaMsgListenerAdded` (L5) | Medium | ✅ Fixed |
 | 10 | content.js | `STATUS_COLORS` removed | Low | ✅ Fixed |
 | 11 | background.js | `pjaBuildApplySet` ambiguous-ledger blocker | Critical | ✅ Fixed |
+| 12 | dev-server.js / background.js | owned, deadline-bounded `/source-v2` import | Critical | ✅ Fixed |
 
 ---
 
@@ -84,9 +85,22 @@ Removed from `content/content.js`. The canonical `STATUS_COLORS` lives in `popup
 
 ## BUG 11 — Ambiguous historical submissions could re-enter the apply plan — ✅ FIXED
 **Was:** a sourcing refresh could restore a corpus row to `sourced` while its application-ledger
-event retained `ranked_watchdog_timeout` or another ambiguous post-submit outcome. The planner's
-manual-blocker filter did not recognize those older reasons, so the requisition could be selected
-again even though it might already have been submitted.
-**Fix:** `pjaBuildApplySet` treats `submit_unclear`, `submit_observation_timeout`,
-`workday_transport_failure`, and historical `ranked_watchdog_timeout` ledger records as terminal
-blocked records. They require manual reconciliation and cannot be retried implicitly.
+event retained `submitted` + `submit_observation_timeout` or another ambiguous post-submit outcome.
+The planner filtered by failure status before its blocker regex, so submitted/unverified records
+never reached that regex and could be selected again.
+**Fix:** `ledger-retry-policy.js` behaviorally classifies outcomes independent of status. Planning,
+sourcing deduplication, and developer reporting share it. Submitted/unverified, `submit_unclear`,
+`submit_observation_timeout`, `workday_transport_failure`, duplicate-record, and ambiguous historical
+`ranked_watchdog_timeout` records require reconciliation and cannot be retried implicitly. Ordinary
+pre-submit `missing_required` failures retain the existing bounded retry policy.
+
+## BUG 12 — Timed-out sourcing could mutate a later run's corpus — ✅ FIXED
+**Was:** `/apply-all-internal` did not pass run ownership to `/source-v2`; browser scans could exceed
+their enclosing timeouts, and aborting the loopback client did not cancel the active handler. A late
+handler could still import or retire IndexedDB records. Unified `/source-v2` also accepted a sparse
+storage transport response and silently fell back to default titles/location.
+**Fix:** workflow, source-client, source-operation, and browser budgets are now nested and bounded.
+Exact sourcing carries `runId` plus an absolute deadline and rechecks both between work units and at
+the service-worker import boundary. Lost/terminal ownership or expiration prevents all import and
+retirement. `/source-v2` uses bounded observed-storage retries and returns
+`source_storage_unavailable` before discovery when profile/preferences keys cannot be observed.

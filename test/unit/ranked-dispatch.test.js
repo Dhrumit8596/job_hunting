@@ -19,16 +19,6 @@ module.exports = async (t) => {
     source.includes('self.PJAApplyRouter.resolveStrategy(job, job.applyUrl)') &&
     source.includes('const tabId = await pjaDispatchRankedJob(job, master);'),
   'ranked dispatch: one executable router selects and launches every channel/ATS strategy');
-  t.ok(source.includes('pja_application_ledger') &&
-    source.includes('blockedRecords') &&
-    source.includes('blockedHosts') &&
-    source.includes('retryBlocked === true') &&
-    source.includes('retryBlockedHosts') &&
-    source.includes('!retryBlockedHosts.has') &&
-    source.includes('buildApplyPlan') &&
-    source.includes('planningDrops') &&
-    source.includes('workday_duplicate_record'),
-  'ranked dispatch: known manual blockers and Workday blocked tenants from the ledger are suppressed from future one-click apply sets by default');
   t.ok(source.includes('function pjaRankedTabMatchesJob(tab, job)') &&
     source.includes('tabUrl.hostname !== applyUrl.hostname') &&
     source.includes('const tabLinkedInId = self.PJAApplySelect?.linkedinJobId(tab.url') &&
@@ -111,10 +101,6 @@ module.exports = async (t) => {
     source.includes("status: submitPending ? 'submitted' : 'failed'") &&
     source.includes('success: submitPending ? null : false'),
   'ranked watchdog: a Workday submit-pending timeout remains unverified and is never converted to a retryable failure');
-
-  t.ok(source.includes('const manualBlockerRe =') &&
-    source.includes('submit_unclear|submit_observation_timeout|workday_transport_failure|ranked_watchdog_timeout'),
-  'apply planning: historical and current ambiguous submission outcomes remain blocked from retry');
 
   t.ok(source.includes('function pjaMergeProfileWrite(previous, incoming') &&
     source.includes('rejected_empty_profile_overwrite') &&
