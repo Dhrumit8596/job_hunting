@@ -454,7 +454,8 @@ async function runBrowserDiscoveryQueries(options = {}) {
     const startedAt = Date.now();
     const timeoutMs = bounded.perQueryTimeoutMs;
     const launchBody = { source: item.source, url: item.url, fast: item.fast, discovery: true,
-      scanOptions: item.scanOptions };
+      scanOptions: { ...(item.scanOptions || {}), deadlineMs: options.deadlineMs,
+        runId: options.runId || '' } };
     const launchTimeout = () => Math.max(250, Math.min(15000,
       timeoutMs - (Date.now() - startedAt), SourceSafety.remainingDeadlineMs(options.deadlineMs)));
     let launch = await postLocalJson('/start-scan', launchBody, launchTimeout());
@@ -492,7 +493,16 @@ async function runBrowserDiscoveryQueries(options = {}) {
     }
     const coverage = terminal.coverage || {};
     return { source: item.source, query: item.query, status: terminal.status,
-      reason: terminal.reason || '', collected: Number(coverage.collected || terminal.scan && terminal.scan.total || 0),
+      reason: terminal.reason || '',
+      discovered: Number(coverage.discovered != null ? coverage.discovered : coverage.collected || terminal.scan && terminal.scan.total || 0),
+      collected: Number(coverage.collected || terminal.scan && terminal.scan.total || 0),
+      persistenceAcknowledged: Number(coverage.persistenceAcknowledged || 0),
+      batchesSent: Number(coverage.batchesSent || 0),
+      batchesAcknowledged: Number(coverage.batchesAcknowledged || 0),
+      batchAttempts: Number(coverage.batchAttempts || 0),
+      batchRetries: Number(coverage.batchRetries || 0),
+      persistenceFailures: Number(coverage.persistenceFailures || 0),
+      pages: Array.isArray(coverage.pages) ? coverage.pages : [],
       easyApply: Number(coverage.easyApply || coverage.indeedApply || terminal.scan && terminal.scan.indeedApply || 0),
       external: Number(coverage.external || 0), elapsedMs: Date.now() - startedAt };
   };
@@ -3052,13 +3062,17 @@ ${(description || '').slice(0, 6000)}`;
         const browserDiscovery = o.browserDiscovery === true
           ? await runBrowserDiscoveryQueries({ queries,
             targetLocation, targetRadiusMiles,
+            yieldStats: st.pja_source_yield,
             maxQueries: o.browserDiscoveryMaxQueries != null ? Number(o.browserDiscoveryMaxQueries) : 20,
-            maxPages: o.browserDiscoveryMaxPages != null ? Number(o.browserDiscoveryMaxPages) : 1,
+            maxPages: o.browserDiscoveryMaxPages != null ? Number(o.browserDiscoveryMaxPages) : 3,
+            indeedMaxPages: o.browserDiscoveryIndeedMaxPages != null
+              ? Number(o.browserDiscoveryIndeedMaxPages) : 1,
             perQueryTimeoutMs: o.browserDiscoveryPerQueryTimeoutMs != null
               ? Number(o.browserDiscoveryPerQueryTimeoutMs) : 120000,
             totalBudgetMs: Math.min(Number(o.browserDiscoveryBudgetMs) || Math.floor(sourceWindow.budgetMs * 0.8),
               Math.max(1, SourceSafety.remainingDeadlineMs(sourceWindow.deadlineMs))),
             deadlineMs: sourceWindow.deadlineMs,
+            runId: guardOptions.runId || '',
             guard }) : null;
         if (browserDiscovery && browserDiscovery.terminalError) {
           throw SourceSafety.sourceError(browserDiscovery.terminalError, browserDiscovery.terminalError,
@@ -3076,7 +3090,29 @@ ${(description || '').slice(0, 6000)}`;
             guard,
           }) : null;
         await assertGuard('before_browser_shortlist_read');
-        const browserJobs = await getBrowserShortlistFromExtension(30000);
+        let browserJobs = await getBrowserShortlistFromExtension(30000);
+        let browserEnrichment = { attempted: 0, resolved: 0, hydrated: 0, status: 'not_needed' };
+        if (o.browserHydration !== false && SourceSafety.remainingDeadlineMs(sourceWindow.deadlineMs) >= 120000) {
+          const { selectHydrationFrontier } = require('./sourcing/browser-enrichment');
+          const hydrationFrontier = selectHydrationFrontier(browserJobs, {
+            limit: o.browserHydrationLimit != null ? Number(o.browserHydrationLimit) : 20,
+            freshAfter: Date.now() - (o.maxBrowserAgeMs != null ? Number(o.maxBrowserAgeMs) : 48 * 60 * 60 * 1000),
+          }).filter(job => /^linkedin$/i.test(String(job.sourcePlatform || job.platform || '')));
+          if (hydrationFrontier.length) {
+            await assertGuard('before_browser_enrichment');
+            const enrichTimeoutMs = Math.max(1000, Math.min(90000,
+              SourceSafety.remainingDeadlineMs(sourceWindow.deadlineMs) - 60000));
+            const enriched = await wsAsk('enrichBrowserLeads', {
+              jobIds: hydrationFrontier.map(job => job.id || job.jobId || job.sourceJobId),
+              runId: guardOptions.runId || '', deadlineMs: sourceWindow.deadlineMs,
+            }, 'enrichBrowserLeadsReply', enrichTimeoutMs);
+            await assertGuard('after_browser_enrichment');
+            browserEnrichment = enriched && enriched.ok ? { ...enriched, attempted: hydrationFrontier.length,
+              status: 'completed' } : { attempted: hydrationFrontier.length, resolved: 0, hydrated: 0,
+              status: 'failed', reason: enriched && enriched.error || 'browser_enrichment_unacknowledged' };
+            if (enriched && enriched.ok) browserJobs = await getBrowserShortlistFromExtension(30000);
+          }
+        }
         await assertGuard('before_source_all');
         const { store, report } = await sourceAll({ sources: sourceList, appliedIdentity: applied, target: o.target || 200,
           autonomousApplyOnly: o.autonomousApplyOnly === true,
@@ -3092,6 +3128,7 @@ ${(description || '').slice(0, 6000)}`;
           guard: assertGuard });
         if (browserScan) report.browserScan = browserScan;
         if (browserDiscovery) report.browserDiscovery = browserDiscovery;
+        report.browserEnrichment = browserEnrichment;
 
         let wrote = 0;
         if (write) {
@@ -3194,8 +3231,9 @@ ${(description || '').slice(0, 6000)}`;
         // confirmed target is reached, so reserves replace failures without causing over-submit.
         const attemptCap = o.attemptCap != null ? Math.max(0, Number(o.attemptCap) || 0)
           : (applyAllAboveScore ? 0 : (e2eSafe ? Math.max(25, dailyTarget * 2) : 0));
-        const scoreCandidateLimit = o.scoreCandidateLimit != null ? Math.max(0, Number(o.scoreCandidateLimit) || 0)
-          : applyAllAboveScore ? 0
+        const scoreCandidateLimit = o.scoreCandidateLimit != null
+          ? Math.min(300, Math.max(1, Number(o.scoreCandidateLimit) || 300))
+          : applyAllAboveScore ? 300
             : Math.max(150, Math.min(300, Math.max(dailyTarget || 0, attemptCap || 0) * 3));
         // Evidence-grounded resume/JD rescoring is the safe default. Callers may explicitly set
         // rescore:false for diagnostics, but autonomous apply planning should never trust title-only
@@ -3352,6 +3390,8 @@ ${(description || '').slice(0, 6000)}`;
         }
         const strategyKey = j => String(j && (j.strategy || j.ats) || 'generic').trim().toLowerCase() || 'generic';
         const strategyCoverage = {};
+        const scoringRounds = [];
+        let scoringModelBatches = 0;
         for (const strategy of requiredStrategies) {
           const candidates = jobs.filter(j => strategyKey(j) === strategy);
           strategyCoverage[strategy] = { discovered: candidates.length, hydrated: 0, scored: 0, eligible: 0, qualified: 0, reserved: 0 };
@@ -3374,7 +3414,8 @@ ${(description || '').slice(0, 6000)}`;
             if (!hydrated) planningDrops = appendPlanningDrop(planningDrops, j, 'rescore_missing_description', planningDropLimit);
             return hydrated;
           });
-          jobs = ScoringFrontier.sortForScoring(jobs);
+          jobs = ScoringFrontier.sortForScoring(jobs,
+            { candidateFingerprint: runtimeCandidateFingerprint });
           const frontier = ScoringFrontier.partition(jobs,
             { limit: scoreCandidateLimit, candidateFingerprint: runtimeCandidateFingerprint });
           const { reusable, needsScore } = frontier;
@@ -3382,8 +3423,17 @@ ${(description || '').slice(0, 6000)}`;
             planningDrops = appendPlanningDrop(planningDrops, j, 'rescore_candidate_limit', planningDropLimit);
           }
           const scored = [];
-          for (let offset = 0; offset < needsScore.length; offset += 10) {
-            const stubs = needsScore.slice(offset, offset + 10);
+          let stoppedAt = 0;
+          const reserveTarget = Math.min(30, Math.max(10, Number(o.reserveTarget) || 30));
+          const evidenceQualified = j => j && j.fitScore >= threshold &&
+            (!requireEvidence || hasEnoughMatchEvidence(j)) && (!requireEvidence || (j.gaps || []).length <= maxGaps) &&
+            (!requireEvidence || !(j.conflicts || []).length) &&
+            (!requireEvidence || ['high', 'medium'].includes(String(j.confidence || '').toLowerCase()));
+          for (const round of ScoringFrontier.roundPlan(needsScore.length, { maximum: scoreCandidateLimit, roundSize: 100 })) {
+            const roundStart = scored.length;
+            const roundRows = needsScore.slice(round.offset, round.offset + round.size);
+            for (let batchOffset = 0; batchOffset < roundRows.length; batchOffset += 10) {
+            const stubs = roundRows.slice(batchOffset, batchOffset + 10);
             const detailResp = await wsAsk('getApplyDescriptions', { ids: stubs.map(j => j.id) },
               'applyDescriptionsReply', 30000);
             if (detailResp.error) {
@@ -3405,6 +3455,7 @@ ${(description || '').slice(0, 6000)}`;
                 postingDescriptionFingerprint: detail.descriptionFingerprint || stub.postingDescriptionFingerprint });
             }
             const batchScored = hydrated.length ? await scoreAll(hydrated, 1) : [];
+            if (hydrated.length) scoringModelBatches += 1;
             if (batchScored.length) {
               await wsAsk('updateScores', { scores: batchScored.map(j => {
                 const fp = j.postingDescriptionFingerprint || descriptionFingerprint(j.description);
@@ -3416,7 +3467,20 @@ ${(description || '').slice(0, 6000)}`;
               // Do not retain description text beyond this scoring batch.
               scored.push(...batchScored.map(j => { const out = { ...j }; delete out.description; return out; }));
             }
+            }
+            const roundScored = scored.slice(roundStart);
+            const qualified = roundScored.filter(evidenceQualified).length;
+            const qualifiedTotal = reusable.filter(evidenceQualified).length + scored.filter(evidenceQualified).length;
+            const remaining = Math.max(0, needsScore.length - round.offset - round.size);
+            const decision = ScoringFrontier.continueAfterRound({ scored: roundScored.length,
+              qualified, qualifiedTotal, remaining }, { reserveTarget });
+            scoringRounds.push({ round: scoringRounds.length + 1, candidates: roundRows.length,
+              scored: roundScored.length, qualified, qualifiedTotal, remaining, decision: decision.reason });
+            stoppedAt = round.offset + round.size;
+            if (!decision.continue) { stoppedAt = round.offset + round.size; break; }
           }
+          for (const j of needsScore.slice(stoppedAt)) planningDrops = appendPlanningDrop(planningDrops, j,
+            'progressive_scoring_early_stop', planningDropLimit);
           const scoredPool = reusable.concat(scored);
           for (const channel of requiredChannels) channelCoverage[channel].scored = scoredPool.filter(j =>
             (j.channel || 'external') === channel && j.fitScore != null).length;
@@ -3637,7 +3701,7 @@ ${(description || '').slice(0, 6000)}`;
           day, timeZone, targetScope, category, assistedExcluded, includeAssisted, e2eSafe,
           reserveCount: applyAllAboveScore ? 0 : Math.max(0, queueJobs.length - remainingTarget), runId, byChannel,
           byStrategy, channelCoverage, strategyCoverage, coverage: coverageMode, coverageCount, corpusTotal: setResp.total,
-          planningDrops: planningDrops || null, report,
+          planningDrops: planningDrops || null, report, scoringRounds, scoringModelBatches,
           top: jobs.slice(0, previewLimit).map(j => ({ fit: j.fitScore, company: j.company, title: j.title,
             id: j.id, location: j.location || '', applyUrl: j.applyUrl || '', ats: j.ats || j.strategy, channel: j.channel || 'external', matchEvidence: j.matchEvidence || [],
             gaps: j.gaps || [], conflicts: j.conflicts || [], confidence: j.confidence || '' })) }));

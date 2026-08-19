@@ -12,6 +12,7 @@ function load(html) {
   w.chrome = { storage: { local: { get: (k, cb) => cb && cb({}), set: (o, cb) => cb && cb() } },
     runtime: { sendMessage() {}, onMessage: { addListener() {} } } };
   w.console = { log() {}, warn() {}, error() {} };
+  w.eval(fs.readFileSync(path.resolve(ROOT, 'browser-batch.js'), 'utf8'));
   w.eval(fs.readFileSync(path.resolve(ROOT, 'content/indeed-scraper.js'), 'utf8'));
   return w;
 }
@@ -71,4 +72,6 @@ module.exports = (t) => {
     'old requirements', 'old requirements'), false, 'indeed: waits for JD mutation after job-key movement');
   t.eq(w.pjaIndeedPanelAdvanced('abc123', 'https://www.indeed.com/jobs?vjk=old',
     'old requirements', 'new requirements'), true, 'indeed: accepts mutated JD content');
+  t.eq(w.pjaIndeedPageNumberFromUrl('https://www.indeed.com/jobs?q=x&start=20'), 2,
+    'indeed: full-navigation checkpoint derives the expected page from the URL');
 };

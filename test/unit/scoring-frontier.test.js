@@ -22,4 +22,16 @@ module.exports = t => {
   ]);
   t.eq(ordered.map(job => job.id), ['new-mid', 'hydrated-low', 'updated', 'old-high'],
     'scoring frontier: new/hydrated evidence is fit-ordered before consuming the old frontier');
+  t.eq(Frontier.roundPlan(450), [{ offset: 0, size: 100 }, { offset: 100, size: 100 },
+    { offset: 200, size: 100 }], 'scoring frontier: progressive rounds have a hard 300-job maximum');
+  t.eq(Frontier.continueAfterRound({ scored: 100, qualified: 0, qualifiedTotal: 3, remaining: 200 }).reason,
+    'zero_marginal_qualified_yield', 'scoring frontier: zero marginal qualified yield stops later calls');
+  t.eq(Frontier.continueAfterRound({ scored: 80, qualified: 7, qualifiedTotal: 30, remaining: 120 }).reason,
+    'qualified_reserve_target_reached', 'scoring frontier: reserve target stops later calls');
+  const mismatchFirst = Frontier.sortForScoring([
+    { id: 'cached', title: 'Process Engineer', descriptionReady: true, candidateFingerprint: 'current' },
+    { id: 'stale', title: 'Process Engineer', descriptionReady: true, candidateFingerprint: 'old' },
+  ], { candidateFingerprint: 'current' });
+  t.eq(mismatchFirst.map(job => job.id), ['stale', 'cached'],
+    'scoring frontier: candidate-fingerprint mismatches are prioritized ahead of unchanged scores');
 };

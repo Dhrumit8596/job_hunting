@@ -5,7 +5,7 @@
 try {
   importScripts('cdp-selfheal.js', 'idb-store.js', 'sourcing/detect-ats.js', 'sourcing/apply-select.js',
     'content/apply-router.js', 'application-ledger.js', 'ledger-retry-policy.js',
-    'sourcing/source-safety.js');
+    'sourcing/source-safety.js', 'browser-batch.js');
 } catch (e) { console.error('PJA: module load failed', e); }
 
 // ── Dev mode ──────────────────────────────────────────────────────────────────
@@ -1803,7 +1803,8 @@ if (DEV_MODE) {
                       await chrome.scripting.executeScript({ target: { tabId: tab.id }, func: () => {
                         if (typeof window.__pjaStartScan !== 'function') delete window.__pjaScraperLoaded;
                       } });
-                      await chrome.scripting.executeScript({ target: { tabId: tab.id }, files: ['content/job-scraper.js'] });
+                      await chrome.scripting.executeScript({ target: { tabId: tab.id },
+                        files: ['browser-batch.js', 'content/job-scraper.js'] });
                       result = await invokeScanner();
                       state = result && result[0] && result[0].result;
                     }
@@ -1893,6 +1894,59 @@ if (DEV_MODE) {
                   chrome.tabs.onUpdated.addListener(onUpd);
                 });
               }
+            } else if (msg.cmd === 'enrichBrowserLeads') {
+              (async () => {
+                let data;
+                try {
+                  const ids = Array.isArray(msg.jobIds) ? msg.jobIds.map(String).filter(Boolean).slice(0, 50) : [];
+                  const read = keys => new Promise(resolve => chrome.storage.local.get(keys, resolve));
+                  const initial = await read(['pja_apply_run_control', 'pja_discovery_scan_tabs', 'pja_shortlist']);
+                  const decision = self.PJASourceSafety.sourceDecision({ runId: msg.runId || '',
+                    deadlineMs: msg.deadlineMs, control: initial.pja_apply_run_control,
+                    controlObserved: Object.prototype.hasOwnProperty.call(initial, 'pja_apply_run_control'), connected: true });
+                  self.PJASourceSafety.assertSourceDecision(decision);
+                  const tabId = initial.pja_discovery_scan_tabs && initial.pja_discovery_scan_tabs.linkedin;
+                  if (tabId == null || !ids.length) throw Object.assign(new Error('browser_enrichment_tab_unavailable'),
+                    { code: 'browser_enrichment_tab_unavailable' });
+                  const execution = await chrome.scripting.executeScript({ target: { tabId },
+                    func: async (wanted, deadlineMs) => {
+                      if (typeof window.__pjaResolveVoyager !== 'function') return { error: 'linkedin_enricher_not_loaded' };
+                      return window.__pjaResolveVoyager(wanted, { persist: false, deadlineMs });
+                    }, args: [ids, Number(msg.deadlineMs) || Date.now() + 60000] });
+                  const result = execution && execution[0] && execution[0].result || {};
+                  if (result.error) throw Object.assign(new Error(result.error), { code: result.error });
+                  const current = await read(['pja_apply_run_control', 'pja_shortlist']);
+                  const beforePersist = self.PJASourceSafety.sourceDecision({ runId: msg.runId || '',
+                    deadlineMs: msg.deadlineMs, control: current.pja_apply_run_control,
+                    controlObserved: Object.prototype.hasOwnProperty.call(current, 'pja_apply_run_control'), connected: true });
+                  self.PJASourceSafety.assertSourceDecision(beforePersist);
+                  const now = Date.now();
+                  const list = (current.pja_shortlist || []).map(job => {
+                    const id = String(job.id || job.jobId || job.sourceJobId || '');
+                    const route = result.applyUrls && result.applyUrls[id];
+                    const description = result.descriptions && result.descriptions[id];
+                    if (!route && !description) return job;
+                    const patch = { ...job, lastSeenAt: job.lastSeenAt || now };
+                    if (route) Object.assign(patch, { externalApplyUrl: route, applyUrl: route,
+                      needsAtsResolution: false, resolutionMethod: 'linkedin_voyager_job_id',
+                      resolutionConfidence: 'high', resolutionReason: '' });
+                    if (description) Object.assign(patch, { description: String(description).slice(0, 20000),
+                      descriptionStatus: String(description).length > 20000 ? 'partial' : 'full',
+                      hydrationStatus: 'hydration_success', hydrationMethod: 'linkedin_voyager_job_posting',
+                      hydrationReason: '', hydratedAt: now, pipelineStatus: 'score_pending', status: 'score_pending' });
+                    const merged = self.PJABrowserBatch.mergeRecord(job, patch, { observedAt: now });
+                    return merged.record || merged;
+                  });
+                  await new Promise((resolve, reject) => chrome.storage.local.set({ pja_shortlist: list }, () => {
+                    if (chrome.runtime.lastError) reject(new Error(chrome.runtime.lastError.message)); else resolve();
+                  }));
+                  data = { ok: true, requested: ids.length, completed: result.completed || 0,
+                    resolved: result.resolved || 0, hydrated: result.hydrated || 0 };
+                } catch (error) {
+                  data = { ok: false, error: error && error.code || String(error && error.message || error) };
+                }
+                try { _wsReloadSocket.send(JSON.stringify({ cmd: 'enrichBrowserLeadsReply', reqId: msg.reqId, data })); } catch (_) {}
+              })();
             } else if (msg.cmd === 'cdpDateTest') {
               const dbgLog = [];
               const origLog = console.log.bind(console);
@@ -2307,6 +2361,61 @@ function dedupeById(arr) {
     if (item?.id && !seen.has(item.id)) seen.set(item.id, item);
   }
   return Array.from(seen.values()).reverse();
+}
+
+// Browser scanners may be suspended between send and callback. Serialize acknowledged shortlist
+// writes and retain a bounded receipt cache so a retry of the same stable batch is idempotent.
+let pjaBrowserBatchWriteChain = Promise.resolve();
+function pjaPersistBrowserBatch(message) {
+  const operation = pjaBrowserBatchWriteChain.catch(() => {}).then(async () => {
+    if (!self.PJABrowserBatch) throw new Error('browser batch policy unavailable');
+    const jobs = Array.isArray(message && message.jobs) ? message.jobs : [];
+    const source = String(message && message.source || jobs[0] && (jobs[0].sourcePlatform || jobs[0].platform) || 'browser');
+    const query = String(message && message.query || jobs[0] && jobs[0].query || '');
+    const page = Math.max(1, Number(message && message.page) || 1);
+    const sequence = Math.max(1, Number(message && message.sequence) || 1);
+    const batchId = String(message && message.batchId || self.PJABrowserBatch.batchId({ source, query, page, sequence, jobs }));
+    const stored = await new Promise(resolve => chrome.storage.local.get(
+      ['pja_shortlist', 'pja_browser_batch_receipts', 'pja_apply_run_control'], resolve));
+    if (String(message && message.runId || '') || Number.isFinite(Number(message && message.deadlineMs))) {
+      const decision = self.PJASourceSafety.sourceDecision({ runId: String(message && message.runId || ''),
+        deadlineMs: Number(message && message.deadlineMs), control: stored.pja_apply_run_control,
+        controlObserved: Object.prototype.hasOwnProperty.call(stored, 'pja_apply_run_control'), connected: true });
+      self.PJASourceSafety.assertSourceDecision(decision);
+    }
+    const receipts = Array.isArray(stored.pja_browser_batch_receipts)
+      ? stored.pja_browser_batch_receipts : [];
+    const previous = receipts.find(row => row && row.batchId === batchId);
+    if (previous && previous.ack) return { ...previous.ack, duplicateDelivery: true };
+
+    const SKILL_KW = ['spc','metrology','wafer','thin film','clean room','cleanroom','gmp',
+      'iso 13485','fmea','lean six sigma','six sigma','photolithography','optical metrology',
+      '8d','semiconductor','inspection','quality engineer','process engineer','metrology engineer',
+      'manufacturing engineer','supplier quality','validation engineer','defect','fab','cvd','ald',
+      'etch','deposition','process control','equipment engineer','yield','failure analysis',
+      'reliability engineer','product development engineer','integration engineer','process integration',
+      'cmp','lithography','test engineer','quality','process'];
+    const merged = self.PJABrowserBatch.mergeBatch(stored.pja_shortlist || [], jobs, {
+      source, query, page, observedAt: Number(message && message.observedAt) || Date.now(),
+      accept(job) {
+        if (!job || !(job.id || job.jobId || job.sourceJobId)) return 'missing_stable_job_id';
+        const haystack = [job.title, job.company, job.description].join(' ').toLowerCase();
+        return SKILL_KW.some(term => haystack.includes(term)) ? true : 'unsupported_role_family';
+      },
+    });
+    const ack = { success: true, acknowledged: true, batchId, ...merged.counts,
+      added: merged.counts.inserted,
+      acceptedIds: merged.acceptedIds, rejectedIds: merged.rejectedIds,
+      needsHydration: merged.acceptedIds.filter(id => {
+        const row = merged.list.find(job => String(job && job.id || '') === String(id));
+        return !self.PJABrowserBatch.descriptionReady(row);
+      }).length };
+    const nextReceipts = receipts.concat({ batchId, ack, ts: Date.now() }).slice(-120);
+    await pjaSetLocal({ pja_shortlist: merged.list, pja_browser_batch_receipts: nextReceipts });
+    return ack;
+  });
+  pjaBrowserBatchWriteChain = operation.catch(error => console.error('PJA browser batch persistence failed:', error));
+  return operation;
 }
 
 function getTemplateAnalysis(title, company, description) {
@@ -3966,127 +4075,11 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
 
   // ── Job shortlist / batch scoring ─────────────────────────────────────────
   if (msg.type === 'BATCH_SCORE_JOBS') {
-    const jobs = msg.jobs || [];
-    chrome.storage.local.get('pja_shortlist', async r => {
-      const shortlist = r.pja_shortlist || [];
-
-      // Keyword pre-filter (free — no Claude tokens)
-      const SKILL_KW = ['spc','metrology','wafer','thin film','clean room','cleanroom','gmp',
-        'iso 13485','fmea','lean six sigma','six sigma','photolithography','optical metrology',
-        '8d','semiconductor','inspection','quality engineer','process engineer','metrology engineer',
-        'manufacturing engineer','defect','fab','cvd','ald','etch','deposition','process control',
-        'equipment engineer','yield','failure analysis','reliability engineer','integration engineer',
-        'process integration','cmp','lithography','test engineer','quality','process'];
-
-      const candidates = jobs.filter(j => {
-        const prior = shortlist.find(s => s.id === j.id);
-        // Let a detail-rich repeat replace an earlier card-only placeholder, but never rescore
-        // an already hydrated record merely because a scan saw it again.
-        if (prior && prior.pipelineStatus !== 'needs_hydration' &&
-            !/^(missing|stale|needs_description)$/i.test(String(prior.descriptionStatus || ''))) return false;
-        const txt = (j.title + ' ' + j.company + ' ' + j.description).toLowerCase();
-        return SKILL_KW.some(k => txt.includes(k));
-      });
-
-      if (candidates.length === 0) { sendResponse({ success: true, added: 0 }); return; }
-
-      // Add as 'scoring' placeholders — re-read storage right before writing to catch concurrent batches.
-      // Capture the actually-added jobs (fresh) so the fetch only scores those.
-      let toScore = [];
-      await new Promise(res => {
-        chrome.storage.local.get('pja_shortlist', latest => {
-          const existing = latest.pja_shortlist || [];
-          const existingById = new Map(existing.map(j => [j.id, j]));
-          const fresh = candidates.filter(j => {
-            const prior = existingById.get(j.id);
-            return !prior || prior.pipelineStatus === 'needs_hydration' ||
-              /^(missing|stale|needs_description)$/i.test(String(prior.descriptionStatus || ''));
-          })
-            .map(j => {
-              const prior = existingById.get(j.id) || {};
-              const hydrated = !!String(j.description || '').trim() && !/^(missing|stale|needs_description)$/i.test(String(j.descriptionStatus || ''));
-              const matchedQueries = Array.from(new Set([...(prior.matchedQueries || []), prior.query,
-                ...(j.matchedQueries || []), j.query].map(x => String(x || '').trim()).filter(Boolean))).slice(0, 20);
-              return { ...prior, ...j, query: prior.query || j.query || '', matchedQueries,
-                status: hydrated ? 'score_pending' : 'needs_hydration',
-                pipelineStatus: hydrated ? 'score_pending' : 'needs_hydration', fitScore: null };
-            });
-          toScore = fresh; // expose to outer scope
-          if (fresh.length === 0) { res(); return; }
-          // Deduplicate the full list by id (last write wins) before saving
-          const merged = dedupeById([...existing, ...fresh]);
-          chrome.storage.local.set({ pja_shortlist: merged }, res);
-        });
-      });
-
-      // If concurrent batch already added everything, nothing left to score
-      if (toScore.length === 0) { sendResponse({ success: true, added: 0 }); return; }
-
-      // COLLECT-ONLY (FAST coverage scan): placeholders are written above; skip the slow per-batch
-      // scoring here. The unscored entries (fitScore:null) are scored later in one concurrent pass
-      // via dev-server /score-shortlist. Returns immediately so the scan can keep paginating.
-      if (msg.collectOnly) { sendResponse({ success: true, added: toScore.length, collected: true,
-        needsHydration: toScore.filter(j => j.pipelineStatus === 'needs_hydration').length }); return; }
-
-      // BUG5 fix: DEV_MODE guard — non-dev path uses analyzeJob (Nano/Claude/template).
-      if (!DEV_MODE) {
-        const results = await Promise.allSettled(toScore.map(j => analyzeJob(j)));
-        chrome.storage.local.get('pja_shortlist', r2 => {
-          const list = dedupeById(r2.pja_shortlist || []);
-          const dataById = {};
-          toScore.forEach((j, i) => {
-            const r = results[i];
-            if (r.status === 'fulfilled' && r.value.success) dataById[j.id] = r.value.data;
-          });
-          const patched = list.map(j => {
-            if (!dataById[j.id]) return j;
-            const score = dataById[j.id].fitScore;
-            return { ...j, fitScore: score, matchedSkills: dataById[j.id].matchedSkills || [], gaps: dataById[j.id].gaps || [], status: score >= 40 ? 'pending' : 'skipped' };
-          });
-          chrome.storage.local.set({ pja_shortlist: patched });
-        });
-        sendResponse({ success: true, added: toScore.length });
-      } else {
-        // DEV_MODE: batch score via dev server (10 jobs = 1 Claude call)
-        try {
-          const resp = await fetch(`${DEV_SERVER}/batch-score`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ jobs: toScore.map(j => ({ id: j.id, title: j.title, company: j.company, description: j.description })) })
-          });
-          const result = await resp.json();
-          if (!result.success) throw new Error(result.error);
-
-          // Apply scores back — only jobs scoring ≥ 40 become 'pending', rest get 'skipped'.
-          // Threshold is 40 (not 50) so stretch roles like Quality Engineer (45–65 range) are kept.
-          const scoreMap = {};
-          (result.scores || []).forEach(s => { scoreMap[s.id] = s.score; });
-
-          chrome.storage.local.get('pja_shortlist', r2 => {
-            const list = dedupeById(r2.pja_shortlist || []);
-            const patched = list.map(j => {
-              if (!scoreMap.hasOwnProperty(j.id)) return j;
-              const score = scoreMap[j.id];
-              return { ...j, fitScore: score, status: score >= 40 ? 'pending' : 'skipped' };
-            });
-            chrome.storage.local.set({ pja_shortlist: patched });
-          });
-
-          sendResponse({ success: true, added: candidates.length });
-        } catch (e) {
-          // Dev server down — mark only the jobs we actually added (toScore) as pending.
-          chrome.storage.local.get('pja_shortlist', r2 => {
-            const list = r2.pja_shortlist || [];
-            const toScoreIds = new Set(toScore.map(j => j.id));
-            const patched = list.map(j =>
-              toScoreIds.has(j.id) ? { ...j, status: 'pending', fitScore: null } : j
-            );
-            chrome.storage.local.set({ pja_shortlist: patched });
-          });
-          sendResponse({ success: true, added: toScore.length, warn: 'Dev server unreachable — scores pending' });
-        }
-      }
-    });
+    pjaPersistBrowserBatch(msg).then(sendResponse).catch(error => sendResponse({
+      acknowledged: false, batchId: String(msg.batchId || ''),
+      reason: error && error.code || 'persistence_failed',
+      error: String(error && error.message || error).slice(0, 160),
+    }));
     return true;
   }
 

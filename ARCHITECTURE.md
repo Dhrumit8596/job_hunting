@@ -155,6 +155,23 @@ flowchart LR
 Key rules:
 
 - `sourcing/source-run.js` is the current sourcing orchestrator for `/source-v2`.
+- Browser scanners persist through the shared `browser-batch.js` contract. Every source/query/page
+  batch has a stable ID, is retried only while unacknowledged, and exposes received/accepted/
+  inserted/enriched/refreshed/filter/rejection counts. A page cannot complete before all eligible
+  batches are acknowledged or explicitly terminalized as `persistence_failed`.
+- LinkedIn discovery is adaptive: three pages by default (five hard maximum), with every page
+  persisted before navigation. Continuation requires useful deterministic/new-record yield and
+  stops on duplicate saturation, missing/unchanged Next results, deadline reserve, ownership loss,
+  challenge, or persistence failure. Indeed defaults to one page until the session proves clean;
+  its full-navigation checkpoint must match source, query, and expected page and challenges stop
+  the source without bypass.
+- Browser freshness uses immutable `firstDiscoveredAt`/`discoveredAt` for audit and `lastSeenAt` for
+  freshness. Rediscovery merges query/page provenance while retaining unchanged descriptions and
+  fingerprint-valid evidence. A newly acquired or changed description invalidates old score fields.
+- Before scoring, unique exact company/title/location matches can merge browser leads into official
+  ATS records. A bounded high-potential LinkedIn hydration frontier uses stable job IDs; its result
+  is persisted only after the deadline/ownership guard is rechecked. Ambiguous, mismatched, or
+  aggregator-only destinations remain excluded from autonomous planning.
 - Primary-source Workday and SmartRecruiters discovery receive the configured candidate search
   titles as bounded official-API queries in addition to source-specific queries and the broad board
   scan. They detail-hydrate every row that survives the existing title/company/location policy;
@@ -169,6 +186,10 @@ Key rules:
   `description_updated`, or `unchanged`. The bounded scoring frontier evaluates them in that order
   before consuming unchanged unscored rows, while reusable fingerprint-matched evidence remains
   free of the new-score budget.
+- New AI evaluations run in progressive rounds of at most 100 candidates, batches of ten, with a
+  hard 300-job ceiling. The frontier favors current-candidate fingerprint mismatches, exact
+  resume-supported families, fresh complete descriptions, and supported direct/native routes; it
+  stops at 30 qualified reserves, frontier exhaustion, or zero marginal qualified yield.
 - Scores are reusable only when both the posting-description fingerprint and candidate fingerprint
   match. This prevents stale resume/JD evidence from driving autonomous submission.
 - A high score is not enough: the apply gate also checks direct evidence, conflicts, confidence,
@@ -179,7 +200,7 @@ Key rules:
 - Exact-run `/source-v2` work carries its `runId` and an absolute sourcing deadline. Ownership is
   checked before browser discovery, between scans/adapters, and immediately before import. The MV3
   import boundary checks the same run-control token again, so an expired, terminal, or non-owned
-  source worker cannot add or retire IndexedDB records. Standalone `/source-v2` is still supported,
+  source worker cannot refresh `pja_shortlist` or add/retire IndexedDB records. Standalone `/source-v2` is still supported,
   but has a capped deadline and claims no exact-run ownership.
 - Browser per-scan time is clamped or the scan plan is truncated so scheduled worst-case work fits
   its total browser budget; the browser budget ends before the source client and overall workflow.

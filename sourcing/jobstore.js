@@ -45,6 +45,10 @@ function sourceRef(job, modality) {
     query: job.query || '',
     matchedQueries: Array.isArray(job.matchedQueries) ? job.matchedQueries.slice(0, 20) : [],
     discoveredAt: job.discoveredAt || job.scrapedAt || '',
+    firstDiscoveredAt: job.firstDiscoveredAt || job.discoveredAt || job.scrapedAt || '',
+    lastSeenAt: job.lastSeenAt || job.discoveredAt || job.scrapedAt || '',
+    sourcePage: job.sourcePage || null,
+    sourcePages: Array.isArray(job.sourcePages) ? job.sourcePages.slice(0, 40) : [],
   };
 }
 
@@ -83,18 +87,27 @@ function mergePosting(existing, job, modality) {
   }
   const incomingRoute = routeFrom(job);
   if (shouldReplaceRoute(existing, incomingRoute)) Object.assign(existing, incomingRoute);
-  for (const k of ['query', 'discoveredAt', 'postedAt']) {
+  for (const k of ['query', 'discoveredAt', 'firstDiscoveredAt', 'postedAt']) {
     if (!existing[k] && job[k]) existing[k] = job[k];
   }
+  if (job.lastSeenAt) existing.lastSeenAt = !existing.lastSeenAt ||
+    Number(new Date(job.lastSeenAt)) >= Number(new Date(existing.lastSeenAt)) ? job.lastSeenAt : existing.lastSeenAt;
   existing.matchedQueries = Array.from(new Set([...(existing.matchedQueries || []),
     ...(job.matchedQueries || [])])).slice(0, 20);
+  const pageRefs = [...(existing.sourcePages || []), ...(job.sourcePages || [])];
+  existing.sourcePages = Array.from(new Map(pageRefs.map(ref => [
+    [ref && ref.source, ref && ref.query, ref && ref.page].join('|'), ref])).values()).slice(-40);
   const modalities = new Set([...(existing.modalities || [existing.modality].filter(Boolean)), modality || 'unknown']);
   existing.modalities = Array.from(modalities);
   const channels = new Set([...(existing.channels || [existing.channel].filter(Boolean)), job.channel].filter(Boolean));
   existing.channels = Array.from(channels);
   const refs = Array.isArray(existing.sourceRefs) ? existing.sourceRefs.slice() : [];
   const incomingRef = sourceRef(job, modality);
-  if (!refs.some(r => refKey(r) === refKey(incomingRef))) refs.push(incomingRef);
+  const existingRef = refs.findIndex(r => refKey(r) === refKey(incomingRef));
+  if (existingRef < 0) refs.push(incomingRef);
+  else refs[existingRef] = { ...refs[existingRef], ...incomingRef,
+    firstDiscoveredAt: refs[existingRef].firstDiscoveredAt || incomingRef.firstDiscoveredAt,
+    discoveredAt: refs[existingRef].discoveredAt || incomingRef.discoveredAt };
   existing.sourceRefs = refs;
   existing.descriptionFingerprint = descriptionFingerprint(existing.description);
   return existing;
@@ -112,6 +125,10 @@ function buildPosting(id, rk, mk, job, modality) {
     sourceBoard: job.sourceBoard || '',
     listingUrl: job.listingUrl || '', channel: job.channel || '', channels: job.channel ? [job.channel] : [],
     query: job.query || '', discoveredAt: job.discoveredAt || job.scrapedAt || '',
+    firstDiscoveredAt: job.firstDiscoveredAt || job.discoveredAt || job.scrapedAt || '',
+    lastSeenAt: job.lastSeenAt || job.discoveredAt || job.scrapedAt || '',
+    sourcePage: job.sourcePage || null,
+    sourcePages: Array.isArray(job.sourcePages) ? job.sourcePages.slice(0, 40) : [],
     matchedQueries: Array.isArray(job.matchedQueries) ? job.matchedQueries.slice(0, 20) : [],
     isEasyApply: !!job.isEasyApply, indeedApply: !!job.indeedApply,
     needsAtsResolution: !!job.needsAtsResolution,

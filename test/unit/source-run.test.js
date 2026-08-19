@@ -60,7 +60,9 @@ module.exports = async (t) => {
   t.eq(report.modalityC.hydrationStatuses.hydration_success, 1,
     'source-run: browser hydration status totals include successes');
   t.eq(report.modalityC.hydrationStatuses.hydration_missing_dom, 1,
-    'source-run: browser hydration status totals include DOM misses');
+  'source-run: browser hydration status totals include DOM misses');
+  t.eq(report.modalityC.resolution.resolved, 0,
+    'source-run: a lead already carrying its direct route does not claim a new resolution');
   t.eq({ ready: report.quality.descriptions.ready, missing: report.quality.descriptions.missing,
     coverage: report.quality.descriptions.coverage }, { ready: 1, missing: 1, coverage: 0.5 },
     'source-run quality: full-description coverage is measured after cross-source dedupe');
@@ -93,4 +95,22 @@ module.exports = async (t) => {
   t.eq({ adapterCalls, stopped, guarded: guardCalls > 2 },
     { adapterCalls: 1, stopped: 'source_ownership_lost', guarded: true },
   'source-run: ownership is rechecked between expensive discovery adapters and stops later work');
+
+  const freshRediscovery = await sourceAll({ sources: [], discoveryAdapters: {}, maxBrowserAgeMs: 2 * 86400000,
+    now: 10 * 86400000, browserJobs: [{ sourcePlatform: 'linkedin', jobId: 'fresh-1',
+      title: 'Quality Engineer', company: 'Acme', location: 'Fremont, CA',
+      listingUrl: 'https://www.linkedin.com/jobs/view/fresh-1/', isEasyApply: true,
+      description: 'Quality validation and root cause requirements.', descriptionStatus: 'full',
+      firstDiscoveredAt: 1 * 86400000, discoveredAt: 1 * 86400000, lastSeenAt: 10 * 86400000 }],
+  });
+  t.eq(freshRediscovery.report.modalityC.fetched, 1,
+    'source-run freshness: an older hydrated job rediscovered now remains fresh through lastSeenAt');
+  const staleOld = await sourceAll({ sources: [], discoveryAdapters: {}, maxBrowserAgeMs: 2 * 86400000,
+    now: 10 * 86400000, browserJobs: [{ sourcePlatform: 'indeed', jobId: 'stale-1',
+      title: 'Quality Engineer', company: 'Beta', location: 'Irvine, CA',
+      listingUrl: 'https://www.indeed.com/viewjob?jk=stale-1', indeedApply: true,
+      description: 'Quality requirements.', descriptionStatus: 'full', lastSeenAt: 1 * 86400000 }],
+  });
+  t.eq(staleOld.report.modalityC.fetched, 0,
+    'source-run freshness: a genuinely old LinkedIn/Indeed job not rediscovered remains stale');
 };

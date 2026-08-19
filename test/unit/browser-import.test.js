@@ -37,6 +37,7 @@ module.exports = (t) => {
   t.eq(li.pipelineStatus, 'score_pending', 'browser-import: hydrated browser job enters score_pending');
   t.eq(li.query, 'wafer inspection engineer', 'browser-import: query retained');
   t.eq(li.discoveredAt, 12345, 'browser-import: scrape time becomes discoveredAt');
+  t.eq(li.lastSeenAt, 12345, 'browser-import: lastSeenAt is explicit for freshness filtering');
   t.eq(li.sourceRefs.length, 1, 'browser-import: one provenance source ref');
   t.eq(li.sourceRefs[0].sourcePlatform, 'linkedin', 'browser-import: source ref platform');
   t.eq(li.sourceRefs[0].hydrationStatus, 'hydration_success', 'browser-import: source ref carries hydration status');
@@ -120,4 +121,11 @@ module.exports = (t) => {
   }], { discoveredAt: 999 });
   t.eq(batch.length, 2, 'browser-import: batch filters invalid rows');
   t.eq(batch[1].discoveredAt, 999, 'browser-import: caller-supplied discovery time used deterministically');
+
+  const rediscovered = normalizeBrowserJob({ ...linkedInRaw, scrapedAt: 400,
+    firstDiscoveredAt: 100, discoveredAt: 100, lastSeenAt: 400,
+    matchedQueries: ['quality engineer'], sourcePage: 3 });
+  t.eq({ first: rediscovered.firstDiscoveredAt, seen: rediscovered.lastSeenAt, page: rediscovered.sourcePage },
+    { first: 100, seen: 400, page: 3 },
+  'browser-import: audit discovery date and current freshness/page remain distinct');
 };

@@ -6,6 +6,7 @@
 const fs = require('fs');
 const path = require('path');
 const { JSDOM } = require('jsdom');
+const BrowserBatch = require('../../browser-batch');
 const ROOT = path.resolve(__dirname, '../..');
 
 function load() {
@@ -20,6 +21,7 @@ function load() {
     runtime: { sendMessage() {}, onMessage: { addListener() {} }, getURL: p => p },
   };
   w.console = { log() {}, warn() {}, error() {}, info() {}, debug() {} };
+  w.eval(fs.readFileSync(path.resolve(ROOT, 'browser-batch.js'), 'utf8'));
   w.eval(fs.readFileSync(path.resolve(ROOT, 'content/job-scraper.js'), 'utf8'));
   return w;
 }
@@ -61,11 +63,12 @@ function render(w, cards) {
 
 module.exports = (t) => {
   const scraperSource = fs.readFileSync(path.resolve(ROOT, 'content/job-scraper.js'), 'utf8');
-  t.ok(scraperSource.includes('if (page + 1 >= maxPages || !(await goToNextPage())) break;'),
+  t.eq(BrowserBatch.pageContinuationDecision({ page: 3, stableIds: 20,
+    deterministicAccepted: 10, inserted: 8, directRoutes: 2 }, [],
+  { maxPages: 3, remainingMs: 60000 }).reason, 'page_cap',
     'LinkedIn bounded discovery persists final-page coverage without navigating away');
-  t.ok(scraperSource.includes('const hydratedCacheIds = await loadHydratedCacheIds();') &&
-    !scraperSource.includes('await checkCache(meta.jobId)'),
-  'LinkedIn discovery snapshots the hydrated cache once instead of rereading it per card');
+  t.ok(!scraperSource.includes('if (hydratedCacheIds.has(meta.jobId)) continue;'),
+    'LinkedIn discovery does not skip known hydrated IDs before freshness acknowledgement');
   const w = load();
   t.ok(typeof w.pjaAccumulateRenderedCards === 'function', 'collect: accumulate exported');
   t.ok(typeof w.pjaExtractCardMeta === 'function', 'collect: extractCardMeta exported');

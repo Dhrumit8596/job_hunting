@@ -87,6 +87,7 @@
         "content/workday-auth.js",
         "content/auto-apply.js",
         "content/external-apply.js",
+        "browser-batch.js",
         "content/job-scraper.js",
         "content/indeed-scraper.js",
         "content/glassdoor-scraper.js",

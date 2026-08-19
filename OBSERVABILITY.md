@@ -93,6 +93,21 @@ description-updated, unchanged, evidence-preserved, and retired row counts when 
 Workday and SmartRecruiters detail misses carry normalized hydration statuses/reasons (`hydration_timeout`,
 `hydration_http_error`, `hydration_fetch_error`, or missing detail/payload) without response bodies.
 
+Browser funnel reports use precise stage names: `discovered` means a DOM card with observable
+platform presence; it is not persistence. Each page reports platform count, DOM observations,
+stable IDs, deterministic acceptance, batches sent/acknowledged, inserted/enriched/refreshed,
+filtered/rejected with reasons, direct routes, and the continuation/stop reason. Cumulative coverage
+separately reports `persistenceAcknowledged`. Normalization, freshness retention, duplicate merges,
+destination resolution, hydration, evidence scoring, qualification, and planning drops are reported
+by `/source-v2` and the dry apply plan; none may be described as “captured” merely because a card was
+seen. `pja_source_yield` retains a bounded rolling source/query/page history for future scheduling.
+
+Browser enrichment exposes `completed`, `resolved`, and `hydrated`; official resolution also reports
+`resolved`, `ambiguous`, `noMatch`, and `identityMismatch`. Hydration outcomes stay explicit
+(`hydration_success`, `hydration_missing`, `hydration_timeout`, `hydration_identity_mismatch`, or
+`hydration_source_blocked`). Progressive dry planning reports AI round size, model-batch count,
+qualified yield, remaining frontier, and its stop reason.
+
 ## Reason-to-owner map
 
 | Failure family | Primary owner |

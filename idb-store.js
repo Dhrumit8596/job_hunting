@@ -58,7 +58,11 @@
       isEasyApply: !!job.isEasyApply, indeedApply: !!job.indeedApply,
       needsAtsResolution: !!job.needsAtsResolution,
       query: job.query || '', matchedQueries: Array.isArray(job.matchedQueries) ? job.matchedQueries.slice(0, 20) : [],
-      discoveredAt: job.discoveredAt || job.scrapedAt || '' };
+      discoveredAt: job.discoveredAt || job.scrapedAt || '',
+      firstDiscoveredAt: job.firstDiscoveredAt || job.discoveredAt || job.scrapedAt || '',
+      lastSeenAt: job.lastSeenAt || job.discoveredAt || job.scrapedAt || '',
+      sourcePage: job.sourcePage || null,
+      sourcePages: Array.isArray(job.sourcePages) ? job.sourcePages.slice(0, 40) : [] };
   }
   function refKey(r) { return [r.modality, r.platform, r.sourceJobId, r.listingUrl].join('|'); }
 
@@ -88,14 +92,26 @@
     }
     const incomingRoute = routeFrom(incoming);
     if (shouldReplaceRoute(out, incomingRoute)) Object.assign(out, incomingRoute);
-    for (const k of ['query', 'discoveredAt', 'postedAt']) if (!out[k] && incoming[k]) out[k] = incoming[k];
+    for (const k of ['query', 'discoveredAt', 'firstDiscoveredAt', 'postedAt']) if (!out[k] && incoming[k]) out[k] = incoming[k];
+    if (incoming.lastSeenAt) out.lastSeenAt = !out.lastSeenAt ||
+      Number(new Date(incoming.lastSeenAt)) >= Number(new Date(out.lastSeenAt)) ? incoming.lastSeenAt : out.lastSeenAt;
     out.matchedQueries = mergeUnique(out.matchedQueries, incoming.matchedQueries).slice(0, 20);
+    const pageRefs = [...(out.sourcePages || []), ...(incoming.sourcePages || [])];
+    out.sourcePages = Array.from(new Map(pageRefs.map(ref => [[ref && ref.source, ref && ref.query,
+      ref && ref.page].join('|'), ref])).values()).slice(-40);
     out.modalities = mergeUnique(out.modalities || [out.modality], incoming.modalities || [modality || incoming.modality]);
     out.channels = mergeUnique(out.channels || [out.channel], incoming.channels || [incoming.channel]);
     const refs = Array.isArray(out.sourceRefs) ? out.sourceRefs.slice() : [];
     const incomingRefs = Array.isArray(incoming.sourceRefs) && incoming.sourceRefs.length
       ? incoming.sourceRefs : [sourceRef(incoming, modality || incoming.modality)];
-    for (const ref of incomingRefs) if (!refs.some(r => refKey(r) === refKey(ref))) refs.push(ref);
+    for (const ref of incomingRefs) {
+      const idx = refs.findIndex(r => refKey(r) === refKey(ref));
+      if (idx < 0) refs.push(ref);
+      else refs[idx] = Object.assign({}, refs[idx], ref, {
+        firstDiscoveredAt: refs[idx].firstDiscoveredAt || ref.firstDiscoveredAt,
+        discoveredAt: refs[idx].discoveredAt || ref.discoveredAt,
+      });
+    }
     out.sourceRefs = refs;
     out.descriptionFingerprint = descriptionFingerprint(out.description);
     return out;
@@ -114,6 +130,8 @@
     }
     out.modalities = mergeUnique(out.modalities || [out.modality], previous.modalities || [previous.modality]);
     out.channels = mergeUnique(out.channels || [out.channel], previous.channels || [previous.channel]);
+    out.firstDiscoveredAt = previous.firstDiscoveredAt || previous.discoveredAt || out.firstDiscoveredAt || out.discoveredAt;
+    out.lastSeenAt = out.lastSeenAt || previous.lastSeenAt || out.discoveredAt;
     const refs = Array.isArray(out.sourceRefs) ? out.sourceRefs.slice() : [];
     for (const ref of (previous.sourceRefs || [])) if (!refs.some(r => refKey(r) === refKey(ref))) refs.push(ref);
     out.sourceRefs = refs;
@@ -133,6 +151,10 @@
       sourceBoard: job.sourceBoard || '',
       listingUrl: job.listingUrl || '', channel: job.channel || '', channels: job.channel ? [job.channel] : [],
       query: job.query || '', discoveredAt: job.discoveredAt || job.scrapedAt || '',
+      firstDiscoveredAt: job.firstDiscoveredAt || job.discoveredAt || job.scrapedAt || '',
+      lastSeenAt: job.lastSeenAt || job.discoveredAt || job.scrapedAt || '',
+      sourcePage: job.sourcePage || null,
+      sourcePages: Array.isArray(job.sourcePages) ? job.sourcePages.slice(0, 40) : [],
       matchedQueries: Array.isArray(job.matchedQueries) ? job.matchedQueries.slice(0, 20) : [],
       isEasyApply: !!job.isEasyApply, indeedApply: !!job.indeedApply,
       needsAtsResolution: !!job.needsAtsResolution,
@@ -154,6 +176,9 @@
       isEasyApply: !!ref.isEasyApply, indeedApply: !!ref.indeedApply,
       needsAtsResolution: !!ref.needsAtsResolution,
       query: ref.query || '', matchedQueries: Array.isArray(ref.matchedQueries) ? ref.matchedQueries.slice(0, 20) : [],
+      firstDiscoveredAt: ref.firstDiscoveredAt || ref.discoveredAt || '',
+      lastSeenAt: ref.lastSeenAt || ref.discoveredAt || '',
+      sourcePage: ref.sourcePage || null,
     };
   }
 
@@ -166,7 +191,8 @@
       sourcePlatform: posting.sourcePlatform || '', sourceJobId: posting.sourceJobId || '', sourceBoard: posting.sourceBoard || '',
       channel: posting.channel || '', isEasyApply: !!posting.isEasyApply, indeedApply: !!posting.indeedApply,
       needsAtsResolution: !!posting.needsAtsResolution,
-      discoveredAt: posting.discoveredAt || '', postedAt: posting.postedAt || '', query: posting.query || '',
+      discoveredAt: posting.discoveredAt || '', firstDiscoveredAt: posting.firstDiscoveredAt || posting.discoveredAt || '',
+      lastSeenAt: posting.lastSeenAt || posting.discoveredAt || '', postedAt: posting.postedAt || '', query: posting.query || '',
       matchedQueries: Array.isArray(posting.matchedQueries) ? posting.matchedQueries.slice(0, 20) : [],
       modalities: Array.isArray(posting.modalities) ? posting.modalities.slice(0, 8) : [],
       descriptionStatus: posting.descriptionStatus || '',

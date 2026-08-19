@@ -6,6 +6,7 @@
   const SOURCE_STORAGE_KEYS = [
     'pja_profile', 'pja_prefs', 'pja_jobs', 'pja_ext_queue', 'pja_applied_log',
     'pja_application_ledger',
+    'pja_source_yield', 'pja_scan_coverage',
   ];
   const DEFAULT_WORKFLOW_MS = 45 * 60 * 1000;
   const DEFAULT_APPLY_MS = 15 * 60 * 1000;

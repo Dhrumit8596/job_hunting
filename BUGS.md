@@ -1,7 +1,7 @@
 # Bug Report — Job Application Assistant
 
 **Original audit:** 2026-05-31 (autofill correctness, test-form accuracy, e2e on real ATS).
-**Status refresh:** 2026-08-18 — **all 12 items below are RESOLVED in code.** This file is kept
+**Status refresh:** 2026-08-18 — **all 13 items below are RESOLVED in code.** This file is kept
 as a regression guard: the fixes are load-bearing and easy to re-break, so each entry records
 what the bug was, where the fix now lives, and (where present) the test that pins it.
 
@@ -27,6 +27,7 @@ what the bug was, where the fix now lives, and (where present) the test that pin
 | 10 | content.js | `STATUS_COLORS` removed | Low | ✅ Fixed |
 | 11 | background.js | `pjaBuildApplySet` ambiguous-ledger blocker | Critical | ✅ Fixed |
 | 12 | dev-server.js / background.js | owned, deadline-bounded `/source-v2` import | Critical | ✅ Fixed |
+| 13 | browser scanners / corpus merge | acknowledged page persistence and rediscovery freshness | Critical | ✅ Fixed |
 
 ---
 
@@ -100,7 +101,18 @@ their enclosing timeouts, and aborting the loopback client did not cancel the ac
 handler could still import or retire IndexedDB records. Unified `/source-v2` also accepted a sparse
 storage transport response and silently fell back to default titles/location.
 **Fix:** workflow, source-client, source-operation, and browser budgets are now nested and bounded.
-Exact sourcing carries `runId` plus an absolute deadline and rechecks both between work units and at
-the service-worker import boundary. Lost/terminal ownership or expiration prevents all import and
-retirement. `/source-v2` uses bounded observed-storage retries and returns
+Exact sourcing carries `runId` plus an absolute deadline and rechecks both between work units, at
+each acknowledged browser-batch write, and at the service-worker import boundary. Lost/terminal
+ownership or expiration prevents shortlist refresh, corpus import, and retirement. `/source-v2` uses bounded observed-storage retries and returns
 `source_storage_unavailable` before discovery when profile/preferences keys cannot be observed.
+
+## BUG 13 — Browser pages could report success before persistence — ✅ FIXED
+**Was:** LinkedIn and Indeed treated an eight-second missing callback as success, marked IDs seen
+before storage acknowledgement, and normally scanned only page one. Rediscovered hydrated records
+could retain an old `discoveredAt` and later be dropped as stale.
+**Fix:** `browser-batch.js` provides stable page batch IDs, matching acknowledgements, bounded retry,
+source-namespaced idempotent merge, and explicit `persistence_failed` terminalization. Adaptive
+pagination persists each page before navigation and requires changed result IDs plus useful yield.
+Rediscovery now updates `lastSeenAt` and query/page provenance while preserving unchanged JD/evidence;
+new or changed descriptions invalidate scoring fields. Never restore the old timeout-as-success or
+pre-acknowledgement seen-set behavior.

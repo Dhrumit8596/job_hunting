@@ -15,7 +15,10 @@ const HYDRATION_STATUSES = new Set([
   'hydration_success',
   'hydration_deferred_fast_scan',
   'hydration_missing_dom',
+  'hydration_missing',
   'hydration_timeout',
+  'hydration_identity_mismatch',
+  'hydration_source_blocked',
   'hydration_blocked_auth',
   'hydration_not_attempted',
 ]);
@@ -229,6 +232,14 @@ function discoveryTime(raw, opts) {
   return value == null || value === '' ? null : value;
 }
 
+function seenTime(raw, opts) {
+  const value = raw.lastSeenAt != null ? raw.lastSeenAt
+    : raw.scrapedAt != null ? raw.scrapedAt
+      : raw.discoveredAt != null ? raw.discoveredAt
+        : opts && opts.lastSeenAt != null ? opts.lastSeenAt : discoveryTime(raw, opts);
+  return value == null || value === '' ? null : value;
+}
+
 function normalizeBrowserJob(raw, opts = {}) {
   if (!raw || typeof raw !== 'object') return null;
   const sourcePlatform = detectBrowserPlatform(raw);
@@ -257,7 +268,10 @@ function normalizeBrowserJob(raw, opts = {}) {
   const query = clean(raw.query || raw.searchQuery || (raw.search && raw.search.query) || opts.query || '');
   const matchedQueries = Array.from(new Set([...(Array.isArray(raw.matchedQueries) ? raw.matchedQueries : []), query]
     .map(clean).filter(Boolean))).slice(0, 20);
-  const discoveredAt = discoveryTime(raw, opts);
+  const discoveredAt = raw.firstDiscoveredAt != null ? raw.firstDiscoveredAt : discoveryTime(raw, opts);
+  const lastSeenAt = seenTime(raw, opts);
+  const sourcePage = Math.max(1, Number(raw.sourcePage || opts.sourcePage) || 1);
+  const sourcePages = Array.isArray(raw.sourcePages) ? raw.sourcePages.slice(0, 40) : [];
   const modality = 'browser-' + sourcePlatform;
   const sourceRef = {
     kind: 'browser',
@@ -271,6 +285,13 @@ function normalizeBrowserJob(raw, opts = {}) {
     query,
     matchedQueries,
     discoveredAt,
+    firstDiscoveredAt: discoveredAt,
+    lastSeenAt,
+    sourcePage,
+    sourcePages,
+    resolutionMethod: clean(raw.resolutionMethod || ''),
+    resolutionConfidence: clean(raw.resolutionConfidence || ''),
+    resolutionReason: clean(raw.resolutionReason || ''),
     descriptionStatus: desc.descriptionStatus,
     hydrationStatus: hydration.hydrationStatus,
     hydrationMethod: hydration.hydrationMethod,
@@ -302,8 +323,13 @@ function normalizeBrowserJob(raw, opts = {}) {
     query,
     matchedQueries,
     discoveredAt,
+    firstDiscoveredAt: discoveredAt,
+    lastSeenAt,
+    sourcePage,
+    sourcePages,
     provenance: {
       kind: 'browser', modality, sourcePlatform, query, matchedQueries, discoveredAt,
+      firstDiscoveredAt: discoveredAt, lastSeenAt, sourcePage, sourcePages,
       hydrationStatus: hydration.hydrationStatus,
       hydrationMethod: hydration.hydrationMethod,
       hydrationReason: hydration.hydrationReason,

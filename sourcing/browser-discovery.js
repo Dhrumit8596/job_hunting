@@ -18,11 +18,47 @@ function locationText(target) {
   return [target.city, target.state].filter(Boolean).join(', ') || target.label || target.zip || 'United States';
 }
 
+const TARGET_ORDER = ['quality engineer', 'manufacturing quality engineer', 'process engineer',
+  'metrology engineer', 'inspection engineer', 'supplier quality engineer', 'validation engineer',
+  'test engineer', 'equipment engineer', 'failure analysis engineer', 'manufacturing engineer',
+  'reliability engineer', 'product development engineer'];
+
+function prioritizeQueries(values, yieldRows = []) {
+  const queries = boundedQueries(values, 20);
+  const stats = new Map();
+  for (const row of yieldRows || []) {
+    const key = String(row && row.query || '').trim().toLowerCase();
+    if (!key) continue;
+    const current = stats.get(key) || { observations: 0, discovered: 0, persisted: 0, direct: 0 };
+    current.observations++; current.discovered += Number(row.discovered || 0);
+    current.persisted += Number(row.persisted || 0); current.direct += Number(row.directRoute || 0);
+    stats.set(key, current);
+  }
+  const originalOrder = new Map(queries.map((query, index) => [query, index]));
+  return queries.sort((a, b) => {
+    const score = query => {
+      const key = query.toLowerCase();
+      const exact = TARGET_ORDER.indexOf(key);
+      let value = exact >= 0 ? 1000 - exact * 20 : 300;
+      const measured = stats.get(key);
+      if (measured && measured.observations >= 2) value += Math.min(250,
+        measured.persisted * 3 + measured.direct * 2 - Math.max(0, measured.discovered - measured.persisted));
+      return value;
+    };
+    return score(b) - score(a) || originalOrder.get(a) - originalOrder.get(b);
+  });
+}
+
 function buildBrowserDiscoveryPlan(options = {}) {
-  const queries = boundedQueries(options.queries, options.maxQueries);
+  const queries = prioritizeQueries(options.queries, options.yieldStats)
+    .slice(0, Math.max(1, Math.min(20, Number(options.maxQueries) || 20)));
   const location = locationText(options.targetLocation);
   const radius = Math.max(1, Math.min(100, Number(options.targetRadiusMiles) || 50));
-  const maxPages = Math.max(1, Math.min(5, Number(options.maxPages) || 1));
+  const linkedInMaxPages = Math.max(1, Math.min(5,
+    Number(options.linkedInMaxPages != null ? options.linkedInMaxPages : options.maxPages) || 3));
+  // Indeed is deliberately conservative until the current session proves challenge-free.
+  const indeedMaxPages = Math.max(1, Math.min(5, Number(options.indeedMaxPages != null
+    ? options.indeedMaxPages : options.maxPages != null ? options.maxPages : 1) || 1));
   const sources = new Set((options.sources || ['linkedin', 'indeed']).map(x => String(x || '').toLowerCase()));
   const plan = [];
   for (const query of queries) {
@@ -33,7 +69,7 @@ function buildBrowserDiscoveryPlan(options = {}) {
       url.searchParams.set('distance', String(radius));
       url.searchParams.set('f_TPR', 'r2592000'); // last 30 days; no Easy Apply-only filter
       plan.push({ source: 'linkedin', query, url: url.toString(), fast: true,
-        scanOptions: { maxPages } });
+        scanOptions: { maxPages: linkedInMaxPages } });
     }
     if (sources.has('indeed')) {
       const url = new URL('https://www.indeed.com/jobs');
@@ -42,7 +78,7 @@ function buildBrowserDiscoveryPlan(options = {}) {
       url.searchParams.set('radius', String(radius));
       url.searchParams.set('fromage', '30');
       plan.push({ source: 'indeed', query, url: url.toString(), fast: true,
-        scanOptions: { maxPages, hydrateDescriptions: false } });
+        scanOptions: { maxPages: indeedMaxPages, hydrateDescriptions: false } });
     }
   }
   return plan;
@@ -57,7 +93,8 @@ function matchingCoverage(storage, item, startedAt) {
 
 function scanTerminal(storage, item, startedAt) {
   const coverage = matchingCoverage(storage, item, startedAt);
-  if (coverage) return { terminal: true, status: 'done', coverage };
+  if (coverage) return { terminal: true, status: coverage.status || 'done',
+    reason: coverage.reason || '', coverage };
   if (item && item.source === 'linkedin') {
     const scan = storage && storage.pja_linkedin_scan;
     if (scan && String(scan.q || '').trim().toLowerCase() === String(item.query || '').trim().toLowerCase() &&
@@ -110,7 +147,9 @@ async function runBoundedDiscoveryPlan(plan, options = {}) {
   const queries = Array.from(new Set(bounded.plan.map(item => item.query)));
   for (const query of queries) {
     const active = bounded.plan.filter(item => item.query === query && !blockedSources.has(item.source));
-    active.sort((a, b) => (a.source === 'indeed' ? -1 : 1) - (b.source === 'indeed' ? -1 : 1));
+    // LinkedIn is scanned first so a challenge on Indeed cannot consume the useful-query budget.
+    // Work remains query-fair: each query receives at most one bounded scanner launch.
+    active.sort((a, b) => (a.source === 'linkedin' ? -1 : 1) - (b.source === 'linkedin' ? -1 : 1));
     for (const item of active) {
       const decision = await guard('before_source_query_launch', item);
       if (!decision || decision.ok !== true) {
@@ -134,14 +173,21 @@ async function runBoundedDiscoveryPlan(plan, options = {}) {
   }
   return { requestedQueries, scheduledQueries: queries, scans, blockedSources: Array.from(blockedSources),
     budget: bounded, totals: scans.reduce((acc, row) => {
-      acc.collected += Number(row.collected || 0);
+      acc.discovered += Number(row.discovered != null ? row.discovered : row.collected || 0);
+      acc.collected = acc.discovered; // compatibility; reports should prefer the precise discovered term
+      acc.persistenceAcknowledged += Number(row.persistenceAcknowledged || 0);
+      acc.batchAttempts += Number(row.batchAttempts || 0);
+      acc.batchRetries += Number(row.batchRetries || 0);
+      acc.persistenceFailures += Number(row.persistenceFailures || 0);
       acc.easyApply += Number(row.easyApply || 0);
       acc.external += Number(row.external || 0);
       if (row.status === 'done') acc.completed++;
       else acc.incomplete++;
       return acc;
-    }, { collected: 0, easyApply: 0, external: 0, completed: 0, incomplete: 0 }) };
+    }, { discovered: 0, collected: 0, persistenceAcknowledged: 0,
+      batchAttempts: 0, batchRetries: 0, persistenceFailures: 0, easyApply: 0, external: 0,
+      completed: 0, incomplete: 0 }) };
 }
 
-module.exports = { boundedQueries, buildBrowserDiscoveryPlan, matchingCoverage, scanTerminal,
+module.exports = { boundedQueries, prioritizeQueries, buildBrowserDiscoveryPlan, matchingCoverage, scanTerminal,
   boundDiscoveryPlan, runBoundedDiscoveryPlan };

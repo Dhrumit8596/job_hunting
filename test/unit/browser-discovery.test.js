@@ -1,6 +1,6 @@
 'use strict';
 
-const { boundedQueries, buildBrowserDiscoveryPlan, scanTerminal, boundDiscoveryPlan,
+const { boundedQueries, prioritizeQueries, buildBrowserDiscoveryPlan, scanTerminal, boundDiscoveryPlan,
   runBoundedDiscoveryPlan } = require('../../sourcing/browser-discovery');
 
 module.exports = async t => {
@@ -17,14 +17,26 @@ module.exports = async t => {
     maxPages: 2,
   });
   t.eq(plan.length, 4, 'browser discovery: every title is searched on LinkedIn and Indeed');
-  const linkedin = plan[0], indeed = plan[1];
+  const linkedin = plan.find(item => item.source === 'linkedin' && item.query === 'Process Engineer');
+  const indeed = plan.find(item => item.source === 'indeed' && item.query === 'Process Engineer');
   t.eq(linkedin.source, 'linkedin', 'browser discovery: LinkedIn plan emitted');
   t.ok(!linkedin.url.includes('f_AL='), 'browser discovery: LinkedIn is not restricted to Easy Apply');
   t.ok(linkedin.url.includes('f_TPR=r2592000'), 'browser discovery: LinkedIn prefers jobs from the last 30 days');
   t.eq(indeed.source, 'indeed', 'browser discovery: Indeed plan emitted');
   t.ok(indeed.url.includes('fromage=30'), 'browser discovery: Indeed prefers jobs from the last 30 days');
   t.eq(indeed.scanOptions, { maxPages: 2, hydrateDescriptions: false },
-    'browser discovery: Indeed card discovery is bounded and defers expensive hydration');
+  'browser discovery: Indeed card discovery is bounded and defers expensive hydration');
+  const defaults = buildBrowserDiscoveryPlan({ queries: ['Process Engineer'] });
+  t.eq({ linkedin: defaults[0].scanOptions.maxPages, indeed: defaults[1].scanOptions.maxPages },
+    { linkedin: 3, indeed: 1 },
+  'browser discovery: adaptive LinkedIn defaults to three pages while unknown Indeed state starts at one');
+  t.eq(prioritizeQueries(['Experimental Engineer', 'Quality Engineer', 'Process Engineer']),
+    ['Quality Engineer', 'Process Engineer', 'Experimental Engineer'],
+  'browser discovery: exact resume-supported title families run before exploratory queries');
+  t.eq(prioritizeQueries(['Experimental Engineer', 'Process Engineer'], Array.from({ length: 2 }, () => ({
+    query: 'Experimental Engineer', discovered: 10, persisted: 10, directRoute: 5,
+  })))[0], 'Process Engineer',
+  'browser discovery: two good observations improve priority without displacing exact target families');
 
   const done = scanTerminal({ pja_scan_coverage: [{ source: 'linkedin', query: 'Process Engineer',
     collected: 25, easyApply: 7, external: 18, ts: 200 }] }, linkedin, 100);
@@ -73,4 +85,13 @@ module.exports = async t => {
   t.eq({ launches, error: ownershipStopped.terminalError },
     { launches: 1, error: 'source_ownership_lost' },
   'browser discovery: ownership loss stops scheduling additional scans');
+
+  const challengePlan = buildBrowserDiscoveryPlan({ queries: ['Process Engineer', 'Quality Engineer'],
+    sources: ['indeed'], maxPages: 1 });
+  const challenged = await runBoundedDiscoveryPlan(challengePlan, {
+    totalBudgetMs: 20000, perQueryTimeoutMs: 10000, minimumPerItemMs: 1000,
+    runItem: async item => ({ source: item.source, query: item.query, status: 'paused', reason: 'challenge' }),
+  });
+  t.eq(challenged.scans.map(row => row.status), ['paused', 'skipped_source_blocked'],
+    'browser discovery: Indeed challenge marks later unexecuted queries source_blocked instead of empty');
 };

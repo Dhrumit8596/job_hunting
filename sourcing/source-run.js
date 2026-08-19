@@ -12,6 +12,7 @@ const { prescore } = require('./prescore');
 const { createStore, upsert, excludeApplied, gateReport, descriptionFingerprint } = require('./jobstore');
 const { normalizeBrowserJobs } = require('./browser-import');
 const { detectAts } = require('./detect-ats');
+const { resolveAgainstOfficial } = require('./browser-enrichment');
 
 const AUTONOMOUS_UNSUPPORTED_ATS = new Set(['eightfold', 'successfactors', 'jobicy', 'remotive']);
 const AUTONOMOUS_SUPPORTED_STRATEGIES = new Set([
@@ -91,7 +92,7 @@ function qualitySummary(store, sourcingReport, opts = {}) {
       descriptionStatus: job.descriptionStatus || 'needs_description',
     });
     if (AUTONOMOUS_SUPPORTED_STRATEGIES.has(autonomousApplyStrategy(job))) supported++;
-    const age = postingAgeDays(job.postedAt || job.discoveredAt, now);
+    const age = postingAgeDays(job.postedAt || job.lastSeenAt || job.discoveredAt, now);
     if (age == null) continue;
     knownFreshness++;
     if (age <= 7) fresh7d++;
@@ -203,12 +204,17 @@ async function sourceAll(opts = {}) {
   // Their content scripts write normalized-enough records into pja_shortlist. Folding them into
   // the same corpus makes source-v2—not a separate legacy list—the ranking source of truth.
   await guard('before_browser_capture_merge');
-  const allCaptured = normalizeBrowserJobs(opts.browserJobs || []);
+  const allCapturedRaw = normalizeBrowserJobs(opts.browserJobs || []);
+  // Prefer a unique exact official posting already fetched in this owned run. The direct URL then
+  // becomes the dedupe key, merging browser query/page provenance into that official record.
+  const officialResolution = resolveAgainstOfficial(allCapturedRaw, Object.values(store.index));
+  const allCaptured = officialResolution.jobs;
   const browserNow = opts.now != null ? Number(opts.now) : Date.now();
   const browserMaxAge = opts.maxBrowserAgeMs != null ? Number(opts.maxBrowserAgeMs) : null;
   const captured = allCaptured.filter(j => {
     if (browserMaxAge == null) return true;
-    const seen = typeof j.discoveredAt === 'number' ? j.discoveredAt : Date.parse(j.discoveredAt || '');
+    const freshAt = j.lastSeenAt || j.discoveredAt;
+    const seen = typeof freshAt === 'number' ? freshAt : Date.parse(freshAt || '');
     return Number.isFinite(seen) && browserNow - seen <= browserMaxAge;
   })
     .filter(j => j.id && j.title && j.company && j.applyUrl);
@@ -221,12 +227,17 @@ async function sourceAll(opts = {}) {
     const r = upsert(store, groups[modality], modality, stateFor);
     for (const k of Object.keys(cRes)) cRes[k] += r[k] || 0;
   }
-  report.modalityC = { fetched: captured.length, staleExcluded: allCaptured.length - captured.length,
+  report.modalityC = { discovered: (opts.browserJobs || []).length, normalized: allCaptured.length,
+    fresh: captured.length, fetched: captured.length, staleExcluded: allCaptured.length - captured.length,
     eligible: cEligible.length,
     withDescription: cEligible.filter(j => j.description).length,
     needsDescription: cEligible.filter(j => !j.description || j.descriptionStatus === 'missing' || j.descriptionStatus === 'stale').length,
     channelHydration: hydrationSummary.byChannel,
     hydrationStatuses: hydrationSummary.overallStatuses,
+    resolution: { resolved: officialResolution.resolved, ambiguous: officialResolution.ambiguous,
+      noMatch: officialResolution.noMatch, identityMismatch: officialResolution.identityMismatch,
+      outcomes: officialResolution.outcomes.slice(0, 100) },
+    persistedUnique: cRes.added, duplicatesMerged: cRes.dupById + cRes.dupByRole,
     added: cRes.added, enriched: cRes.enriched, dupById: cRes.dupById, dupByRole: cRes.dupByRole };
 
   // --- exclude already-applied, then gate ---

@@ -33,7 +33,7 @@ function seniority(title) {
 }
 
 function postingAgeDays(posting, now) {
-  const value = posting && (posting.postedAt || posting.discoveredAt);
+  const value = posting && (posting.postedAt || posting.lastSeenAt || posting.discoveredAt);
   const text = String(value || '').trim();
   if (!text) return null;
   if (/posted\s+today/i.test(text)) return 0;

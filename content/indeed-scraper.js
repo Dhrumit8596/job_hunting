@@ -161,20 +161,24 @@
   const SCAN_KEY = 'pja_indeed_scan';
   const getScan = () => new Promise(r => chrome.storage.local.get(SCAN_KEY, d => r(d[SCAN_KEY] || null)));
   const setScan = s => new Promise(r => chrome.storage.local.set({ [SCAN_KEY]: s }, r));
-  const sendCollectOnly = jobs => new Promise(resolve => {
-    let done = false;
-    const finish = () => { if (!done) { done = true; resolve(); } };
-    const timer = setTimeout(finish, 8000);
-    try {
-      chrome.runtime.sendMessage({ type: 'BATCH_SCORE_JOBS', jobs, collectOnly: true }, () => {
-        clearTimeout(timer);
-        finish();
-      });
-    } catch (_) {
-      clearTimeout(timer);
-      finish();
-    }
-  });
+  const sendCollectOnly = (jobs, scan) => {
+    const envelope = { type: 'BATCH_SCORE_JOBS', jobs, collectOnly: true, source: 'indeed',
+      query: scan.q, page: scan.page + 1, sequence: scan.batchSequence + 1, observedAt: Date.now(),
+      runId: scan.runId || '', deadlineMs: scan.deadlineMs };
+    envelope.batchId = window.PJABrowserBatch.batchId(envelope);
+    return window.PJABrowserBatch.sendAcknowledged(payload => new Promise((resolve, reject) => {
+      let settled = false;
+      const timer = setTimeout(() => { if (!settled) { settled = true; resolve(undefined); } }, 8000);
+      try {
+        chrome.runtime.sendMessage(payload, response => {
+          if (settled) return;
+          settled = true; clearTimeout(timer);
+          if (chrome.runtime.lastError) reject(new Error(chrome.runtime.lastError.message));
+          else resolve(response);
+        });
+      } catch (error) { if (!settled) { settled = true; clearTimeout(timer); reject(error); } }
+    }), envelope, { attempts: 3 });
+  };
   const patchScan = async (scan, patch) => {
     const next = Object.assign({}, scan || {}, patch || {}, { ts: Date.now() });
     await setScan(next);
@@ -185,11 +189,20 @@
     await setScan(failed); return failed;
   };
   const isSearchPage = () => /\/jobs(\/|$|\?)/.test(location.pathname + location.search) || location.pathname === '/jobs';
+  function pageNumberFromUrl(value) {
+    try {
+      const start = Math.max(0, Number(new URL(String(value || location.href)).searchParams.get('start')) || 0);
+      return Math.floor(start / 10);
+    } catch (_) { return 0; }
+  }
 
   async function startIndeedScan(opts) {
     const params = new URLSearchParams(location.search);
     const scan = { q: params.get('q') || '', l: params.get('l') || '', page: 0,
-      maxPages: (opts && opts.maxPages) || 15, ids: [], total: 0, indeedApply: 0,
+      maxPages: Math.max(1, Math.min(5, Number(opts && opts.maxPages) || 3)),
+      deadlineMs: Number(opts && opts.deadlineMs) || Date.now() + 3 * 60 * 1000,
+      runId: String(opts && opts.runId || ''),
+      ids: [], total: 0, persistedTotal: 0, indeedApply: 0, batchSequence: 0, pages: [],
       hydrateDescriptions: !opts || opts.hydrateDescriptions !== false,
       status: 'running', ts: Date.now() };
     await new Promise(r => chrome.storage.local.set({ pja_indeed_paused: null }, r)); // never inherit a stale challenge
@@ -205,6 +218,11 @@
     scan = await patchScan(scan, { phase: 'resume_enter', url: location.href });
     const params = new URLSearchParams(location.search);
     if ((params.get('q') || '') !== scan.q) return failScan(scan, 'query_mismatch');
+    if (scan.expectedPage != null && (Number(scan.expectedPage) !== Number(scan.page) ||
+        pageNumberFromUrl(location.href) !== Number(scan.expectedPage))) {
+      return failScan(scan, 'page_checkpoint_mismatch');
+    }
+    if (Date.now() >= Number(scan.deadlineMs || 0) - 5000) return failScan(scan, 'sourcing_deadline_exceeded');
     await sleep(1500); // let cards render
 
     let cards = getCardEls();
@@ -225,29 +243,57 @@
     scan = await patchScan(scan, { phase: 'collecting_cards', cardCount: cards.length });
 
     // Collect this page's new cards.
-    const seen = new Set(scan.ids);
+    const seen = new Set(scan.ids), seenThisPage = new Set();
     const pending = [];
+    const pageFunnel = { page: scan.page + 1, platformReported: reportedCount(),
+      domObserved: cards.length, stableIds: 0, deterministicAccepted: 0,
+      batchesSent: 0, batchesAcknowledged: 0, inserted: 0, enriched: 0, refreshed: 0,
+      batchAttempts: 0, batchRetries: 0,
+      filtered: 0, rejected: 0, duplicates: 0, directRoutes: 0,
+      hydrated: 0, normalized: null, fresh: null, evidenceScored: null,
+      qualified: null, planningDrops: null,
+      persistenceFailed: false, failureReason: '' };
     const flushPending = async () => {
       while (pending.length) {
         const b = pending.splice(0, 10);
-        await sendCollectOnly(b);
-        scan = await patchScan(scan, { phase: 'flushed_jobs', flushedAtTotal: scan.total });
+        pageFunnel.batchesSent += 1;
+        const sent = await sendCollectOnly(b, scan);
+        scan.batchSequence += 1;
+        pageFunnel.batchAttempts += Number(sent.attempts || 0);
+        pageFunnel.batchRetries += Math.max(0, Number(sent.attempts || 0) - 1);
+        if (!sent.ok) {
+          pageFunnel.persistenceFailed = true; pageFunnel.failureReason = sent.reason;
+          return false;
+        }
+        pageFunnel.batchesAcknowledged += 1;
+        for (const key of ['inserted', 'enriched', 'refreshed', 'filtered', 'rejected']) {
+          pageFunnel[key] += Number(sent.response[key] || 0);
+        }
+        for (const job of b) if (!seen.has(String(job.id))) { seen.add(String(job.id)); scan.ids.push(String(job.id)); }
+        scan.persistedTotal += Number(sent.response.accepted || 0);
+        scan = await patchScan(scan, { phase: 'flushed_jobs', persistedTotal: scan.persistedTotal,
+          batchSequence: scan.batchSequence, ids: scan.ids });
       }
+      return true;
     };
     let newCount = 0;
     for (const card of cards) {
       const meta = extractIndeedCardMeta(card);
-      if (!meta || !meta.jobId || seen.has(meta.jobId)) continue;
-      seen.add(meta.jobId); scan.ids.push(meta.jobId); scan.total++; newCount++;
+      if (!meta || !meta.jobId) continue;
+      if (seen.has(meta.jobId) || seenThisPage.has(meta.jobId)) { pageFunnel.duplicates += 1; continue; }
+      seenThisPage.add(meta.jobId); scan.total++; newCount++; pageFunnel.stableIds += 1;
       if (meta.indeedApply) scan.indeedApply++;
+      if (meta.indeedApply) pageFunnel.directRoutes++;
       if (newCount === 1 || newCount % 5 === 0) {
         scan = await patchScan(scan, { phase: 'collecting_cards', total: scan.total, indeedApply: scan.indeedApply, lastJobId: meta.jobId });
       }
       if (kwHit(meta.title + ' ' + meta.company)) {
+        pageFunnel.deterministicAccepted += 1;
         let description = '';
         if (scan.hydrateDescriptions !== false) {
           scan = await patchScan(scan, { phase: 'hydrating_description', total: scan.total, lastJobId: meta.jobId, lastTitle: meta.title || '' });
           description = await fetchIndeedDescription(meta, 4000);
+          if (description) pageFunnel.hydrated++;
         }
         pending.push({ id: meta.jobId, ...meta, description: description.slice(0, 20000),
           descriptionStatus: description ? (description.length > 20000 ? 'partial' : 'full') : 'missing',
@@ -255,29 +301,56 @@
           hydrationMethod: 'indeed_detail_panel',
           hydrationReason: description ? '' : 'indeed_detail_description_missing_or_timeout',
           hydratedAt: description ? Date.now() : null,
-          query: scan.q, discoveredAt: Date.now(), scrapedAt: Date.now(),
+          query: scan.q, sourcePage: scan.page + 1, lastSeenAt: Date.now(),
+          discoveredAt: Date.now(), scrapedAt: Date.now(),
           matchedQueries: [scan.q].filter(Boolean),
           pipelineStatus: description ? 'score_pending' : 'needs_hydration',
           status: description ? 'score_pending' : 'needs_hydration' });
-        if (pending.length >= 3) await flushPending();
+        if (pending.length >= 10 && !(await flushPending())) break;
       }
     }
-    await flushPending();
+    if (!pageFunnel.persistenceFailed) await flushPending();
+    scan.pages = (scan.pages || []).concat(pageFunnel).slice(-5);
+    scan = await patchScan(scan, { phase: pageFunnel.persistenceFailed ? 'persistence_failed' : 'page_persisted',
+      pages: scan.pages, ids: scan.ids, total: scan.total, persistedTotal: scan.persistedTotal,
+      persistenceAcknowledged: scan.persistedTotal });
+    if (pageFunnel.persistenceFailed) return failScan(scan, pageFunnel.failureReason || 'persistence_failed',
+      { persistenceReason: pageFunnel.failureReason, pages: scan.pages });
 
     const next = nextPageEl();
-    if (next && newCount > 0 && scan.page + 1 < scan.maxPages) {
-      scan.page++; await setScan(scan);
+    const decision = window.PJABrowserBatch.pageContinuationDecision(pageFunnel,
+      scan.pages.slice(0, -1), { maxPages: scan.maxPages,
+        remainingMs: Number(scan.deadlineMs || 0) - Date.now() });
+    pageFunnel.continuation = decision;
+    scan = await patchScan(scan, { pages: scan.pages });
+    if (next && decision.continue) {
+      const nextUrl = next.href || '';
+      scan.page++; scan.expectedPage = scan.page; scan.expectedUrl = nextUrl;
+      await setScan(scan); // full-navigation checkpoint must exist before click
       await sleep(2500 + Math.random() * 1800); // humane pacing between pages
       next.click(); // full navigation → resumeIndeedScanOnLoad fires on the next page load
       return;
     }
     // Finished — write coverage + mark done.
     scan.status = 'done'; scan.reason = ''; scan.ts = Date.now(); await setScan(scan);
-    const cov = { source: 'indeed', query: scan.q, location: scan.l, collected: scan.total,
-      reported: reportedCount(), indeedApply: scan.indeedApply, external: scan.total - scan.indeedApply, ts: Date.now() };
-    chrome.storage.local.get('pja_scan_coverage', r => {
+    const cov = { source: 'indeed', query: scan.q, location: scan.l, discovered: scan.total,
+      collected: scan.total, persistenceAcknowledged: scan.persistedTotal,
+      batchesSent: scan.pages.reduce((n, row) => n + row.batchesSent, 0),
+      batchesAcknowledged: scan.pages.reduce((n, row) => n + row.batchesAcknowledged, 0),
+      batchAttempts: scan.pages.reduce((n, row) => n + row.batchAttempts, 0),
+      batchRetries: scan.pages.reduce((n, row) => n + row.batchRetries, 0),
+      persistenceFailures: 0, pages: scan.pages, reported: reportedCount(),
+      indeedApply: scan.indeedApply, external: scan.total - scan.indeedApply,
+      status: 'done', reason: '', ts: Date.now() };
+    chrome.storage.local.get(['pja_scan_coverage', 'pja_source_yield'], r => {
       const arr = Array.isArray(r.pja_scan_coverage) ? r.pja_scan_coverage : [];
-      arr.push(cov); chrome.storage.local.set({ pja_scan_coverage: arr.slice(-80) });
+      const yields = Array.isArray(r.pja_source_yield) ? r.pja_source_yield : [];
+      arr.push(cov);
+      for (const page of scan.pages) yields.push({ source: 'indeed', query: cov.query, page: page.page,
+        discovered: page.stableIds, persisted: page.inserted + page.enriched + page.refreshed,
+        unique: page.inserted, directRoute: page.directRoutes, hydrated: page.hydrated,
+        status: page.persistenceFailed ? 'failed' : 'done', ts: cov.ts });
+      chrome.storage.local.set({ pja_scan_coverage: arr.slice(-80), pja_source_yield: yields.slice(-300) });
     });
   }
 
@@ -288,6 +361,7 @@
   window.pjaIndeedPanelAdvanced = indeedPanelAdvanced;
   window.pjaGetIndeedDetailDescription = getIndeedDetailDescription;
   window.pjaWaitForIndeedDescription = waitForIndeedDescription;
+  window.pjaIndeedPageNumberFromUrl = pageNumberFromUrl;
   window.__pjaStartIndeedScan = startIndeedScan;
 
   // Auto-resume across Indeed pagination navigations.

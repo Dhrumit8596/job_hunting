@@ -268,7 +268,7 @@
   // Resolve external ATS apply URLs for a batch of jobIds via LinkedIn's voyager API (no per-job
   // page navigation → fast + account-safe; paced). Writes externalApplyUrl/applyUrl back onto the
   // matching pja_shortlist entries. Must run on a logged-in linkedin.com tab (credentials:include).
-  async function pjaResolveVoyagerBatch(jobIds) {
+  async function pjaResolveVoyagerBatch(jobIds, options = {}) {
     const csrf = (document.cookie.match(/JSESSIONID="?([^";]+)"?/) || [])[1] || '';
     const results = {};
     const descriptions = {};
@@ -297,6 +297,7 @@
     let resolved = 0;
     let hydrated = 0;
     for (const jid of jobIds || []) {
+      if (Number(options.deadlineMs) && Date.now() >= Number(options.deadlineMs) - 1000) break;
       try {
         const url = `https://www.linkedin.com/voyager/api/jobs/jobPostings/${jid}?decorationId=com.linkedin.voyager.deco.jobs.web.shared.WebFullJobPosting-65`;
         const r = await fetch(url, { headers: { 'csrf-token': csrf, accept: 'application/json' }, credentials: 'include' });
@@ -316,7 +317,7 @@
       chrome.storage.local.set({ pja_voyager_resolved: { ts: Date.now(), resolved, hydrated, done: Object.keys(results).length, total: (jobIds || []).length } });
       await delay(250 + Math.random() * 250);
     }
-    await new Promise(res => chrome.storage.local.get('pja_shortlist', r => {
+    if (options.persist !== false) await new Promise(res => chrome.storage.local.get('pja_shortlist', r => {
       const list = (r.pja_shortlist || []).map(jb => {
         const u = results[String(jb.id || jb.jobId)];
         const desc = descriptions[String(jb.id || jb.jobId)];
@@ -337,7 +338,8 @@
       });
       chrome.storage.local.set({ pja_shortlist: list }, res);
     }));
-    return { applyUrls: results, descriptions };
+    return { applyUrls: results, descriptions, resolved, hydrated,
+      completed: Object.keys(results).length, requested: (jobIds || []).length };
   }
 
   // ── Inject floating scanner widget ────────────────────────────────────────
@@ -443,10 +445,9 @@
   const SCROLL_SETTLE_MS  = 300;  // wait after each step for new cards to mount
   const SCROLL_MAX_PASSES = 30;   // safety cap (~12 000 px / 400 px ≈ 30 pages)
 
-  // Walk ALL results pages for near-complete coverage (LinkedIn caps a query at ~40 pages /
-  // ~1000 results; a CA process-engineer variant is typically <500 = <20 pages). Stops early
-  // when goToNextPage() finds no next button.
-  const SCROLL_MAX_PAGES = 40;
+  // Adaptive discovery defaults to three pages and has a hard safety cap of five. Page traversal
+  // continues only after the previous page's persistence acknowledgement shows useful yield.
+  const SCROLL_MAX_PAGES = 5;
 
   function findListContainer() {
     return document.querySelector(
@@ -474,7 +475,7 @@
 
   // Advance to the next results page (LinkedIn paginates ~25/page via an SPA control).
   // Returns true if it advanced. Prefer the explicit next button, else a numbered page button.
-  async function goToNextPage() {
+  async function goToNextPage(previousIds) {
     let next = document.querySelector(
       '.jobs-search-pagination__button--next, button[aria-label="View next page"], button[data-testid="pagination-controls-next-button-visible"]'
     );
@@ -482,13 +483,21 @@
       next = Array.from(document.querySelectorAll('button[aria-label]'))
         .find(b => /next/i.test(b.getAttribute('aria-label') || '') && b.offsetParent !== null && !b.disabled);
     }
-    if (next && !next.disabled && next.offsetParent !== null) { next.click(); await delay(1400); return true; }
-    return false;
+    if (!next || next.disabled || next.offsetParent === null) return { advanced: false, reason: 'missing_next' };
+    next.click();
+    const before = Array.from(previousIds || []);
+    const deadline = Date.now() + 8000;
+    while (Date.now() < deadline) {
+      await delay(300);
+      const after = getJobCards().map(getJobIdFromCard).filter(Boolean);
+      if (window.PJABrowserBatch.resultIdsChanged(before, after)) return { advanced: true, reason: 'result_ids_changed' };
+    }
+    return { advanced: false, reason: 'next_result_ids_unchanged' };
   }
 
   // ── Main scan flow ─────────────────────────────────────────────────────────
   let scanning = false;
-  const scannedThisSession = new Set(); // prevents re-sending same job in one page session
+  const processedThisSession = new Set(); // only acknowledged batches enter this set
 
   async function startScan(opts) {
     if (scanning) return;
@@ -497,7 +506,8 @@
     // per-card detail-panel click. Lets one run walk all pages across many query variants without
     // hammering the account. External ATS URLs are resolved later, only for the top candidates.
     const FAST = !!(opts && opts.fast);
-    const maxPages = Math.max(1, Math.min(SCROLL_MAX_PAGES, Number(opts && opts.maxPages) || SCROLL_MAX_PAGES));
+    const maxPages = Math.max(1, Math.min(SCROLL_MAX_PAGES, Number(opts && opts.maxPages) || 3));
+    const deadlineMs = Number(opts && opts.deadlineMs) || Date.now() + 3 * 60 * 1000;
     const scanParams = new URLSearchParams(location.search);
     const scanQuery = scanParams.get('keywords') || '';
     try { chrome.storage.local.set({ pja_linkedin_scan: {
@@ -513,25 +523,31 @@
     // click+score the ones not yet seen. cardMeta is the canonical full collected set.
     setStatus('Loading + scanning jobs…');
     const cardMeta = new Map();          // jobId → { jobId,title,company,location,applyUrl,isEasyApply }
-    const jobsToScore = [];
-    const hydratedCacheIds = await loadHydratedCacheIds();
+    const pageFunnels = [];
+    let batchSequence = 0;
     let scoredCount = 0;
+    let persistenceFailed = false;
 
     for (let page = 0; page < maxPages; page++) {
+      const pageNumber = page + 1;
+      if (Date.now() >= deadlineMs - 15000) break;
       const listContainer = findListContainer();
       const scroller = listContainer || document.scrollingElement || document.documentElement;
       if (listContainer) { listContainer.scrollTo({ top: 0, behavior: 'instant' }); await delay(SCROLL_SETTLE_MS); }
       let stable = 0, lastTop = -1;
+      const pageMeta = new Map(), domObserved = new Set(), prepared = new Set(), pageJobs = [];
 
       for (let pass = 0; pass < SCROLL_MAX_PASSES; pass++) {
         for (const card of getJobCards()) {
           const meta = extractCardMeta(card);
+          const domKey = meta && meta.jobId || [getJobTitleFromCard(card), getJobCompanyFromCard(card)].join('|');
+          if (domKey) domObserved.add(domKey);
           if (!meta) continue;
           if (!cardMeta.has(meta.jobId)) cardMeta.set(meta.jobId, meta);
-          if (scannedThisSession.has(meta.jobId)) continue;   // score each job once
-          scannedThisSession.add(meta.jobId);
+          if (!pageMeta.has(meta.jobId)) pageMeta.set(meta.jobId, meta);
+          if (processedThisSession.has(meta.jobId) || prepared.has(meta.jobId)) continue;
+          prepared.add(meta.jobId);
           setStatus(`Scanning… ${cardMeta.size} found · ${scoredCount} scored`);
-          if (hydratedCacheIds.has(String(meta.jobId))) continue;
 
           let description = '';
           let externalApplyUrl = null;
@@ -556,7 +572,7 @@
             // FAST: pre-filter on title+company only (no description available).
             if (keywordScore(meta.title + ' ' + meta.company) === 0) continue;
           }
-          jobsToScore.push({
+          pageJobs.push({
             id: meta.jobId, jobId: meta.jobId, sourceJobId: meta.jobId,
             sourcePlatform: 'linkedin', platform: 'linkedin', url: meta.applyUrl,
             listingUrl: meta.applyUrl,
@@ -571,16 +587,14 @@
             hydrationMethod: description ? 'linkedin_detail_panel' : (FAST ? 'linkedin_fast_card_scan' : 'linkedin_detail_panel'),
             hydrationReason: description ? '' : (FAST ? 'fast_scan_skipped_detail' : 'detail_panel_description_missing'),
             hydratedAt: description ? Date.now() : null,
-            query: new URLSearchParams(location.search).get('keywords') || '',
-            matchedQueries: [new URLSearchParams(location.search).get('keywords') || ''].filter(Boolean),
-            discoveredAt: Date.now(), scrapedAt: Date.now(),
+            query: scanQuery, matchedQueries: [scanQuery].filter(Boolean), sourcePage: pageNumber,
+            lastSeenAt: Date.now(), discoveredAt: Date.now(), scrapedAt: Date.now(),
             // FAST collection intentionally has no detail panel. Preserve that truth so the
             // unified pipeline schedules hydration before evidence scoring.
             pipelineStatus: description ? 'score_pending' : 'needs_hydration',
             status: description ? 'score_pending' : 'needs_hydration'
           });
           scoredCount++;
-          if (jobsToScore.length >= 10) { await sendBatchToBackground(jobsToScore.splice(0, 10), FAST); }
         }
 
         // Scroll one step and stop when we reach the bottom and the position holds (virtualised
@@ -595,10 +609,50 @@
         if (atBottom && stable >= 2) break;
       }
 
-      // Do not navigate after the final bounded page: navigation can destroy this execution
-      // context before coverage and collected jobs are persisted, making a successful scan look
-      // like a timeout. Multi-page scans advance only when another iteration is actually allowed.
-      if (page + 1 >= maxPages || !(await goToNextPage())) break;
+      const pageFunnel = { page: pageNumber, platformReported: pjaReadResultCount(),
+        domObserved: domObserved.size, stableIds: pageMeta.size,
+        deterministicAccepted: pageJobs.length, batchesSent: 0, batchesAcknowledged: 0,
+        batchAttempts: 0, batchRetries: 0,
+        inserted: 0, enriched: 0, refreshed: 0, filtered: 0, rejected: 0,
+        duplicates: Math.max(0, pageMeta.size - pageJobs.length), directRoutes: 0,
+        hydrated: pageJobs.filter(job => !!job.description).length,
+        normalized: null, fresh: null, evidenceScored: null, qualified: null, planningDrops: null,
+        persistenceFailed: false, failureReason: '' };
+      while (pageJobs.length) {
+        const batch = pageJobs.splice(0, 10);
+        batchSequence += 1; pageFunnel.batchesSent += 1;
+        const sent = await sendBatchToBackground(batch, FAST, { source: 'linkedin', query: scanQuery,
+          page: pageNumber, sequence: batchSequence, observedAt: Date.now(),
+          runId: String(opts && opts.runId || ''), deadlineMs });
+        pageFunnel.batchAttempts += Number(sent.attempts || 0);
+        pageFunnel.batchRetries += Math.max(0, Number(sent.attempts || 0) - 1);
+        if (!sent.ok) {
+          pageFunnel.persistenceFailed = true; pageFunnel.failureReason = sent.reason;
+          persistenceFailed = true; break;
+        }
+        pageFunnel.batchesAcknowledged += 1;
+        for (const key of ['inserted', 'enriched', 'refreshed', 'filtered', 'rejected']) {
+          pageFunnel[key] += Number(sent.response[key] || 0);
+        }
+        for (const job of batch) processedThisSession.add(String(job.id));
+        pageFunnel.directRoutes += batch.filter(job => job.channel !== 'external' ||
+          job.externalApplyUrl || job.isEasyApply).length;
+      }
+      pageFunnels.push(pageFunnel);
+      await writeLinkedInCheckpoint({ status: persistenceFailed ? 'failed' : 'running',
+        reason: persistenceFailed ? pageFunnel.failureReason || 'persistence_failed' : '', q: scanQuery, url: location.href,
+        maxPages, page: pageNumber, pages: pageFunnels, total: cardMeta.size, ts: Date.now() });
+      if (persistenceFailed) break;
+      const decision = window.PJABrowserBatch.pageContinuationDecision(pageFunnel,
+        pageFunnels.slice(0, -1), { maxPages, remainingMs: deadlineMs - Date.now() });
+      pageFunnel.continuation = decision;
+      await writeLinkedInCheckpoint({ status: 'running', reason: '', q: scanQuery,
+        url: location.href, maxPages, page: pageNumber, pages: pageFunnels,
+        total: cardMeta.size, ts: Date.now() });
+      if (!decision.continue) break;
+      const moved = await goToNextPage(pageMeta.keys());
+      pageFunnel.navigation = moved;
+      if (!moved.advanced) break;
     }
 
     const total = cardMeta.size;
@@ -612,12 +666,6 @@
       return;
     }
 
-    // Send remaining
-    if (jobsToScore.length > 0) {
-      setStatus(`Scoring final batch… (${jobsToScore.length} jobs)`);
-      await sendBatchToBackground(jobsToScore, FAST);
-    }
-
     // Coverage report: collected-vs-LinkedIn-reported, channel split. Appended (by query) to
     // pja_scan_coverage so the unified run can verify near-complete coverage (not a sample).
     const metas = Array.from(cardMeta.values());
@@ -626,22 +674,41 @@
     const params = new URLSearchParams(location.search);
     const coverage = {
       source: 'linkedin', query: params.get('keywords') || '', location: params.get('location') || '',
-      collected: total, reported,
+      discovered: total, collected: total, reported,
       coverage: (reported && reported > 0) ? Math.round((total / reported) * 100) : null,
-      easyApply: easyCount, external: total - easyCount, ts: Date.now(),
+      persistenceAcknowledged: pageFunnels.reduce((n, row) => n + row.inserted + row.enriched + row.refreshed, 0),
+      batchesSent: pageFunnels.reduce((n, row) => n + row.batchesSent, 0),
+      batchesAcknowledged: pageFunnels.reduce((n, row) => n + row.batchesAcknowledged, 0),
+      batchAttempts: pageFunnels.reduce((n, row) => n + row.batchAttempts, 0),
+      batchRetries: pageFunnels.reduce((n, row) => n + row.batchRetries, 0),
+      persistenceFailures: pageFunnels.filter(row => row.persistenceFailed).length,
+      pages: pageFunnels, easyApply: easyCount, external: total - easyCount,
+      status: persistenceFailed ? 'failed' : 'done',
+      reason: persistenceFailed ? (pageFunnels.find(row => row.persistenceFailed) || {}).failureReason || 'persistence_failed' : '', ts: Date.now(),
     };
     try {
-      chrome.storage.local.get('pja_scan_coverage', r => {
+      chrome.storage.local.get(['pja_scan_coverage', 'pja_source_yield'], r => {
         const arr = Array.isArray(r.pja_scan_coverage) ? r.pja_scan_coverage : [];
+        const yields = Array.isArray(r.pja_source_yield) ? r.pja_source_yield : [];
         arr.push(coverage);
-        chrome.storage.local.set({ pja_scan_coverage: arr.slice(-50), pja_linkedin_scan: {
-          status: 'done', reason: '', q: coverage.query, url: location.href, maxPages,
-          total, easyApply: easyCount, external: total - easyCount, ts: coverage.ts
+        for (const page of pageFunnels) yields.push({ source: 'linkedin', query: coverage.query,
+          page: page.page, discovered: page.stableIds, persisted: page.inserted + page.enriched + page.refreshed,
+          unique: page.inserted, directRoute: page.directRoutes, hydrated: page.hydrated,
+          status: page.persistenceFailed ? 'failed' : 'done',
+          ts: coverage.ts });
+        chrome.storage.local.set({ pja_scan_coverage: arr.slice(-80), pja_source_yield: yields.slice(-300), pja_linkedin_scan: {
+          status: persistenceFailed ? 'failed' : 'done',
+          reason: coverage.reason, q: coverage.query,
+          url: location.href, maxPages, page: pageFunnels.length, pages: pageFunnels,
+          total, persistenceAcknowledged: coverage.persistenceAcknowledged,
+          easyApply: easyCount, external: total - easyCount, ts: coverage.ts
         } });
       });
     } catch (_) {}
 
-    setStatus(`Scan complete — collected ${total}${reported ? '/' + reported : ''} jobs (EA ${easyCount}, ext ${total - easyCount}).`);
+    setStatus(persistenceFailed
+      ? `Scan stopped — persistence failed after ${coverage.persistenceAcknowledged} acknowledged jobs.`
+      : `Scan complete — discovered ${total}${reported ? '/' + reported : ''}; persistence acknowledged ${coverage.persistenceAcknowledged}.`);
     setProgress(total, total);
     if (btn) { btn.disabled = false; btn.textContent = 'Scan Again'; }
 
@@ -649,45 +716,30 @@
     scanning = false;
   }
 
-  function loadHydratedCacheIds() {
-    return new Promise(resolve => {
-      let done = false;
-      const finish = list => {
-        if (done) return;
-        done = true; clearTimeout(timer);
-        resolve(new Set((list || []).filter(j => j && j.pipelineStatus !== 'needs_hydration' &&
-          !/^(missing|stale|needs_description)$/i.test(String(j.descriptionStatus || '')))
-          .map(j => String(j.id || ''))));
-      };
-      const timer = setTimeout(() => finish([]), 5000);
-      chrome.storage.local.get('pja_shortlist', r => {
-        // Snapshot once per query. Reading the full shortlist once per card made a 25-card scan
-        // perform 25 large storage reads and routinely overrun the source observation window.
-        finish(r.pja_shortlist || []);
-      });
+  function writeLinkedInCheckpoint(value) {
+    return new Promise((resolve, reject) => {
+      try { chrome.storage.local.set({ pja_linkedin_scan: value }, () => {
+        if (chrome.runtime.lastError) reject(new Error(chrome.runtime.lastError.message));
+        else resolve();
+      }); } catch (error) { reject(error); }
     });
   }
 
-  function sendBatchToBackground(jobs, collectOnly) {
-    return new Promise(resolve => {
-      let done = false;
-      const finish = value => { if (!done) { done = true; clearTimeout(timer); resolve(value); } };
-      const timer = setTimeout(() => finish(undefined), 8000);
-      // chrome.runtime.sendMessage throws synchronously (not via callback) when
-      // the extension context is invalidated (e.g. after an extension update).
-      // Without a try/catch the Promise never settles and the scan hangs forever.
+  function sendBatchToBackground(jobs, collectOnly, meta) {
+    const envelope = { type: 'BATCH_SCORE_JOBS', jobs, collectOnly: !!collectOnly, ...meta };
+    envelope.batchId = window.PJABrowserBatch.batchId(envelope);
+    return window.PJABrowserBatch.sendAcknowledged((payload) => new Promise((resolve, reject) => {
+      let settled = false;
+      const timer = setTimeout(() => { if (!settled) { settled = true; resolve(undefined); } }, 8000);
       try {
-        chrome.runtime.sendMessage({ type: 'BATCH_SCORE_JOBS', jobs, collectOnly: !!collectOnly }, resp => {
-          if (chrome.runtime.lastError) {
-            console.warn('PJA batch error:', chrome.runtime.lastError.message);
-          }
-          finish(resp);
+        chrome.runtime.sendMessage(payload, response => {
+          if (settled) return;
+          settled = true; clearTimeout(timer);
+          if (chrome.runtime.lastError) reject(new Error(chrome.runtime.lastError.message));
+          else resolve(response);
         });
-      } catch (err) {
-        console.warn('PJA sendMessage failed (extension context invalidated?):', err.message);
-        finish(undefined);
-      }
-    });
+      } catch (error) { if (!settled) { settled = true; clearTimeout(timer); reject(error); } }
+    }), envelope, { attempts: 3 });
   }
 
   // Expose collection helpers for unit tests (virtualisation accumulation is the core fix).

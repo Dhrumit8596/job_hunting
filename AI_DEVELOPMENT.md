@@ -58,7 +58,8 @@ answers are required.
 
 Runtime safeguards now in code:
 
-- Fit scoring uses batches of at most 10 jobs.
+- Fit scoring uses batches of at most 10 jobs. Broad supply evaluation advances in 100-candidate
+  rounds and never newly scores more than 300 jobs in one request.
 - Single-category apply runs default to a small 20-candidate evidence-scoring window (or four times
   their requested reserve) rather than the broad planner window. Raise `scoreCandidateLimit` only
   when a supply-limited report justifies the extra model cost.
@@ -67,6 +68,10 @@ Runtime safeguards now in code:
   instead of repeatedly spending their cap on the same jobs.
 - Within that bounded budget, the immediately preceding source import prioritizes newly hydrated,
   newly sourced, and description-updated rows ahead of unchanged unscored frontier rows.
+- The deterministic frontier additionally prioritizes current-candidate fingerprint mismatches,
+  exact resume-supported titles, fresh complete descriptions, compatible seniority, and direct or
+  native supported routes. Stop after 30 qualified reserves or when a scored round yields none;
+  never lower the evidence threshold to improve apparent yield.
 - `scoring-context.js` bounds each long posting to 7,000 characters while retaining its opening,
   requirement-bearing lines, nearby context, and closing.
 - Scoring evidence is cached by both job-description and candidate fingerprints.
