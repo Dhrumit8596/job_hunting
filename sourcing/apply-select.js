@@ -8,6 +8,8 @@
   let DA = (root && root.PJADetectAts) || null;
   if (!DA && typeof require !== 'undefined') { try { DA = require('./detect-ats'); } catch (_) {} }
   const detectAts = (DA && DA.detectAts) || (() => '');
+  let Evidence = (root && root.PJAScoringEvidence) || null;
+  if (!Evidence && typeof require !== 'undefined') { try { Evidence = require('../scoring-evidence'); } catch (_) {} }
 
   function norm(s) { return String(s == null ? '' : s).toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim(); }
   function roleKey(j) { return norm(j && j.company) + '::' + norm(j && j.title); }
@@ -161,6 +163,15 @@
     return Number.isFinite(n) && n >= 75 ? 3 : 2;
   }
 
+  function evidenceMaterialGaps(state) {
+    if (Evidence && typeof Evidence.materialGaps === 'function') return Evidence.materialGaps(state);
+    return Array.isArray(state && state.gaps) ? state.gaps.filter(Boolean) : [];
+  }
+
+  function hasCurrentScoringPolicy(state) {
+    return !Evidence || typeof Evidence.isCurrentPolicy !== 'function' || Evidence.isCurrentPolicy(state);
+  }
+
   // Full corpus records carry the JD text; compact apply-planning projections deliberately carry
   // only a readiness bit. Treat both representations identically so removing description payloads
   // cannot change evidence gates or planning-drop diagnostics.
@@ -193,8 +204,9 @@
       if (!hasUsableDescription(p)) return 'missing_description_evidence';
       if (Object.prototype.hasOwnProperty.call(opts, 'candidateFingerprint')
           && (!opts.candidateFingerprint || st.candidateFingerprint !== opts.candidateFingerprint)) return 'candidate_fingerprint_mismatch';
+      if (!hasCurrentScoringPolicy(st)) return 'scoring_policy_mismatch';
       const direct = Array.isArray(st.matchEvidence) ? st.matchEvidence.filter(Boolean) : [];
-      const gaps = Array.isArray(st.gaps) ? st.gaps.filter(Boolean) : [];
+      const gaps = evidenceMaterialGaps(st);
       const conflicts = Array.isArray(st.conflicts) ? st.conflicts.filter(Boolean) : [];
       if (direct.length < minEvidenceForFitScore(fit)) return 'weak_match_evidence';
       if (gaps.length > maxGaps) return 'too_many_match_gaps';
@@ -307,8 +319,9 @@
         if (!hasUsableDescription(p)) continue;
         if (Object.prototype.hasOwnProperty.call(opts, 'candidateFingerprint')
             && (!opts.candidateFingerprint || st.candidateFingerprint !== opts.candidateFingerprint)) continue;
+        if (!hasCurrentScoringPolicy(st)) continue;
         const direct = Array.isArray(st.matchEvidence) ? st.matchEvidence.filter(Boolean) : [];
-        const gaps = Array.isArray(st.gaps) ? st.gaps.filter(Boolean) : [];
+        const gaps = evidenceMaterialGaps(st);
         const conflicts = Array.isArray(st.conflicts) ? st.conflicts.filter(Boolean) : [];
         if (direct.length < minEvidenceForFitScore(fit) || gaps.length > maxGaps || conflicts.length || !['high', 'medium'].includes(String(st.confidence || '').toLowerCase())) continue;
       }
@@ -353,7 +366,11 @@
         discoveredAt: p.discoveredAt || '',
         jobId: p.sourceJobId || '', listingUrl: p.listingUrl || '',
         isEasyApply: !!p.isEasyApply, indeedApply: !!p.indeedApply,
-        matchEvidence: st.matchEvidence || [], gaps: st.gaps || [], conflicts: st.conflicts || [],
+        matchEvidence: st.matchEvidence || [], gaps: st.gaps || [],
+        materialGaps: evidenceMaterialGaps(st), trainableGaps: st.trainableGaps || [],
+        preferredGaps: st.preferredGaps || [], gapDetails: st.gapDetails || [],
+        transferability: st.transferability || null, scoringPolicyVersion: st.scoringPolicyVersion || '',
+        conflicts: st.conflicts || [],
         confidence: st.confidence || '', scoreKind: st.scoreKind || '',
         descriptionFingerprint: st.descriptionFingerprint || p.descriptionFingerprint || '',
         postingDescriptionFingerprint: p.descriptionFingerprint || '',
@@ -472,7 +489,8 @@
 
   const API = { buildApplySet, buildApplyPlan, resultToState, poolStatus, roleKey, applyUrlKey, linkedinJobId, stableRecordId,
     recordIdentityIds, appliedIdentity, greenhouseEmbedFallback, exceededBudget, queueJobKey,
-    watchdogDecision, unsupportedAutonomousApplyReason, applyCapabilityStatus, hasUsableDescription };
+    watchdogDecision, unsupportedAutonomousApplyReason, applyCapabilityStatus, hasUsableDescription,
+    evidenceMaterialGaps, hasCurrentScoringPolicy };
   if (root) root.PJAApplySelect = API;
   if (typeof module !== 'undefined' && module.exports) module.exports = API;
 })(typeof self !== 'undefined' ? self : (typeof globalThis !== 'undefined' ? globalThis : this));

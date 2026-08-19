@@ -1,10 +1,12 @@
 'use strict';
 
 const Frontier = require('../../scoring-frontier');
+const Evidence = require('../../scoring-evidence');
 
 module.exports = t => {
   const reusable = { id: 'cached', scoreKind: 'llm', fitScore: 82,
-    postingDescriptionFingerprint: 'jd-1', descriptionFingerprint: 'jd-1', candidateFingerprint: 'candidate-1' };
+    postingDescriptionFingerprint: 'jd-1', descriptionFingerprint: 'jd-1', candidateFingerprint: 'candidate-1',
+    scoringPolicyVersion: Evidence.SCORING_POLICY_VERSION };
   const staleA = { id: 'new-a', fitScore: 60, postingDescriptionFingerprint: 'jd-2' };
   const staleB = { id: 'new-b', scoreKind: 'llm', fitScore: 75,
     postingDescriptionFingerprint: 'jd-new', descriptionFingerprint: 'jd-old', candidateFingerprint: 'candidate-1' };
@@ -14,6 +16,9 @@ module.exports = t => {
   t.eq(frontier.deferred.map(j => j.id), ['new-b'], 'scoring frontier: stale candidates beyond the new-score budget are explicit');
   t.eq(Frontier.partition([reusable, staleA], { limit: 1, candidateFingerprint: 'candidate-1' }).reusable.length, 1,
     'scoring frontier: reusable scores do not consume the model-call limit');
+  const legacyPolicy = { ...reusable, id: 'legacy', scoringPolicyVersion: '' };
+  t.eq(Frontier.partition([legacyPolicy], { limit: 1, candidateFingerprint: 'candidate-1' }).needsScore.map(j => j.id),
+    ['legacy'], 'scoring frontier: a policy-version change makes otherwise matching cached evidence stale');
   const ordered = Frontier.sortForScoring([
     { id: 'old-high', fitScore: 75, sourcePriority: 'unchanged' },
     { id: 'new-mid', fitScore: 65, sourcePriority: 'newly_sourced' },

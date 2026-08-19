@@ -369,12 +369,16 @@ curl -s -X POST http://localhost:6174/apply-all \
   --data '{
     "targetConfirmed":20,
     "threshold":70,
-    "maxGaps":20,
+    "maxGaps":2,
     "perCompanyCap":2,
     "includeAssisted":true,
     "e2eSafe":true
   }' | jq .
 ```
+
+`maxGaps` counts only explicitly required material gaps. Trainable adjacent-tool/domain gaps and
+preferred qualifications remain visible in evidence, while hard conflicts and stretch roles remain
+ineligible for autonomous application.
 
 The same one-click flow is also available as a first-class CLI wrapper:
 

@@ -49,7 +49,7 @@ Options:
   --target <n>              Confirmed-application target (default: 20)
   --all-above-score         Apply every qualified job above threshold instead of stopping at target
   --threshold <n>           Minimum fit score (default: 70)
-  --max-gaps <n>            Maximum scored gaps allowed (default: 20)
+  --max-gaps <n>            Maximum material gaps allowed (default: 2)
   --source-target <n>       Sourcing target before ranking
   --attempt-cap <n>         Maximum attempted jobs; 0 means no attempt cap
   --category <name>         Restrict the run to one channel/ATS category
@@ -92,7 +92,7 @@ function readArgs(argv) {
     body: {
       targetConfirmed: 20,
       threshold: 70,
-      maxGaps: 20,
+      maxGaps: 2,
       perCompanyCap: 2,
       includeAssisted: true,
       e2eSafe: true,

@@ -25,7 +25,7 @@ const PJA_DEV_SERVER = 'http://localhost:6174';
 const ONE_CLICK_DEFAULTS = {
   targetConfirmed: 20,
   threshold: 70,
-  maxGaps: 20,
+  maxGaps: 2,
   perCompanyCap: 2,
   includeAssisted: true,
   e2eSafe: true,

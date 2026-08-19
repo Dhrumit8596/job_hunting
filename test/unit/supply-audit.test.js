@@ -1,6 +1,7 @@
 'use strict';
 
 const { summarizeSupply, roleFamily, seniority } = require('../../sourcing/supply-audit');
+const Evidence = require('../../scoring-evidence');
 
 module.exports = async t => {
   t.eq(roleFamily('Senior Wafer Process Integration Engineer'), 'semiconductor_process',
@@ -21,7 +22,8 @@ module.exports = async t => {
     },
     state: {
       a: { fitScore: 81, scoreKind: 'llm', status: 'sourced', candidateFingerprint: 'candidate-1',
-        matchEvidence: ['SPC', 'wafer', 'metrology'], gaps: [], conflicts: [], confidence: 'high' },
+        scoringPolicyVersion: Evidence.SCORING_POLICY_VERSION,
+        matchEvidence: ['SPC', 'wafer', 'metrology'], gaps: [], materialGaps: [], conflicts: [], confidence: 'high' },
       b: { fitScore: 61, scoreKind: 'llm', status: 'sourced', matchEvidence: ['quality'], gaps: ['8 years'], conflicts: [], confidence: 'medium' },
       c: { fitScore: 20, scoreKind: 'heuristic', status: 'score_pending' },
     },

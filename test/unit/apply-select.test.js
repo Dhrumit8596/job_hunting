@@ -2,6 +2,7 @@
 // Phase B core: apply-set selection gating + result→state mapping + pool-cleared summary.
 const path = require('path');
 require(path.resolve(__dirname, '../../sourcing/detect-ats'));
+const Evidence = require(path.resolve(__dirname, '../../scoring-evidence'));
 const { buildApplySet, buildApplyPlan, resultToState, poolStatus, roleKey, greenhouseEmbedFallback, exceededBudget,
   watchdogDecision, queueJobKey, unsupportedAutonomousApplyReason, applyCapabilityStatus,
   hasUsableDescription, applyUrlKey, linkedinJobId } = require(path.resolve(__dirname, '../../sourcing/apply-select'));
@@ -114,6 +115,8 @@ module.exports = (t) => {
   ]);
   linkedInEaCorpus.state['linkedin:ea1'].matchEvidence = ['test engineering', 'manufacturing', 'quality'];
   linkedInEaCorpus.state['linkedin:ea1'].confidence = 'high';
+  linkedInEaCorpus.state['linkedin:ea1'].scoringPolicyVersion = Evidence.SCORING_POLICY_VERSION;
+  linkedInEaCorpus.state['linkedin:ea1'].materialGaps = [];
   const linkedInEaPlan = buildApplyPlan(linkedInEaCorpus, { threshold: 70, requireEvidence: true });
   t.eq(linkedInEaPlan.jobs.length, 1, 'LinkedIn Easy Apply is eligible when channel marks it native-supported');
   t.eq(linkedInEaPlan.jobs[0].strategy, 'linkedin_ea', 'LinkedIn Easy Apply is stamped with linkedin_ea strategy');
@@ -149,8 +152,14 @@ module.exports = (t) => {
     { id: 'e:1', company: 'Strong', title: 'Metrology Engineer', applyUrl: 'https://jobs.lever.co/strong/1', fit: 90 },
     { id: 'e:2', company: 'Conflict', title: 'Quality Engineer', applyUrl: 'https://jobs.lever.co/conflict/2', fit: 90 },
   ]);
-  evidenceCorpus.state['e:1'] = { ...evidenceCorpus.state['e:1'], matchEvidence: ['wafer inspection', 'thin film metrology', 'SPC'], gaps: [], conflicts: [], confidence: 'high' };
-  evidenceCorpus.state['e:2'] = { ...evidenceCorpus.state['e:2'], matchEvidence: ['GMP', 'quality control', 'RCA'], gaps: [], conflicts: ['US citizenship required'], confidence: 'high' };
+  evidenceCorpus.state['e:1'] = { ...evidenceCorpus.state['e:1'],
+    scoringPolicyVersion: Evidence.SCORING_POLICY_VERSION,
+    matchEvidence: ['wafer inspection', 'thin film metrology', 'SPC'], gaps: [], materialGaps: [],
+    trainableGaps: [], preferredGaps: [], conflicts: [], confidence: 'high' };
+  evidenceCorpus.state['e:2'] = { ...evidenceCorpus.state['e:2'],
+    scoringPolicyVersion: Evidence.SCORING_POLICY_VERSION,
+    matchEvidence: ['GMP', 'quality control', 'RCA'], gaps: [], materialGaps: [],
+    conflicts: ['US citizenship required'], confidence: 'high' };
   const evidenceSet = buildApplySet(evidenceCorpus, { threshold: 75, requireEvidence: true });
   t.eq(evidenceSet.map(j => j.id), ['e:1'], 'evidence gate requires 3 matches and rejects hard conflicts');
   t.eq(evidenceSet[0].matchEvidence.length, 3, 'selection carries audit evidence into queue');
@@ -184,8 +193,22 @@ module.exports = (t) => {
     'compact readiness=false is not usable evidence');
 
   evidenceCorpus.state['e:1'].gaps = ['Python', 'CAD', 'optical metrology'];
+  evidenceCorpus.state['e:1'].materialGaps = ['Python', 'CAD', 'optical metrology'];
   t.eq(buildApplySet(evidenceCorpus, { threshold: 75, requireEvidence: true }).length, 0, 'evidence gate rejects more than two material gaps');
   evidenceCorpus.state['e:1'].gaps = [];
+  evidenceCorpus.state['e:1'].materialGaps = [];
+  evidenceCorpus.state['e:1'].gaps = ['deposition platform', 'vacuum system', 'Six Sigma certification'];
+  evidenceCorpus.state['e:1'].trainableGaps = ['deposition platform', 'vacuum system'];
+  evidenceCorpus.state['e:1'].preferredGaps = ['Six Sigma certification'];
+  t.eq(buildApplySet(evidenceCorpus, { threshold: 75, requireEvidence: true }).map(j => j.id), ['e:1'],
+    'evidence gate keeps adjacent roles when only trainable and preferred gaps exceed the old flat limit');
+  evidenceCorpus.state['e:1'].scoringPolicyVersion = '';
+  t.eq(buildApplyPlan(evidenceCorpus, { threshold: 75, requireEvidence: true }).dropCounts.scoring_policy_mismatch, 1,
+    'evidence gate fails closed on a legacy flat-gap score until it is rescored');
+  evidenceCorpus.state['e:1'].scoringPolicyVersion = Evidence.SCORING_POLICY_VERSION;
+  evidenceCorpus.state['e:1'].gaps = [];
+  evidenceCorpus.state['e:1'].trainableGaps = [];
+  evidenceCorpus.state['e:1'].preferredGaps = [];
   evidenceCorpus.state['e:1'].candidateFingerprint = 'resume-v1';
   t.eq(buildApplySet(evidenceCorpus, { threshold: 75, requireEvidence: true,
     candidateFingerprint: 'resume-v2' }).length, 0,

@@ -5,6 +5,7 @@
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 const { postingSeniority, isCompatiblePostingSeniority } = require('./search-policy');
+const ScoringEvidence = require('../scoring-evidence');
 
 function norm(value) {
   return String(value == null ? '' : value).toLowerCase().replace(/[^a-z0-9+#.]+/g, ' ').trim();
@@ -48,12 +49,13 @@ function inc(target, key) {
 function evidenceReady(state, threshold, candidateFingerprint) {
   const score = Number(state && state.fitScore);
   const evidence = Array.isArray(state && state.matchEvidence) ? state.matchEvidence.filter(Boolean) : [];
-  const gaps = Array.isArray(state && state.gaps) ? state.gaps.filter(Boolean) : [];
+  const gaps = ScoringEvidence.materialGaps(state);
   const conflicts = Array.isArray(state && state.conflicts) ? state.conflicts.filter(Boolean) : [];
   const minEvidence = score >= threshold ? 3 : 2;
   if (!Number.isFinite(score) || score < threshold) return false;
   if (candidateFingerprint && state.candidateFingerprint !== candidateFingerprint) return false;
-  return evidence.length >= minEvidence && gaps.length <= 2 && !conflicts.length &&
+  return ScoringEvidence.isCurrentPolicy(state) && evidence.length >= minEvidence &&
+    gaps.length <= 2 && !conflicts.length &&
     /^(high|medium)$/i.test(String(state && state.confidence || ''));
 }
 
@@ -62,11 +64,12 @@ function inferredBelowThresholdCause(posting, state, seniorityBand) {
   if (family === 'other') return 'wrong_role_family';
   if (!isCompatiblePostingSeniority(posting && posting.title, seniorityBand || 'early_mid')) return 'seniority_mismatch';
   const evidence = Array.isArray(state && state.matchEvidence) ? state.matchEvidence.filter(Boolean) : [];
-  const gaps = Array.isArray(state && state.gaps) ? state.gaps.filter(Boolean) : [];
+  const gaps = ScoringEvidence.materialGaps(state);
   const conflicts = Array.isArray(state && state.conflicts) ? state.conflicts.filter(Boolean) : [];
   if (!String(posting && posting.descriptionStatus || '') || posting.descriptionReady === false) return 'extraction_or_hydration_defect';
   if (!Number.isFinite(Number(state && state.fitScore))) return 'unscored';
   if (!/^(llm|ai)$/i.test(String(state && state.scoreKind || ''))) return 'needs_evidence_scoring';
+  if (!ScoringEvidence.isCurrentPolicy(state)) return 'needs_current_scoring_policy';
   if (!evidence.length || gaps.length > 2 || conflicts.length) return 'insufficient_resume_evidence_or_requirement_gap';
   return 'evidence_score_below_threshold';
 }

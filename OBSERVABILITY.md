@@ -111,7 +111,10 @@ Browser enrichment exposes `completed`, `resolved`, and `hydrated`; official res
 `resolved`, `ambiguous`, `noMatch`, and `identityMismatch`. Hydration outcomes stay explicit
 (`hydration_success`, `hydration_missing`, `hydration_timeout`, `hydration_identity_mismatch`, or
 `hydration_source_blocked`). Progressive dry planning reports AI round size, model-batch count,
-qualified yield, remaining frontier, and its stop reason.
+qualified yield, remaining frontier, and its stop reason. It also reports `scoringPolicyVersion` and
+bounded `scoringEvidenceSummary` counts for direct/adjacent/stretch transferability and
+material/trainable/preferred gaps; it never emits resume or JD text in that summary. A legacy score
+appears as `scoring_policy_mismatch` until the bounded frontier produces current structured evidence.
 
 ## Reason-to-owner map
 

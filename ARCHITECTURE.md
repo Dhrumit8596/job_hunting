@@ -198,7 +198,12 @@ Key rules:
   resume-supported families, fresh complete descriptions, and supported direct/native routes; it
   stops at 30 qualified reserves, frontier exhaustion, or zero marginal qualified yield.
 - Scores are reusable only when both the posting-description fingerprint and candidate fingerprint
-  match. This prevents stale resume/JD evidence from driving autonomous submission.
+  match and `scoringPolicyVersion` equals the current `scoring-evidence.js` contract. This prevents
+  stale resume/JD or legacy flat-gap evidence from driving autonomous submission.
+- `scoring-evidence.js` classifies missing qualifications as material, trainable, or preferred and
+  records direct/adjacent/stretch transferability. Only material gaps count toward the automatic
+  gap limit. Adjacent tools or industries remain visible and truthful; a stretch classification,
+  hard conflict, weak evidence, or low confidence still caps the score below qualification.
 - A high score is not enough: the apply gate also checks direct evidence, conflicts, confidence,
   status, attempts, blocked tenants, location, per-company caps, and prior applications.
 - Planning drops are expected output. Every rejected candidate should have a deterministic reason.
@@ -246,7 +251,7 @@ extracted into independent files.
 | Area | Current production modules | Responsibility |
 | --- | --- | --- |
 | Entry | `popup/popup.js`, `scripts/pja-apply-all.js`, `shortlist/shortlist.js` | Start/preflight/status/report surfaces. |
-| HTTP/AI | `dev-server.js`, `ai-cli.js`, `scoring-context.js` | Endpoints, source/apply planning, bounded local model calls, report generation. |
+| HTTP/AI | `dev-server.js`, `ai-cli.js`, `scoring-context.js`, `scoring-evidence.js` | Endpoints, source/apply planning, bounded local model calls, versioned gap/transferability evidence, report generation. |
 | Sourcing | `sourcing/source-run.js`, `sourcing/adapters/*`, `browser-import.js`, `filter.js`, `dedupe.js`, `jobstore.js` | Build and quality-measure the normalized, hydrated, candidate-relevant corpus. Workday CXS and SmartRecruiters use bounded profile queries plus complete eligible-row detail hydration. |
 | Browser store | `idb-store.js` | Description-rich IndexedDB corpus and compact planning reads. |
 | Orchestrator | `background.js` | WS bridge, storage guards, ranked queue, tab dispatch, CDP, watchdog, ledger serialization. |

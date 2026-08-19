@@ -13,6 +13,8 @@
   const DB_NAME = 'pja_jobs_db';
   const SCHEMA_VERSION = 1;
   const MAX_APPLY_DESCRIPTION_BATCH = 10;
+  let Evidence = (root && root.PJAScoringEvidence) || null;
+  if (!Evidence && typeof require !== 'undefined') { try { Evidence = require('./scoring-evidence'); } catch (_) {} }
 
   // ── canonical identity (inlined mirror of sourcing/jobid.js) ──
   function norm(s) { return String(s == null ? '' : s).toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim(); }
@@ -215,6 +217,13 @@
       sourceChangedAt: state.sourceChangedAt || 0,
       matchEvidence: Array.isArray(state.matchEvidence) ? state.matchEvidence : [],
       gaps: Array.isArray(state.gaps) ? state.gaps : [],
+      gapDetails: Array.isArray(state.gapDetails) ? state.gapDetails : [],
+      materialGaps: Array.isArray(state.materialGaps) ? state.materialGaps : [],
+      trainableGaps: Array.isArray(state.trainableGaps) ? state.trainableGaps : [],
+      preferredGaps: Array.isArray(state.preferredGaps) ? state.preferredGaps : [],
+      transferability: state.transferability && typeof state.transferability === 'object'
+        ? state.transferability : null,
+      scoringPolicyVersion: state.scoringPolicyVersion || '',
       conflicts: Array.isArray(state.conflicts) ? state.conflicts : [],
       confidence: state.confidence || '',
     };
@@ -353,8 +362,10 @@
         }
         const keepLlm = prev && prev.scoreKind === 'llm' && prev.descriptionFingerprint && prev.descriptionFingerprint === incomingFp;
         if (keepLlm) {
-          for (const k of ['fitScore', 'scoreKind', 'matchEvidence', 'gaps', 'conflicts', 'confidence',
-            'evidenceFingerprint', 'candidateFingerprint']) {
+          for (const k of ['fitScore', 'scoreKind', 'matchEvidence', 'gaps', 'gapDetails',
+            'materialGaps', 'trainableGaps', 'preferredGaps', 'transferability',
+            'scoringPolicyVersion', 'conflicts', 'confidence', 'evidenceFingerprint',
+            'candidateFingerprint']) {
             if (prev[k] != null) merged[k] = prev[k];
           }
           preservedEvidence++;
@@ -548,8 +559,11 @@
         companies[co] = (companies[co] || 0) + 1;
         const stt = states[id] || {};
         if (String(postings[id].description || '').trim() && !/^(missing|stale|needs_description)$/i.test(String(postings[id].descriptionStatus || ''))) descriptionReady++;
-        if (stt.scoreKind === 'llm' && Array.isArray(stt.matchEvidence) && stt.matchEvidence.length >= 3 &&
-            (!stt.gaps || stt.gaps.length <= 2) && (!stt.conflicts || !stt.conflicts.length) &&
+        const material = Evidence && typeof Evidence.materialGaps === 'function'
+          ? Evidence.materialGaps(stt) : (stt.gaps || []);
+        const policyCurrent = !Evidence || typeof Evidence.isCurrentPolicy !== 'function' || Evidence.isCurrentPolicy(stt);
+        if (stt.scoreKind === 'llm' && policyCurrent && Array.isArray(stt.matchEvidence) && stt.matchEvidence.length >= 3 &&
+            material.length <= 2 && (!stt.conflicts || !stt.conflicts.length) &&
             /^(high|medium)$/i.test(String(stt.confidence || ''))) evidenceReady++;
         if (stt.fitScore == null) unscored++;
         const status = stt.status || 'sourced';

@@ -3,7 +3,7 @@
 // Load the IndexedDB corpus + apply-selection modules into the SW global scope. Wrapped so a load
 // failure can never brick the whole service worker. Order matters: apply-select needs detect-ats.
 try {
-  importScripts('cdp-selfheal.js', 'idb-store.js', 'sourcing/detect-ats.js', 'sourcing/apply-select.js',
+  importScripts('cdp-selfheal.js', 'scoring-evidence.js', 'idb-store.js', 'sourcing/detect-ats.js', 'sourcing/apply-select.js',
     'content/apply-router.js', 'application-ledger.js', 'ledger-retry-policy.js',
     'sourcing/source-safety.js', 'browser-batch.js');
 } catch (e) { console.error('PJA: module load failed', e); }
@@ -1295,7 +1295,11 @@ if (DEV_MODE) {
                       jobs.push({ id, company: p.company || '', title: p.title || '', location: p.location || '',
                         ats: p.ats || p.detectedAts || '', applyUrl: p.applyUrl || '', descriptionStatus: p.descriptionStatus || '',
                         fitScore: st.fitScore, scoreKind: st.scoreKind || '', confidence: st.confidence || '',
-                        matchEvidence: st.matchEvidence || [], gaps: st.gaps || [], conflicts: st.conflicts || [],
+                        matchEvidence: st.matchEvidence || [], gaps: st.gaps || [],
+                        materialGaps: st.materialGaps || [], trainableGaps: st.trainableGaps || [],
+                        preferredGaps: st.preferredGaps || [], gapDetails: st.gapDetails || [],
+                        transferability: st.transferability || null,
+                        scoringPolicyVersion: st.scoringPolicyVersion || '', conflicts: st.conflicts || [],
                         status: st.status || 'sourced', attempts: st.attempts || 0, reason: st.reason || '' });
                     }
                     jobs.sort((a, b) => Number(b.fitScore || 0) - Number(a.fitScore || 0));
@@ -1337,7 +1341,7 @@ if (DEV_MODE) {
               // Write LLM fit scores back into the corpus (from /apply-run rescore pass).
               (async () => {
                 let n = 0;
-                try { if (self.PJAIdb) for (const s of (msg.scores || [])) { if (s && s.id) { await self.PJAIdb.updateState(s.id, { fitScore: s.fitScore, scoreKind: 'llm', descriptionFingerprint: s.descriptionFingerprint || '', evidenceFingerprint: s.evidenceFingerprint || '', candidateFingerprint: s.candidateFingerprint || '', matchEvidence: s.matchEvidence || [], gaps: s.gaps || [], conflicts: s.conflicts || [], confidence: s.confidence || '' }); n++; } } }
+                try { if (self.PJAIdb) for (const s of (msg.scores || [])) { if (s && s.id) { await self.PJAIdb.updateState(s.id, { fitScore: s.fitScore, scoreKind: 'llm', descriptionFingerprint: s.descriptionFingerprint || '', evidenceFingerprint: s.evidenceFingerprint || '', candidateFingerprint: s.candidateFingerprint || '', scoringPolicyVersion: s.scoringPolicyVersion || '', matchEvidence: s.matchEvidence || [], gaps: s.gaps || [], gapDetails: s.gapDetails || [], materialGaps: s.materialGaps || [], trainableGaps: s.trainableGaps || [], preferredGaps: s.preferredGaps || [], transferability: s.transferability || null, conflicts: s.conflicts || [], confidence: s.confidence || '' }); n++; } } }
                 catch (e) { console.error('PJA: updateScores failed', e); }
                 _wsReloadSocket.send(JSON.stringify({ cmd: 'updateScoresReply', reqId: msg.reqId, data: { updated: n } }));
               })();

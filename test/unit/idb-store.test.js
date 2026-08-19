@@ -5,6 +5,7 @@
 require('fake-indexeddb/auto');
 const path = require('path');
 const idb = require(path.resolve(__dirname, '../../idb-store'));
+const Evidence = require(path.resolve(__dirname, '../../scoring-evidence'));
 const jobid = require(path.resolve(__dirname, '../../sourcing/jobid'));
 const { roleKey } = jobid;
 const { makeJob } = require(path.resolve(__dirname, '../../sourcing/normalize'));
@@ -136,7 +137,10 @@ module.exports = async (t) => {
   // Re-sourcing the same description must not overwrite a prior evidence-grounded LLM score.
   const fp = idb.descriptionFingerprint('stable requirements');
   await idb.updateState('greenhouse:7', { status: 'sourced', fitScore: 92, scoreKind: 'llm',
-    descriptionFingerprint: fp, matchEvidence: ['wafer', 'metrology', 'SPC'], confidence: 'high' });
+    descriptionFingerprint: fp, scoringPolicyVersion: Evidence.SCORING_POLICY_VERSION,
+    matchEvidence: ['wafer', 'metrology', 'SPC'], gaps: ['vacuum platform'], materialGaps: [],
+    trainableGaps: ['vacuum platform'], preferredGaps: [],
+    transferability: { level: 'adjacent', rationale: 'Core process work is evidenced.' }, confidence: 'high' });
   const same = await idb.importNormalized({
     index: { 'greenhouse:7': { id: 'greenhouse:7', company: 'Co7', title: 'Process Engineer 7',
       location: 'San Jose, CA', roleKey: 'co7::process engineer 7', modality: 'api-registry', description: 'stable requirements' } },
@@ -144,6 +148,11 @@ module.exports = async (t) => {
   });
   t.eq(same.preservedEvidence, 1, 'idb: same-description refresh reports preserved LLM evidence');
   t.eq((await idb.getJob('greenhouse:7')).state.fitScore, 92, 'idb: heuristic refresh cannot downgrade current LLM score');
+  const preservedStructured = (await idb.getJob('greenhouse:7')).state;
+  t.eq({ version: preservedStructured.scoringPolicyVersion, material: preservedStructured.materialGaps,
+    trainable: preservedStructured.trainableGaps, transfer: preservedStructured.transferability.level },
+  { version: Evidence.SCORING_POLICY_VERSION, material: [], trainable: ['vacuum platform'], transfer: 'adjacent' },
+  'idb: same-description refresh preserves structured transferability evidence');
 
   // A changed description invalidates the old evidence and returns the job to heuristic scoring.
   const changedFp = idb.descriptionFingerprint('changed requirements');

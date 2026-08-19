@@ -1,6 +1,7 @@
 'use strict';
 
 const { postingSeniority } = require('./sourcing/search-policy');
+const ScoringEvidence = require('./scoring-evidence');
 
 // Build a token-bounded scoring frontier without charging cached evidence scores against the new
 // model-call budget. Jobs must already be ordered by deterministic heuristic preference.
@@ -14,7 +15,8 @@ function partition(jobs, options = {}) {
     const postingFingerprint = String(job.postingDescriptionFingerprint || job.descriptionFingerprint || '');
     const cached = job.scoreKind === 'llm' && job.fitScore != null && postingFingerprint &&
       job.descriptionFingerprint === postingFingerprint &&
-      String(job.candidateFingerprint || '') === candidateFingerprint;
+      String(job.candidateFingerprint || '') === candidateFingerprint &&
+      ScoringEvidence.isCurrentPolicy(job);
     (cached ? reusable : stale).push(job);
   }
   const needsScore = limit > 0 ? stale.slice(0, limit) : stale;

@@ -29,6 +29,7 @@ const ApplyProgress = require('./apply-progress');
 const ApplyRunControl = require('./apply-run-control');
 const ApplyReportHealth = require('./apply-report-health');
 const LocalJsonClient = require('./local-json-client');
+const ScoringEvidence = require('./scoring-evidence');
 const ScoringFrontier = require('./scoring-frontier');
 const SearchPolicy = require('./sourcing/search-policy');
 const SourceSafety = require('./sourcing/source-safety');
@@ -1113,7 +1114,7 @@ function developerRecommendation(row = {}) {
   if (/outside_target_location/.test(reason)) {
     return 'Location safety gate: verify profile target-location preferences and keep stale/out-of-radius corpus rows out of apply planning.';
   }
-  if (/weak_match_evidence|too_many_match_gaps|hard_match_conflict|low_score_confidence|below_threshold|candidate_fingerprint_mismatch|unscored/.test(reason)) {
+  if (/weak_match_evidence|too_many_(?:match|material)_gaps|hard_match_conflict|low_score_confidence|below_threshold|candidate_fingerprint_mismatch|scoring_policy_mismatch|unscored/.test(reason)) {
     return 'Scoring/ranking gate: rescore against the current resume/JD evidence or leave out as unsuitable for autonomous apply.';
   }
   if (/prior_blocked_host|prior_blocked_record|deferred_retry_disabled|deferred_max_attempts/.test(reason)) {
@@ -1241,6 +1242,14 @@ function renderApplyRunReport(storage, options = {}) {
   }
   if (ranked && ranked.planningDrops) {
     lines.push(`- Planning drops before launch: ${ranked.planningDrops.total != null ? ranked.planningDrops.total : planningDropRows.length}`);
+  }
+  if (ranked && ranked.scoringPolicyVersion) {
+    lines.push(`- Scoring policy: ${safeReportText(ranked.scoringPolicyVersion)}`);
+    lines.push(`- Scoring model batches: ${Number(ranked.scoringModelBatches || 0)}`);
+    const evidenceSummary = ranked.scoringEvidenceSummary || {};
+    const transfer = evidenceSummary.transferability || {};
+    const gaps = evidenceSummary.gapTotals || {};
+    lines.push(`- Scoring evidence: direct ${Number(transfer.direct || 0)}, adjacent ${Number(transfer.adjacent || 0)}, stretch ${Number(transfer.stretch || 0)}; material gaps ${Number(gaps.material || 0)}, trainable ${Number(gaps.trainable || 0)}, preferred ${Number(gaps.preferred || 0)}`);
   }
   if (!hasAnyState) {
     lines.push('- State warning: no active ranked run, ledger, applied log, last failure, or debug tail was available from extension storage.');
@@ -1519,6 +1528,10 @@ function writeApplyPlanningReport(planningDrops, options = {}) {
       jobs: Array.isArray(options.jobs) ? options.jobs : [],
       results: { confirmed: [], failed: [], skipped: [], unverified: [] },
       planningDrops,
+      scoringPolicyVersion: options.scoringPolicyVersion || '',
+      scoringRounds: Array.isArray(options.scoringRounds) ? options.scoringRounds : [],
+      scoringModelBatches: Number(options.scoringModelBatches || 0),
+      scoringEvidenceSummary: options.scoringEvidenceSummary || null,
       coverage: options.coverage === true,
       coverageCount: options.coverageCount != null ? Number(options.coverageCount) || 1 : undefined,
       channelCoverage: options.channelCoverage || null,
@@ -1682,7 +1695,15 @@ export-control, work-authorization, degree, location, or seniority conflicts mus
 If the prompt above does not actually contain candidate/resume facts, never infer them: score at
 most 25 with low confidence until a local candidate profile is configured.
 
-Return ONLY a JSON array. Each item must be {"id":"...","score":0-100,"matchEvidence":[at least 0 concise resume-to-requirement matches],"gaps":[required qualifications not evidenced],"conflicts":[hard conflicts],"confidence":"high|medium|low"}. Evidence must be supported by both the posting text and resume facts. Do not count hedged or potential matches as evidence. If posting requirements are missing, confidence must be low. No markdown.`;
+${ScoringEvidence.SCORE_POLICY_PROMPT}
+
+Return ONLY a JSON array. Each item must be {"id":"...","score":0-100,
+"matchEvidence":[at least 0 concise resume-to-requirement matches],
+"gapDetails":[{"text":"missing qualification","severity":"material|trainable|preferred","basis":"required|preferred|unclear"}],
+"conflicts":[hard factual conflicts],"confidence":"high|medium|low",
+"transferability":{"level":"direct|adjacent|stretch","rationale":"concise evidence-based reason"}}.
+Evidence must be supported by both the posting text and resume facts. Do not count hedged or
+potential matches as evidence. If posting requirements are missing, confidence must be low. No markdown.`;
 
 async function scoreJobChunk(batch) {
   const jobList = batch.map((j, i) => `Job ${i + 1}: id=${JSON.stringify(j.id)}\nTitle: ${j.title}\nCompany: ${j.company}\nLocation: ${j.location}\nPosting: ${scoringExcerpt(j.description)}`).join('\n---\n');
@@ -1721,8 +1742,9 @@ async function scoreAll(jobs, concurrency = 3) {
   // verified local resume, no job can obtain an autonomous-apply score.
   await refreshRuntimeCandidateProfile();
   if (!runtimeHasCandidateProfile) return (jobs || []).map(j => ({ ...j, fitScore: 25,
-    matchEvidence: [], gaps: ['verified local candidate profile is not configured'],
-    conflicts: [], confidence: 'low' }));
+    ...ScoringEvidence.normalizeScoreResult({ score: 25, gapDetails: [{
+      text: 'verified local candidate profile is not configured', severity: 'material', basis: 'required',
+    }], conflicts: [], confidence: 'low', transferability: { level: 'stretch' } }) }));
   const chunks = [];
   for (let i = 0; i < jobs.length; i += 10) chunks.push(jobs.slice(i, i + 10));
   const byId = {};
@@ -1741,14 +1763,15 @@ async function scoreAll(jobs, concurrency = 3) {
   const { tnAdjustScore, medicalWaferBoost } = require('./sourcing/filter');
   return jobs.map(j => {
     const result = byId[String(j.id)] || null;
-    if (!result) return { ...j, fitScore: null, scoreError: 'llm_score_failed', matchEvidence: [], gaps: [], conflicts: [], confidence: 'low' };
-    const matchEvidence = Array.isArray(result.matchEvidence) ? result.matchEvidence.filter(Boolean).slice(0, 8) : [];
-    const gaps = Array.isArray(result.gaps) ? result.gaps.filter(Boolean).slice(0, 8) : [];
-    const conflicts = Array.isArray(result.conflicts) ? result.conflicts.filter(Boolean).slice(0, 8) : [];
-    const confidence = ['high', 'medium', 'low'].includes(String(result.confidence || '').toLowerCase()) ? String(result.confidence).toLowerCase() : 'low';
-    let fitScore = medicalWaferBoost(j.title, j.company, j.description, tnAdjustScore(j.title, Number(result.score)));
-    if (matchEvidence.length < minEvidenceForFitScore(fitScore) || conflicts.length || confidence === 'low') fitScore = Math.min(fitScore, 74);
-    return { ...j, fitScore, matchEvidence, gaps, conflicts, confidence };
+    if (!result) return { ...j, fitScore: null, scoreError: 'llm_score_failed',
+      ...ScoringEvidence.normalizeScoreResult({ score: null, transferability: { level: 'stretch' } }) };
+    const evidence = ScoringEvidence.normalizeScoreResult(result);
+    let fitScore = medicalWaferBoost(j.title, j.company, j.description, tnAdjustScore(j.title, evidence.score));
+    if (evidence.matchEvidence.length < minEvidenceForFitScore(fitScore) || evidence.conflicts.length ||
+        evidence.confidence === 'low' || ScoringEvidence.shouldCapBelowQualification(evidence)) {
+      fitScore = Math.min(fitScore, 74);
+    }
+    return { ...j, ...evidence, fitScore };
   });
 }
 
@@ -2624,7 +2647,10 @@ ${(description || '').slice(0, 6000)}`;
 
         const scored = await scoreAll(batch, 1);
         const scores = scored.map(j => ({ id: j.id, score: j.fitScore,
-          matchEvidence: j.matchEvidence || [], gaps: j.gaps || [], conflicts: j.conflicts || [],
+          scoringPolicyVersion: j.scoringPolicyVersion || '', matchEvidence: j.matchEvidence || [],
+          gaps: j.gaps || [], gapDetails: j.gapDetails || [], materialGaps: j.materialGaps || [],
+          trainableGaps: j.trainableGaps || [], preferredGaps: j.preferredGaps || [],
+          transferability: j.transferability || null, conflicts: j.conflicts || [],
           confidence: j.confidence || 'low' }));
 
         console.log(`done (${Date.now() - t0}ms) scores=[${scores.map(s=>s.score).join(',')}]`);
@@ -2658,7 +2684,10 @@ ${(description || '').slice(0, 6000)}`;
           const id = String(j.id || j.jobId || '');
           const s = byId[id];
           return (s && s.fitScore != null) ? { ...j, fitScore: s.fitScore,
-            matchEvidence: s.matchEvidence || [], gaps: s.gaps || [], conflicts: s.conflicts || [],
+            scoringPolicyVersion: s.scoringPolicyVersion || '', matchEvidence: s.matchEvidence || [],
+            gaps: s.gaps || [], gapDetails: s.gapDetails || [], materialGaps: s.materialGaps || [],
+            trainableGaps: s.trainableGaps || [], preferredGaps: s.preferredGaps || [],
+            transferability: s.transferability || null, conflicts: s.conflicts || [],
             confidence: s.confidence || 'low', status: 'scored' } : j;
         });
         setStorageToExtension({ pja_shortlist: merged });
@@ -2707,7 +2736,11 @@ ${(description || '').slice(0, 6000)}`;
             id: j.id, title: j.title, company: j.company, location: j.location,
             applyUrl: j.applyUrl, ats: j.ats, fitScore: j.fitScore,
             description: j.description || '', matchEvidence: j.matchEvidence || [],
-            gaps: j.gaps || [], conflicts: j.conflicts || [], confidence: j.confidence || 'low',
+            scoringPolicyVersion: j.scoringPolicyVersion || '', gaps: j.gaps || [],
+            gapDetails: j.gapDetails || [], materialGaps: j.materialGaps || [],
+            trainableGaps: j.trainableGaps || [], preferredGaps: j.preferredGaps || [],
+            transferability: j.transferability || null, conflicts: j.conflicts || [],
+            confidence: j.confidence || 'low',
             source: 'sourcing',
           })));
           const payload = { pja_shortlist: merged };
@@ -2926,7 +2959,7 @@ ${(description || '').slice(0, 6000)}`;
           threshold: o.threshold != null ? o.threshold : 70,
           rescore: o.rescore !== false,
           requireEvidence: o.requireEvidence !== false,
-          maxGaps: o.maxGaps != null ? Number(o.maxGaps) : 20,
+          maxGaps: o.maxGaps != null ? Number(o.maxGaps) : 2,
           includeAssisted: o.includeAssisted !== false,
           perCompanyCap: o.perCompanyCap != null ? o.perCompanyCap : 2,
           e2eSafe: o.e2eSafe !== false,
@@ -3405,6 +3438,7 @@ ${(description || '').slice(0, 6000)}`;
         const strategyCoverage = {};
         const scoringRounds = [];
         let scoringModelBatches = 0;
+        let scoringEvidenceSummary = ScoringEvidence.summarize([]);
         for (const strategy of requiredStrategies) {
           const candidates = jobs.filter(j => strategyKey(j) === strategy);
           strategyCoverage[strategy] = { discovered: candidates.length, hydrated: 0, scored: 0, eligible: 0, qualified: 0, reserved: 0 };
@@ -3441,7 +3475,8 @@ ${(description || '').slice(0, 6000)}`;
           let stoppedAt = 0;
           const reserveTarget = Math.min(30, Math.max(10, Number(o.reserveTarget) || 30));
           const evidenceQualified = j => j && j.fitScore >= threshold &&
-            (!requireEvidence || hasEnoughMatchEvidence(j)) && (!requireEvidence || (j.gaps || []).length <= maxGaps) &&
+            (!requireEvidence || hasEnoughMatchEvidence(j)) &&
+            (!requireEvidence || ScoringEvidence.materialGaps(j).length <= maxGaps) &&
             (!requireEvidence || !(j.conflicts || []).length) &&
             (!requireEvidence || ['high', 'medium'].includes(String(j.confidence || '').toLowerCase()));
           for (const round of ScoringFrontier.roundPlan(needsScore.length, { maximum: scoreCandidateLimit, roundSize: 100 })) {
@@ -3476,8 +3511,12 @@ ${(description || '').slice(0, 6000)}`;
                 const fp = j.postingDescriptionFingerprint || descriptionFingerprint(j.description);
                 return { id: j.id, fitScore: j.fitScore, descriptionFingerprint: fp,
                   candidateFingerprint: runtimeCandidateFingerprint,
-                  evidenceFingerprint: `${fp}:${runtimeCandidateFingerprint}`,
-                  matchEvidence: j.matchEvidence, gaps: j.gaps, conflicts: j.conflicts, confidence: j.confidence };
+                  evidenceFingerprint: `${fp}:${runtimeCandidateFingerprint}:${ScoringEvidence.SCORING_POLICY_VERSION}`,
+                  scoringPolicyVersion: j.scoringPolicyVersion,
+                  matchEvidence: j.matchEvidence, gaps: j.gaps, gapDetails: j.gapDetails,
+                  materialGaps: j.materialGaps, trainableGaps: j.trainableGaps,
+                  preferredGaps: j.preferredGaps, transferability: j.transferability,
+                  conflicts: j.conflicts, confidence: j.confidence };
               }) }, 'updateScoresReply', 120000);
               // Do not retain description text beyond this scoring batch.
               scored.push(...batchScored.map(j => { const out = { ...j }; delete out.description; return out; }));
@@ -3491,12 +3530,14 @@ ${(description || '').slice(0, 6000)}`;
               qualified, qualifiedTotal, remaining }, { reserveTarget });
             scoringRounds.push({ round: scoringRounds.length + 1, candidates: roundRows.length,
               scored: roundScored.length, qualified, qualifiedTotal, remaining, decision: decision.reason });
+            scoringRounds[scoringRounds.length - 1].evidence = ScoringEvidence.summarize(roundScored);
             stoppedAt = round.offset + round.size;
             if (!decision.continue) { stoppedAt = round.offset + round.size; break; }
           }
           for (const j of needsScore.slice(stoppedAt)) planningDrops = appendPlanningDrop(planningDrops, j,
             'progressive_scoring_early_stop', planningDropLimit);
           const scoredPool = reusable.concat(scored);
+          scoringEvidenceSummary = ScoringEvidence.summarize(scoredPool);
           for (const channel of requiredChannels) channelCoverage[channel].scored = scoredPool.filter(j =>
             (j.channel || 'external') === channel && j.fitScore != null).length;
           for (const strategy of requiredStrategies) strategyCoverage[strategy].scored = scoredPool.filter(j =>
@@ -3507,7 +3548,7 @@ ${(description || '').slice(0, 6000)}`;
               if (j.fitScore == null) reason = 'rescore_missing_fit_score';
               else if (j.fitScore < threshold) reason = 'rescore_below_threshold';
               else if (requireEvidence && !hasEnoughMatchEvidence(j)) reason = 'rescore_weak_match_evidence';
-              else if (requireEvidence && (j.gaps || []).length > maxGaps) reason = 'rescore_too_many_match_gaps';
+              else if (requireEvidence && ScoringEvidence.materialGaps(j).length > maxGaps) reason = 'rescore_too_many_material_gaps';
               else if (requireEvidence && (j.conflicts || []).length) reason = 'rescore_hard_match_conflict';
               else if (requireEvidence && !['high', 'medium'].includes(String(j.confidence || '').toLowerCase())) reason = 'rescore_low_score_confidence';
               if (reason) planningDrops = appendPlanningDrop(planningDrops, j, reason, planningDropLimit);
@@ -3620,7 +3661,9 @@ ${(description || '').slice(0, 6000)}`;
         const uncoveredChannels = requiredChannels.filter(channel => (channelCoverage[channel].qualified || 0) < coverageCount);
         if (uncoveredChannels.length) {
           const report = writeApplyPlanningReport(planningDrops || null,
-            { status: 'channel_coverage_blocked', coverage: coverageMode, coverageCount, channelCoverage, strategyCoverage, storage: control });
+            { status: 'channel_coverage_blocked', coverage: coverageMode, coverageCount, channelCoverage, strategyCoverage,
+              scoringPolicyVersion: ScoringEvidence.SCORING_POLICY_VERSION, scoringRounds,
+              scoringModelBatches, scoringEvidenceSummary, storage: control });
           res.writeHead(409, CORS); res.end(JSON.stringify({ success: false, stage: 'channel_coverage',
             error: 'required channel coverage is not ready', uncoveredChannels, coverageCount, channelCoverage,
             planningDrops: planningDrops || null, report,
@@ -3629,7 +3672,9 @@ ${(description || '').slice(0, 6000)}`;
         const uncoveredStrategies = requiredStrategies.filter(strategy => (strategyCoverage[strategy].qualified || 0) < coverageCount);
         if (uncoveredStrategies.length) {
           const report = writeApplyPlanningReport(planningDrops || null,
-            { status: 'strategy_coverage_blocked', coverage: coverageMode, coverageCount, channelCoverage, strategyCoverage, storage: control });
+            { status: 'strategy_coverage_blocked', coverage: coverageMode, coverageCount, channelCoverage, strategyCoverage,
+              scoringPolicyVersion: ScoringEvidence.SCORING_POLICY_VERSION, scoringRounds,
+              scoringModelBatches, scoringEvidenceSummary, storage: control });
           res.writeHead(409, CORS); res.end(JSON.stringify({ success: false, stage: 'strategy_coverage',
             error: 'required apply strategy coverage is not ready', uncoveredStrategies, coverageCount, strategyCoverage,
             planningDrops: planningDrops || null, report,
@@ -3639,11 +3684,14 @@ ${(description || '').slice(0, 6000)}`;
         if (!jobs.length) {
           const report = writeApplyPlanningReport(planningDrops || null,
             { status: dryRun ? 'dry_run_nothing_eligible' : 'nothing_eligible',
-              coverage: coverageMode, coverageCount, channelCoverage, strategyCoverage, storage: control });
+              coverage: coverageMode, coverageCount, channelCoverage, strategyCoverage,
+              scoringPolicyVersion: ScoringEvidence.SCORING_POLICY_VERSION, scoringRounds,
+              scoringModelBatches, scoringEvidenceSummary, storage: control });
           res.writeHead(200, CORS); res.end(JSON.stringify({ success: true, planned: 0,
           note: 'nothing eligible', corpusTotal: setResp.total, assistedExcluded, day, timeZone,
           dailyTarget, alreadyConfirmedToday, remainingTarget, planningDrops: planningDrops || null,
-          report })); return;
+          report, scoringRounds, scoringModelBatches, scoringEvidenceSummary,
+          scoringPolicyVersion: ScoringEvidence.SCORING_POLICY_VERSION })); return;
         }
 
         // 3. build the queue + seed current, then open the first job's tab to start the loop.
@@ -3709,7 +3757,9 @@ ${(description || '').slice(0, 6000)}`;
         res.writeHead(200, CORS);
         const previewLimit = Math.max(1, Math.min(500, Number(o.previewLimit) || 12));
         const report = dryRun ? writeApplyPlanningReport(planningDrops || null,
-          { status: 'dry_run_planned', jobs: queueJobs, coverage: coverageMode, coverageCount, channelCoverage, strategyCoverage, storage: control }) : null;
+          { status: 'dry_run_planned', jobs: queueJobs, coverage: coverageMode, coverageCount,
+            channelCoverage, strategyCoverage, scoringPolicyVersion: ScoringEvidence.SCORING_POLICY_VERSION,
+            scoringRounds, scoringModelBatches, scoringEvidenceSummary, storage: control }) : null;
         res.end(JSON.stringify({ success: true, dryRun, planned: queueJobs.length,
           runMode, applyAllAboveScore, targetConfirmed: remainingTarget, dailyTarget,
           alreadyConfirmedToday, remainingTarget,
@@ -3717,9 +3767,13 @@ ${(description || '').slice(0, 6000)}`;
           reserveCount: applyAllAboveScore ? 0 : Math.max(0, queueJobs.length - remainingTarget), runId, byChannel,
           byStrategy, channelCoverage, strategyCoverage, coverage: coverageMode, coverageCount, corpusTotal: setResp.total,
           planningDrops: planningDrops || null, report, scoringRounds, scoringModelBatches,
+          scoringEvidenceSummary,
+          scoringPolicyVersion: ScoringEvidence.SCORING_POLICY_VERSION,
           top: jobs.slice(0, previewLimit).map(j => ({ fit: j.fitScore, company: j.company, title: j.title,
             id: j.id, location: j.location || '', applyUrl: j.applyUrl || '', ats: j.ats || j.strategy, channel: j.channel || 'external', matchEvidence: j.matchEvidence || [],
-            gaps: j.gaps || [], conflicts: j.conflicts || [], confidence: j.confidence || '' })) }));
+            materialGaps: ScoringEvidence.materialGaps(j), trainableGaps: j.trainableGaps || [],
+            preferredGaps: j.preferredGaps || [], transferability: j.transferability || null,
+            conflicts: j.conflicts || [], confidence: j.confidence || '' })) }));
       } catch (e) {
         console.error('[PJA] /apply-run error:', e.message);
         res.writeHead(500, CORS); res.end(JSON.stringify({ success: false, error: e.message }));

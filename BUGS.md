@@ -137,3 +137,12 @@ experiment. Records belonging to unqueried saved families could be retired even 
 run had supplied no evidence that their postings were dead.
 **Fix:** explicit query plans are merge-only by default. Only the complete saved-title policy—or an
 intentional `replaceMissing:true` operator override—may authoritatively retire missing records.
+
+## BUG 16 — Preferred and transferable qualifications counted as hard fit gaps — ✅ FIXED
+**Was:** AI scoring returned one flat `gaps` array. Planning counted a preferred certification,
+unfamiliar adjacent-industry tool, and an unmet core responsibility identically, so otherwise strong
+process/manufacturing roles were rejected after three learnable or optional differences.
+**Fix:** `scoring-evidence.js` versions and normalizes structured material/trainable/preferred gaps
+plus direct/adjacent/stretch transferability. Only material gaps count toward the autonomous limit;
+hard conflicts, weak evidence, low confidence, and stretch roles remain disqualifying. Cached flat-gap
+scores are not silently reinterpreted: they fail closed and enter the bounded rescore frontier.

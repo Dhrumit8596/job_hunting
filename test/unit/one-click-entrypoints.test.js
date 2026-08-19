@@ -2,6 +2,7 @@
 
 const fs = require('fs');
 const path = require('path');
+const { readArgs } = require('../../scripts/pja-apply-all');
 
 module.exports = (t) => {
   const root = path.resolve(__dirname, '../..');
@@ -11,6 +12,8 @@ module.exports = (t) => {
   const pkg = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8'));
   const cli = fs.readFileSync(path.join(root, 'scripts/pja-apply-all.js'), 'utf8');
   const dev = fs.readFileSync(path.join(root, 'dev-server.js'), 'utf8');
+  t.eq(readArgs([]).body.maxGaps, 2,
+    'one-click defaults: autonomous planning permits at most two material gaps');
 
   t.ok(
     popupHtml.includes('id="btn-one-click-apply"') &&
@@ -31,7 +34,7 @@ module.exports = (t) => {
     popupJs.includes("fetch(`${PJA_DEV_SERVER}/export-apply-report`") &&
     popupJs.includes('data.blocked && data.blocked.records') &&
     popupJs.includes('ONE_CLICK_DEFAULTS') &&
-    popupJs.includes('maxGaps: 20') &&
+    popupJs.includes('maxGaps: 2') &&
     popupCss.includes('.one-click-bar') &&
     popupCss.includes('.one-click-config') &&
     popupCss.includes('.one-click-actions'),

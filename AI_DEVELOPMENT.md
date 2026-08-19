@@ -76,6 +76,12 @@ Runtime safeguards now in code:
   precedence, adjacent titles must be audited against configured resume evidence, and level variants
   come only from configured experience. Do not infer senior-engineer eligibility solely from a
   senior technician title or spend model calls on staff-plus postings that the target band excludes.
+- Fit scoring uses the versioned `scoring-evidence.js` contract. The model must separate explicit
+  core unmet requirements (`material`) from transferable tool/domain gaps (`trainable`) and
+  preferred qualifications. Only material gaps consume the automatic maximum. Adjacent process
+  industries can qualify when most core duties have direct resume evidence; never turn
+  transferability into claimed experience. Missing policy versions and malformed gap severities
+  fail closed and are rescored before reuse.
 - `scoring-context.js` bounds each long posting to 7,000 characters while retaining its opening,
   requirement-bearing lines, nearby context, and closing.
 - Scoring evidence is cached by both job-description and candidate fingerprints.
