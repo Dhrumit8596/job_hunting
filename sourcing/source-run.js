@@ -168,7 +168,8 @@ async function sourceAll(opts = {}) {
   await guard('after_source_all_registry');
   const filterOpts = { nationwideUS: opts.nationwideUS === true,
     targetLocation: opts.targetLocation, targetRadiusMiles: opts.targetRadiusMiles,
-    locationStrictness: opts.locationStrictness, remotePolicy: opts.remotePolicy };
+    locationStrictness: opts.locationStrictness, remotePolicy: opts.remotePolicy,
+    seniorityBand: opts.seniorityBand };
   const aEligible = autonomousApplyFilter(filterJobs(a.jobs, filterOpts), opts.autonomousApplyOnly === true);
   const aRes = upsert(store, aEligible, 'api-registry', stateFor);
   for (const board of a.stats) {

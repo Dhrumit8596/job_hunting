@@ -49,6 +49,7 @@ module.exports = (t) => {
     settingsHtml.includes('id="pref-targetLocationCity"') &&
     settingsHtml.includes('id="pref-targetRadiusMiles"') &&
     settingsHtml.includes('id="pref-searchTitles"') &&
+    settingsHtml.includes('id="pref-searchSeniority"') &&
     settingsHtml.includes('id="pref-advancedUi"') &&
     settingsJs.includes('deriveSearchPrefs') &&
     settingsJs.includes('DEFAULT_SEARCH_TITLES') &&

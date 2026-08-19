@@ -1,5 +1,7 @@
 'use strict';
 
+const { postingSeniority } = require('./sourcing/search-policy');
+
 // Build a token-bounded scoring frontier without charging cached evidence scores against the new
 // model-call budget. Jobs must already be ordered by deterministic heuristic preference.
 function partition(jobs, options = {}) {
@@ -32,7 +34,10 @@ function deterministicPriority(job, options = {}) {
   const title = String(job && job.title || '');
   if (/\b(process|quality|metrology|inspection|validation|test|equipment|reliability|manufacturing) engineer\b/i.test(title) ||
       /failure analysis engineer/i.test(title)) score += 45;
-  if (/\b(senior|sr\.?|staff|principal|lead|manager|director)\b/i.test(title)) score -= 25;
+  const level = postingSeniority(title);
+  if (level === 'staff_plus' || level === 'leadership') score -= 60;
+  else if (level === 'senior' && /^(entry|early_mid)$/.test(String(options.seniorityBand || ''))) score -= 20;
+  else if (level === 'early_career' && /^(entry|early_mid)$/.test(String(options.seniorityBand || ''))) score += 20;
   if (job && job.descriptionReady) score += 25;
   if (job && (job.channel === 'linkedin_easy_apply' || job.channel === 'indeed_apply')) score += 15;
   if (job && job.applyUrl && !/(linkedin|indeed|glassdoor)\.com/i.test(String(job.applyUrl))) score += 15;

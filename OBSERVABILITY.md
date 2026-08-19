@@ -90,6 +90,9 @@ prior-application exclusions, and heuristic-priority candidates. Heuristic prior
 reported as genuine fit. Description misses include at most 12 description-free job examples for
 adapter triage. The `import` object additionally reports newly sourced, newly hydrated,
 description-updated, unchanged, evidence-preserved, and retired row counts when `write` is enabled.
+The `searchPolicy` object records the bounded query list, derived/explicit seniority band, and saved,
+level-variant, and adjacent query counts. `/supply-audit` reports the same band beside corpus and
+below-threshold seniority counts so discovery policy and bottleneck diagnosis cannot drift.
 Workday and SmartRecruiters detail misses carry normalized hydration statuses/reasons (`hydration_timeout`,
 `hydration_http_error`, `hydration_fetch_error`, or missing detail/payload) without response bodies.
 
@@ -101,6 +104,8 @@ separately reports `persistenceAcknowledged`. Normalization, freshness retention
 destination resolution, hydration, evidence scoring, qualification, and planning drops are reported
 by `/source-v2` and the dry apply plan; none may be described as “captured” merely because a card was
 seen. `pja_source_yield` retains a bounded rolling source/query/page history for future scheduling.
+Scheduling uses acknowledged `unique` and `persisted` yield; duplicate-only page-one volume must not
+outrank a query family that repeatedly contributes new persistent records.
 
 Browser enrichment exposes `completed`, `resolved`, and `hydrated`; official resolution also reports
 `resolved`, `ambiguous`, `noMatch`, and `identityMismatch`. Hydration outcomes stay explicit

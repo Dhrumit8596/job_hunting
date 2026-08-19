@@ -165,6 +165,13 @@ Key rules:
   challenge, or persistence failure. Indeed defaults to one page until the session proves clean;
   its full-navigation checkpoint must match source, query, and expected page and challenges stop
   the source without bypass.
+- `sourcing/search-policy.js` expands saved titles only into a bounded, audited adjacent-title list
+  and a profile-years-compatible level variant. Explicit saved titles win the 20-query budget.
+  Recent unique-persistence yield—not raw cards—orders query families. For an early/mid profile,
+  staff-plus postings are removed before corpus/scoring work; senior postings remain available for
+  requirement-level evidence scoring while Engineer I/II postings receive frontier priority.
+  An explicit targeted query set is merge-only by default: absence outside that subset is not proof
+  that a posting is dead, so it cannot retire unrelated corpus records without an explicit override.
 - Browser freshness uses immutable `firstDiscoveredAt`/`discoveredAt` for audit and `lastSeenAt` for
   freshness. Rediscovery merges query/page provenance while retaining unchanged descriptions and
   fingerprint-valid evidence. A newly acquired or changed description invalidates old score fields.

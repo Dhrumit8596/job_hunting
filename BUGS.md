@@ -120,3 +120,20 @@ new or changed descriptions invalidate scoring fields. Never restore the old tim
 pre-acknowledgement seen-set behavior. LinkedIn's trailing accessibility badge text (`with
 verification`) is removed at both collection and corpus-normalization boundaries so official-ATS
 identity matching uses the employer's actual title.
+
+## BUG 14 — Broad title searches over-weighted duplicate and staff-plus results — ✅ FIXED
+**Was:** query priority counted persistence but not new unique records, so duplicate-only broad
+Quality searches could outrank Process/Metrology/Inspection families with demonstrated new yield.
+The source filter also retained staff/principal/lead postings for a four-year early/mid profile even
+though existing score caps or evidence gaps made them non-qualifying.
+**Fix:** `sourcing/search-policy.js` derives a bounded resume-aligned seniority band and Engineer
+I/II variants without overriding explicit saved titles. Browser scheduling uses acknowledged unique
+yield, and early/mid sourcing rejects staff-plus roles while retaining senior roles for evidence
+review. Never turn a senior technician title into unsupported senior-engineer eligibility.
+
+## BUG 15 — Targeted query evaluations retired unrelated corpus records — ✅ FIXED
+**Was:** any passing `/source-v2` run set `replaceMissing`, including an explicit five-query title
+experiment. Records belonging to unqueried saved families could be retired even though that narrow
+run had supplied no evidence that their postings were dead.
+**Fix:** explicit query plans are merge-only by default. Only the complete saved-title policy—or an
+intentional `replaceMissing:true` operator override—may authoritatively retire missing records.

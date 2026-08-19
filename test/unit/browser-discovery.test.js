@@ -37,6 +37,22 @@ module.exports = async t => {
     query: 'Experimental Engineer', discovered: 10, persisted: 10, directRoute: 5,
   })))[0], 'Process Engineer',
   'browser discovery: two good observations improve priority without displacing exact target families');
+  const measured = prioritizeQueries(['Quality Engineer', 'Process Engineer', 'Metrology Engineer'], [
+    { query: 'Quality Engineer', discovered: 25, persisted: 7, unique: 0, directRoute: 4 },
+    { query: 'Quality Engineer', discovered: 25, persisted: 7, unique: 0, directRoute: 4 },
+    { query: 'Process Engineer', discovered: 25, persisted: 7, unique: 6, directRoute: 3 },
+    { query: 'Process Engineer', discovered: 25, persisted: 7, unique: 5, directRoute: 3 },
+    { query: 'Metrology Engineer', discovered: 25, persisted: 5, unique: 4, directRoute: 1 },
+    { query: 'Metrology Engineer', discovered: 25, persisted: 5, unique: 4, directRoute: 1 },
+  ]);
+  t.eq(measured.slice(0, 2), ['Process Engineer', 'Metrology Engineer'],
+    'browser discovery: measured unique yield moves productive title families ahead of duplicate-only queries');
+  const withLevelVariant = prioritizeQueries(['Quality Engineer', 'Process Engineer II', 'Process Engineer'], [
+    { query: 'Process Engineer', discovered: 25, persisted: 7, unique: 6, directRoute: 3 },
+    { query: 'Process Engineer', discovered: 25, persisted: 7, unique: 5, directRoute: 3 },
+  ]);
+  t.eq(withLevelVariant.slice(0, 2), ['Process Engineer', 'Process Engineer II'],
+    'browser discovery: Engineer II variants inherit productive family yield without displacing the measured base');
 
   const done = scanTerminal({ pja_scan_coverage: [{ source: 'linkedin', query: 'Process Engineer',
     collected: 25, easyApply: 7, external: 18, ts: 200 }] }, linkedin, 100);

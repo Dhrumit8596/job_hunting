@@ -153,7 +153,8 @@ document.getElementById('btn-save-profile').addEventListener('click', () => {
 const PREF_FIELDS = [
   'compensation', 'workMode', 'relocation', 'startDate', 'screeningStance',
   'targetLocationLabel', 'targetLocationCity', 'targetLocationState', 'targetLocationZip',
-  'targetLocationCountry', 'targetRadiusMiles', 'locationStrictness', 'remotePolicy', 'searchTitles'
+  'targetLocationCountry', 'targetRadiusMiles', 'locationStrictness', 'remotePolicy', 'searchTitles',
+  'searchSeniority'
 ];
 const DEFAULT_SEARCH_TITLES = [
   'quality engineer',
@@ -195,6 +196,7 @@ function deriveSearchPrefs(prefs, profile) {
   if (!next.targetRadiusMiles) next.targetRadiusMiles = '60';
   if (!next.locationStrictness) next.locationStrictness = 'hard';
   if (!next.remotePolicy) next.remotePolicy = 'us_or_ca_remote_allowed';
+  if (!next.searchSeniority) next.searchSeniority = 'auto';
   if (!next.searchTitles || !normalizedSearchTitles(next.searchTitles).trim()) {
     next.searchTitles = DEFAULT_SEARCH_TITLES.join('\n');
   }

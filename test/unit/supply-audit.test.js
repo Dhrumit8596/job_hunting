@@ -27,6 +27,7 @@ module.exports = async t => {
     },
   };
   const audit = summarizeSupply(corpus, { threshold: 75, candidateFingerprint: 'candidate-1',
+    seniorityBand: 'entry',
     now: Date.parse('2026-08-18T00:00:00Z'),
     isLocationEligible: posting => /Santa Clara|Remote/.test(posting.location) });
   t.eq(audit.total, 3, 'supply audit: reports whole corpus size');

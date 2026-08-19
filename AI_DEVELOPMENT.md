@@ -72,6 +72,10 @@ Runtime safeguards now in code:
   exact resume-supported titles, fresh complete descriptions, compatible seniority, and direct or
   native supported routes. Stop after 30 qualified reserves or when a scored round yields none;
   never lower the evidence threshold to improve apparent yield.
+- Title expansion is deterministic and bounded in `sourcing/search-policy.js`: saved titles have
+  precedence, adjacent titles must be audited against configured resume evidence, and level variants
+  come only from configured experience. Do not infer senior-engineer eligibility solely from a
+  senior technician title or spend model calls on staff-plus postings that the target band excludes.
 - `scoring-context.js` bounds each long posting to 7,000 characters while retaining its opening,
   requirement-bearing lines, nearby context, and closing.
 - Scoring evidence is cached by both job-description and candidate fingerprints.

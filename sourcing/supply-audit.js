@@ -4,6 +4,7 @@
 // evidence-qualified reserve. This module never consumes profile values or JD bodies.
 
 const DAY_MS = 24 * 60 * 60 * 1000;
+const { postingSeniority, isCompatiblePostingSeniority } = require('./search-policy');
 
 function norm(value) {
   return String(value == null ? '' : value).toLowerCase().replace(/[^a-z0-9+#.]+/g, ' ').trim();
@@ -24,12 +25,7 @@ function roleFamily(title) {
 }
 
 function seniority(title) {
-  const s = norm(title);
-  if (/\b(director|vice president|vp|head of|chief)\b/.test(s)) return 'leadership';
-  if (/\b(principal|staff|lead|manager|architect)\b/.test(s)) return 'staff_plus';
-  if (/\b(senior|sr)\b/.test(s)) return 'senior';
-  if (/\b(junior|jr|associate|entry|engineer i|engineer 1|engineer ii|engineer 2)\b/.test(s)) return 'early_career';
-  return 'unspecified_mid';
+  return postingSeniority(title);
 }
 
 function postingAgeDays(posting, now) {
@@ -61,11 +57,10 @@ function evidenceReady(state, threshold, candidateFingerprint) {
     /^(high|medium)$/i.test(String(state && state.confidence || ''));
 }
 
-function inferredBelowThresholdCause(posting, state) {
+function inferredBelowThresholdCause(posting, state, seniorityBand) {
   const family = roleFamily(posting && posting.title);
-  const level = seniority(posting && posting.title);
   if (family === 'other') return 'wrong_role_family';
-  if (/^(leadership|staff_plus|senior)$/.test(level)) return 'seniority_mismatch';
+  if (!isCompatiblePostingSeniority(posting && posting.title, seniorityBand || 'early_mid')) return 'seniority_mismatch';
   const evidence = Array.isArray(state && state.matchEvidence) ? state.matchEvidence.filter(Boolean) : [];
   const gaps = Array.isArray(state && state.gaps) ? state.gaps.filter(Boolean) : [];
   const conflicts = Array.isArray(state && state.conflicts) ? state.conflicts.filter(Boolean) : [];
@@ -135,6 +130,7 @@ function summarizeSupply(corpus, opts = {}) {
   const result = {
     total: Object.keys(index).length,
     threshold,
+    seniorityBand: opts.seniorityBand || 'early_mid',
     scored: 0,
     unscored: 0,
     atOrAboveThreshold: 0,
@@ -186,7 +182,7 @@ function summarizeSupply(corpus, opts = {}) {
     } else {
       inc(result.belowThresholdByRoleFamily, family);
       inc(result.belowThresholdBySeniority, level);
-      inc(result.belowThresholdCauseInference, inferredBelowThresholdCause(p, st));
+      inc(result.belowThresholdCauseInference, inferredBelowThresholdCause(p, st, result.seniorityBand));
     }
   }
   const inferred = Object.entries(result.belowThresholdCauseInference).sort((a, b) => b[1] - a[1]);

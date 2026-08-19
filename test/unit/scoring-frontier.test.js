@@ -34,4 +34,11 @@ module.exports = t => {
   ], { candidateFingerprint: 'current' });
   t.eq(mismatchFirst.map(job => job.id), ['stale', 'cached'],
     'scoring frontier: candidate-fingerprint mismatches are prioritized ahead of unchanged scores');
+  const levelOrdered = Frontier.sortForScoring([
+    { id: 'staff', title: 'Staff Process Engineer', descriptionReady: true },
+    { id: 'senior', title: 'Senior Process Engineer', descriptionReady: true },
+    { id: 'level-two', title: 'Process Engineer II', descriptionReady: true },
+  ], { seniorityBand: 'early_mid' });
+  t.eq(levelOrdered.map(job => job.id), ['level-two', 'senior', 'staff'],
+    'scoring frontier: resume-aligned Engineer II roles precede senior and staff stretches');
 };

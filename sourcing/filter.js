@@ -1,6 +1,8 @@
 'use strict';
 // Pure filters for sourced jobs. Tunable later via the opts argument.
 
+const { isCompatiblePostingSeniority } = require('./search-policy');
+
 // TN-eligible titles: must read as an ENGINEER or SCIENTIST role.
 // Exclude non-eligible seniorities/roles (technician/operator/associate/supervisor/
 // manager/director/lead/principal-as-mgmt/intern) and clearly off-domain software/sales.
@@ -174,6 +176,7 @@ function filterJobs(jobs, opts = {}) {
   const nationwideUS = opts.nationwideUS === true;
   return jobs.filter(j => {
     if (!isEligibleTitle(j.title)) return false;
+    if (opts.seniorityBand && !isCompatiblePostingSeniority(j.title, opts.seniorityBand)) return false;
     // export-control: drop on company-level blocklist OR any ITAR/EAR text in title+company+desc
     if (isExportControlledCompany(j.company)) return false;
     if (isItarExcluded([j.title, j.company, j.description].filter(Boolean).join(' '))) return false;

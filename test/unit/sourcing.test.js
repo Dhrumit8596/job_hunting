@@ -80,6 +80,13 @@ module.exports = (t) => {
     makeJob({ id: 7, title: 'Quality Engineer', company: 'E', location: 'Irvine, CA' }),
   ]), { locationStrictness: 'hard', targetLocation: bayTarget, targetRadiusMiles: 60, remotePolicy: 'us_or_ca_remote_allowed' });
   t.eq(hardTargeted.map(x => x.id), ['1', '4'], 'filterJobs: hard target radius drops outside-radius CA jobs even when relocation is yes elsewhere');
+  const seniorityTargeted = filterJobs([
+    makeJob({ id: 8, title: 'Process Engineer II', company: 'A', location: 'Fremont, CA' }),
+    makeJob({ id: 9, title: 'Senior Process Engineer', company: 'B', location: 'Fremont, CA' }),
+    makeJob({ id: 10, title: 'Staff Process Engineer', company: 'C', location: 'Fremont, CA' }),
+  ], { seniorityBand: 'early_mid' });
+  t.eq(seniorityTargeted.map(x => x.id), ['8', '9'],
+    'filterJobs: early/mid sourcing keeps evidence-reviewable senior roles but removes staff-plus mismatches');
   t.eq(isEligibleTargetLocation('United States - California - Temecula', false,
     { locationStrictness: 'hard', targetLocation: bayTarget, targetRadiusMiles: 60, remotePolicy: 'us_or_ca_remote_allowed' }), false,
     'hard target radius fails closed for unknown/out-of-radius California cities');

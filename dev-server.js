@@ -30,6 +30,7 @@ const ApplyRunControl = require('./apply-run-control');
 const ApplyReportHealth = require('./apply-report-health');
 const LocalJsonClient = require('./local-json-client');
 const ScoringFrontier = require('./scoring-frontier');
+const SearchPolicy = require('./sourcing/search-policy');
 const SourceSafety = require('./sourcing/source-safety');
 const { decideRecovery } = require('./apply-recovery-policy');
 
@@ -54,7 +55,10 @@ const REPORT_ONLY_COVERAGE_STRATEGIES = ['eightfold', 'successfactors', 'jobicy'
 // Adjacent titles already supported by the configured candidate's evidence-backed sourcing policy.
 // These supplement (never replace) saved titles; qualification still requires resume/JD evidence.
 const SUPPORTED_ADJACENT_SEARCH_TITLES = [
-  'manufacturing engineer', 'reliability engineer', 'product development engineer',
+  'wafer inspection engineer', 'semiconductor metrology engineer',
+  'semiconductor process engineer', 'yield engineer', 'manufacturing engineer',
+  'process integration engineer', 'process development engineer', 'process quality engineer',
+  'product quality engineer', 'reliability engineer', 'product development engineer',
 ];
 
 // Candidate-specific analyzer prompt is loaded from candidate.local.txt (gitignored) so no
@@ -3049,12 +3053,15 @@ ${(description || '').slice(0, 6000)}`;
         const familyQueries = Array.isArray(o.queryFamilies) ? o.queryFamilies
           .flatMap(family => Array.isArray(family && family.queries) ? family.queries : []) : [];
         const explicitQueries = Array.isArray(o.queries) && o.queries.length ? o.queries : familyQueries;
-        const queryInputs = explicitQueries.length ? explicitQueries
-          : [...prefQueries, ...SUPPORTED_ADJACENT_SEARCH_TITLES];
-        const queries = queryInputs.length
-          ? queryInputs
-            .map(q => String(q || '').trim()).filter(Boolean)
-          : [];
+        const searchPolicy = explicitQueries.length
+          ? { queries: explicitQueries.map(q => String(q || '').trim()).filter(Boolean),
+            seniorityBand: SearchPolicy.inferCandidateSeniority(st.pja_profile || {}, prefs),
+            savedCount: prefQueries.filter(Boolean).length, variantCount: 0, adjacentCount: 0,
+            explicit: true }
+          : { ...SearchPolicy.buildSearchQueries({ savedTitles: prefQueries,
+            adjacentTitles: SUPPORTED_ADJACENT_SEARCH_TITLES,
+            profile: st.pja_profile || {}, prefs, limit: 20 }), explicit: false };
+        const queries = searchPolicy.queries;
         const requiredChannels = Array.isArray(o.requiredChannels) ? o.requiredChannels
           .map(x => String(x || '').trim()).filter(Boolean) : [];
         const guard = stage => sourcingGuardDecision(guardOptions, stage);
@@ -3123,6 +3130,7 @@ ${(description || '').slice(0, 6000)}`;
           targetRadiusMiles,
           locationStrictness,
           remotePolicy,
+          seniorityBand: searchPolicy.seniorityBand,
           browserJobs,
           discoveryAdapters,
           maxBrowserAgeMs: o.maxBrowserAgeMs != null ? Number(o.maxBrowserAgeMs) : 48 * 60 * 60 * 1000,
@@ -3130,19 +3138,21 @@ ${(description || '').slice(0, 6000)}`;
         if (browserScan) report.browserScan = browserScan;
         if (browserDiscovery) report.browserDiscovery = browserDiscovery;
         report.browserEnrichment = browserEnrichment;
+        report.searchPolicy = searchPolicy;
 
         let wrote = 0;
         if (write) {
           await assertGuard('before_corpus_import');
           const importTimeoutMs = Math.max(250, Math.min(120000,
             SourceSafety.remainingDeadlineMs(sourceWindow.deadlineMs)));
+          const retirement = SearchPolicy.corpusRetirementDecision(searchPolicy, o.replaceMissing,
+            report.gate, o.autonomousApplyOnly === true);
           const imported = await wsAsk('importCorpus', { index: store.index, state: store.state,
             runId: guardOptions.runId || null,
             deadlineMs: sourceWindow.deadlineMs,
             // Only retire records absent from this run when the fresh corpus itself passed its
             // supply/quality gate; a transient partial run must not wipe healthy prior coverage.
-            replaceMissing: report.gate.pass || (o.autonomousApplyOnly === true &&
-              report.gate.atLeastTarget && report.gate.atLeast2Modalities && report.gate.hasDirectSource) }, 'importCorpusReply', importTimeoutMs);
+            replaceMissing: retirement.replaceMissing }, 'importCorpusReply', importTimeoutMs);
           if (!imported || imported.error || imported.ok === false) {
             const importReason = imported && imported.error || 'corpus_import_unacknowledged';
             if (/^(source_ownership_lost|sourcing_deadline_exceeded|extension_disconnected)$/.test(importReason)) {
@@ -3160,6 +3170,7 @@ ${(description || '').slice(0, 6000)}`;
             unchanged: Number(imported.unchanged || 0),
             preservedEvidence: Number(imported.preservedEvidence || 0),
             retired: Number(imported.retired || 0),
+            retirementAuthoritative: retirement.authoritative,
           };
         }
         return { wrote, report, storageReadAttempts: storageRead.attempts };
@@ -3195,6 +3206,7 @@ ${(description || '').slice(0, 6000)}`;
         const audit = summarizeSupply(corpus, {
           threshold: o.threshold != null ? Number(o.threshold) : 75,
           candidateFingerprint: runtimeCandidateFingerprint,
+          seniorityBand: SearchPolicy.inferCandidateSeniority(targetFilter.profile || {}, targetFilter.prefs || {}),
           queryFamilies: Array.isArray(o.queryFamilies) ? o.queryFamilies : [],
           isLocationEligible: hardLocation
             ? posting => isEligibleTargetLocation(posting.location, posting.remote, targetFilter)
@@ -3415,8 +3427,10 @@ ${(description || '').slice(0, 6000)}`;
             if (!hydrated) planningDrops = appendPlanningDrop(planningDrops, j, 'rescore_missing_description', planningDropLimit);
             return hydrated;
           });
+          const scoringSeniorityBand = SearchPolicy.inferCandidateSeniority(
+            targetFilter.profile || {}, targetFilter.prefs || {});
           jobs = ScoringFrontier.sortForScoring(jobs,
-            { candidateFingerprint: runtimeCandidateFingerprint });
+            { candidateFingerprint: runtimeCandidateFingerprint, seniorityBand: scoringSeniorityBand });
           const frontier = ScoringFrontier.partition(jobs,
             { limit: scoreCandidateLimit, candidateFingerprint: runtimeCandidateFingerprint });
           const { reusable, needsScore } = frontier;

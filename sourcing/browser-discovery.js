@@ -21,7 +21,14 @@ function locationText(target) {
 const TARGET_ORDER = ['quality engineer', 'manufacturing quality engineer', 'process engineer',
   'metrology engineer', 'inspection engineer', 'supplier quality engineer', 'validation engineer',
   'test engineer', 'equipment engineer', 'failure analysis engineer', 'manufacturing engineer',
-  'reliability engineer', 'product development engineer'];
+  'reliability engineer', 'product development engineer', 'wafer inspection engineer',
+  'semiconductor metrology engineer', 'semiconductor process engineer', 'yield engineer',
+  'process integration engineer', 'process development engineer', 'process quality engineer',
+  'product quality engineer'];
+
+function baseLevelQuery(value) {
+  return String(value || '').toLowerCase().replace(/\s+(?:i|ii|iii|iv|[1-4])$/i, '').trim();
+}
 
 function prioritizeQueries(values, yieldRows = []) {
   const queries = boundedQueries(values, 20);
@@ -29,9 +36,10 @@ function prioritizeQueries(values, yieldRows = []) {
   for (const row of yieldRows || []) {
     const key = String(row && row.query || '').trim().toLowerCase();
     if (!key) continue;
-    const current = stats.get(key) || { observations: 0, discovered: 0, persisted: 0, direct: 0 };
+    const current = stats.get(key) || { observations: 0, discovered: 0, persisted: 0, unique: 0, direct: 0 };
     current.observations++; current.discovered += Number(row.discovered || 0);
-    current.persisted += Number(row.persisted || 0); current.direct += Number(row.directRoute || 0);
+    current.persisted += Number(row.persisted || 0); current.unique += Number(row.unique || 0);
+    current.direct += Number(row.directRoute || 0);
     stats.set(key, current);
   }
   const originalOrder = new Map(queries.map((query, index) => [query, index]));
@@ -39,10 +47,15 @@ function prioritizeQueries(values, yieldRows = []) {
     const score = query => {
       const key = query.toLowerCase();
       const exact = TARGET_ORDER.indexOf(key);
-      let value = exact >= 0 ? 1000 - exact * 20 : 300;
-      const measured = stats.get(key);
-      if (measured && measured.observations >= 2) value += Math.min(250,
-        measured.persisted * 3 + measured.direct * 2 - Math.max(0, measured.discovered - measured.persisted));
+      const baseKey = baseLevelQuery(key);
+      const base = TARGET_ORDER.indexOf(baseKey);
+      let value = exact >= 0 ? 1000 - exact * 20 : base >= 0 ? 970 - base * 20 : 300;
+      // An unobserved Engineer I/II variant inherits only its base query's measured family yield;
+      // the variant still needs its own observations before it can outrank the productive base.
+      const measured = stats.get(key) || (base !== exact ? stats.get(baseKey) : null);
+      if (measured && measured.observations >= 2) value += Math.min(350,
+        measured.unique * 12 + measured.persisted * 2 + measured.direct * 2 -
+        Math.max(0, measured.discovered - measured.persisted));
       return value;
     };
     return score(b) - score(a) || originalOrder.get(a) - originalOrder.get(b);

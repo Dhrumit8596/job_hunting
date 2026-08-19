@@ -195,6 +195,17 @@
           <option value="no_remote">No remote unless location is in target</option>
         </select>
       </div>
+      <div class="form-group">
+        <label>Target seniority</label>
+        <select id="pref-searchSeniority">
+          <option value="auto">Resume-aligned (recommended)</option>
+          <option value="entry">Entry / Engineer I</option>
+          <option value="early_mid">Engineer I–II / mid-level</option>
+          <option value="mid_senior">Mid-level / senior</option>
+          <option value="senior">Senior / staff</option>
+        </select>
+        <div class="help">Auto uses configured experience to add level-specific searches and suppress implausible staff-plus results.</div>
+      </div>
       <div class="form-group full"><label>Search titles / queries</label><textarea id="pref-searchTitles" rows="4" placeholder="quality engineer&#10;manufacturing quality engineer&#10;inspection engineer&#10;metrology engineer"></textarea></div>
       <div class="form-group full">
         <label><input id="pref-advancedUi" type="checkbox" style="width:auto;margin-right:6px"> Show Advanced / Developer apply controls</label>
