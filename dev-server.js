@@ -573,6 +573,32 @@ function wsAsk(cmd, payload, replyCmd, timeoutMs = 8000) {
   });
 }
 
+async function observeApplyRun(runId, options = {}) {
+  const data = await wsAsk('getApplyRunSnapshot', {
+    runId: String(runId || ''),
+    includeEvents: options.includeEvents === true,
+  }, 'applyRunSnapshotReply', options.timeoutMs || 8000);
+  if (!data || data.observed !== true) {
+    return { observed: false, error: data && data.error || 'apply run observer unavailable', run: null,
+      slot: null, events: [] };
+  }
+  return { observed: true, error: null, run: data.run || null, slot: data.slot || null,
+    events: Array.isArray(data.events) ? data.events : [] };
+}
+
+function storageFromObservedApplyRun(observation) {
+  const storage = {};
+  if (!observation || !observation.run) return storage;
+  const key = observation.slot === 'completed' ? 'pja_last_completed_apply_run'
+    : observation.slot === 'control' ? 'pja_apply_run_control' : 'pja_ranked_apply';
+  storage[key] = observation.run;
+  if (Array.isArray(observation.events)) {
+    storage.pja_application_ledger = { schemaVersion: 1, events: Object.fromEntries(
+      observation.events.map((event, index) => [event.eventId || `observed_${index}`, event])) };
+  }
+  return storage;
+}
+
 function applicationAuditFromStorage(storage, options = {}) {
   const Ledger = require('./application-ledger');
   let ledger = storage && storage.pja_application_ledger || Ledger.emptyLedger();
@@ -1569,13 +1595,16 @@ function appendPlanningDrop(planningDrops, job, reason, dropLimit = 200) {
 
 async function oneClickPreflight(options = {}) {
   const status = await refreshRuntimeCandidateProfile();
-  const storage = wsClients.size ? await getStorageFromExtension(['pja_ranked_apply', 'pja_apply_run_control'], 5000) : {};
-  const activeRanked = storage && storage.pja_ranked_apply && /^(applying|paused_for_patch|paused_for_fix)$/i
+  const runObservation = wsClients.size ? await observeApplyRun('', { timeoutMs: 5000 })
+    : { observed: false, run: null, slot: null, events: [] };
+  const storage = storageFromObservedApplyRun(runObservation);
+  const activeRanked = storage && storage.pja_ranked_apply && /^(planning|applying|paused_for_patch|paused_for_fix)$/i
     .test(String(storage.pja_ranked_apply.status || ''));
   const activeControl = activeApplyRunControl(storage && storage.pja_apply_run_control);
   const active = activeRanked || activeControl;
   const problems = [];
   if (wsClients.size < 1) problems.push('extension_not_connected');
+  else if (!runObservation.observed) problems.push('application_run_state_unavailable');
   if (options.requireCandidateProfile !== false && !status.configured) problems.push('candidate_profile_not_configured');
   if (options.requireResume !== false && !status.resume) problems.push('resume_not_configured');
   if (active && options.force !== true) problems.push('active_ranked_apply_run');
@@ -1847,22 +1876,32 @@ async function handleRequest(req, res) {
   if (req.method === 'GET' && runStatusMatch) {
     try {
       const runId = safeReportId(decodeURIComponent(runStatusMatch[1] || ''));
-      const st = await getStorageFromExtension([
-        'pja_ranked_apply', 'pja_last_completed_apply_run', 'pja_apply_run_control', 'pja_application_ledger',
-        'pja_applied_log', 'pja_apply_diagnostics', 'pja_last_apply_failure', 'pja_dbg',
-        // Terminal exact-run reads auto-export the report. Include the same sanitized health
-        // inputs as /export-apply-report so a status poll cannot overwrite known-good preflight
-        // health with "unknown".
-        'pja_profile', 'pja_profile_restored_from_backup', 'pja_profile_write_rejected',
-        'pja_resume_filename',
-      ], 8000);
-      const selected = ApplyProgress.runFromStorage(st || {}, runId);
-      if (!selected) {
+      const observation = await observeApplyRun(runId, { timeoutMs: 8000 });
+      if (!observation.observed) {
+        res.writeHead(503, CORS);
+        res.end(JSON.stringify({ ok: false, code: 'application_run_state_unavailable',
+          error: observation.error, retryable: true, runId, clients: wsClients.size }));
+        return;
+      }
+      if (!observation.run) {
         res.writeHead(404, CORS);
         res.end(JSON.stringify({ ok: false, error: 'apply run not found', runId, clients: wsClients.size }));
         return;
       }
-      const autoReport = isTerminalApplyStatus(selected.status) ? writeApplyRunReport(st || {}, { runId }) : null;
+      const st = storageFromObservedApplyRun(observation);
+      const selected = observation.run;
+      let autoReport = null;
+      if (isTerminalApplyStatus(selected.status)) {
+        const reportStorage = await getStorageFromExtension([
+          'pja_ranked_apply', 'pja_last_completed_apply_run', 'pja_apply_run_control', 'pja_application_ledger',
+          'pja_applied_log', 'pja_apply_diagnostics', 'pja_last_apply_failure', 'pja_dbg',
+          'pja_profile', 'pja_profile_restored_from_backup', 'pja_profile_write_rejected',
+          'pja_resume_filename',
+        ], 5000);
+        if (ApplyProgress.runFromStorage(reportStorage || {}, runId)) {
+          autoReport = writeApplyRunReport(reportStorage || {}, { runId });
+        }
+      }
       const status = summarizeApplyStatus(st || {}, { runId, reportPath: autoReport && autoReport.file });
       status.report = autoReport;
       status.recovery = decideRecovery(status.run);
@@ -1878,14 +1917,19 @@ async function handleRequest(req, res) {
   if (req.method === 'GET' && runEventsMatch) {
     try {
       const runId = safeReportId(decodeURIComponent(runEventsMatch[1] || ''));
-      const st = await getStorageFromExtension([
-        'pja_ranked_apply', 'pja_last_completed_apply_run', 'pja_apply_run_control', 'pja_application_ledger',
-      ], 8000);
-      if (!ApplyProgress.runFromStorage(st || {}, runId)) {
+      const observation = await observeApplyRun(runId, { includeEvents: true, timeoutMs: 8000 });
+      if (!observation.observed) {
+        res.writeHead(503, CORS);
+        res.end(JSON.stringify({ ok: false, code: 'application_run_state_unavailable',
+          error: observation.error, retryable: true, runId, clients: wsClients.size }));
+        return;
+      }
+      if (!observation.run) {
         res.writeHead(404, CORS);
         res.end(JSON.stringify({ ok: false, error: 'apply run not found', runId, clients: wsClients.size }));
         return;
       }
+      const st = storageFromObservedApplyRun(observation);
       const after = Number(parsedRequestUrl.searchParams.get('after')) || 0;
       const events = ApplyProgress.runEvents(st || {}, { runId, after, limit: parsedRequestUrl.searchParams.get('limit') });
       const nextCursor = events.length ? events[events.length - 1].cursor : after;
@@ -1924,28 +1968,34 @@ async function handleRequest(req, res) {
 
   if (req.method === 'GET' && parsedRequestUrl.pathname === '/apply-status') {
     try {
-      const st = await getStorageFromExtension([
-        'pja_ranked_apply',
-        'pja_last_completed_apply_run',
-        'pja_apply_run_control',
-        'pja_application_ledger',
-        'pja_applied_log',
-        'pja_apply_diagnostics',
-        'pja_last_apply_failure',
-        'pja_dbg',
-        'pja_profile',
-        'pja_profile_restored_from_backup',
-        'pja_profile_write_rejected',
-        'pja_resume_filename',
-      ], 8000);
       const requestedRunId = parsedRequestUrl.searchParams.get('runId');
-      if (requestedRunId && !ApplyProgress.runFromStorage(st || {}, safeReportId(requestedRunId))) {
-        res.writeHead(404, CORS);
-        res.end(JSON.stringify({ ok: false, error: 'apply run not found', runId: safeReportId(requestedRunId), clients: wsClients.size }));
+      const safeRunId = requestedRunId ? safeReportId(requestedRunId) : '';
+      const observation = await observeApplyRun(safeRunId, { timeoutMs: 8000 });
+      if (!observation.observed) {
+        res.writeHead(503, CORS);
+        res.end(JSON.stringify({ ok: false, code: 'application_run_state_unavailable',
+          error: observation.error, retryable: true, runId: safeRunId || null, clients: wsClients.size }));
         return;
       }
-      const status = summarizeApplyStatus(st || {}, { runId: requestedRunId ? safeReportId(requestedRunId) : undefined });
-      const autoReport = maybeAutoExportApplyReport(st || {});
+      if (requestedRunId && !observation.run) {
+        res.writeHead(404, CORS);
+        res.end(JSON.stringify({ ok: false, error: 'apply run not found', runId: safeRunId, clients: wsClients.size }));
+        return;
+      }
+      const st = storageFromObservedApplyRun(observation);
+      const status = summarizeApplyStatus(st || {}, { runId: safeRunId || undefined });
+      let autoReport = null;
+      if (observation.run && isTerminalApplyStatus(observation.run.status)) {
+        const reportStorage = await getStorageFromExtension([
+          'pja_ranked_apply', 'pja_last_completed_apply_run', 'pja_apply_run_control', 'pja_application_ledger',
+          'pja_applied_log', 'pja_apply_diagnostics', 'pja_last_apply_failure', 'pja_dbg',
+          'pja_profile', 'pja_profile_restored_from_backup', 'pja_profile_write_rejected',
+          'pja_resume_filename',
+        ], 5000);
+        if (ApplyProgress.runFromStorage(reportStorage || {}, observation.run.runId)) {
+          autoReport = writeApplyRunReport(reportStorage || {}, { runId: observation.run.runId });
+        }
+      }
       if (autoReport) status.report = autoReport;
       res.writeHead(200, CORS);
       res.end(JSON.stringify(status));
@@ -1958,6 +2008,9 @@ async function handleRequest(req, res) {
 
   if (req.method === 'GET' && req.url === '/health') {
     const effective = await resolveEffectiveAiEngine({ force: true });
+    const extensionPing = wsClients.size
+      ? await wsAsk('pingExtension', {}, 'pingExtensionReply', 1500)
+      : { error: 'no extension connected' };
     const aiConfig = effective.engine === 'codex'
       ? { model: codexModel(), reasoningEffort: codexReasoningEffort() }
       : { model: 'haiku', reasoningEffort: null };
@@ -1968,7 +2021,9 @@ async function handleRequest(req, res) {
       engineSource: effective.source,
       processEngine: `${PROCESS_AI_ENGINE}-cli`,
       aiConfig,
-      clients: wsClients.size
+      clients: wsClients.size,
+      extensionResponsive: extensionPing && extensionPing.ok === true,
+      extensionBuild: extensionPing && extensionPing.build || null,
     }));
     return;
   }

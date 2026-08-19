@@ -4,6 +4,7 @@ const path = require('path');
 require(path.resolve(__dirname, '../../sourcing/detect-ats'));
 const Evidence = require(path.resolve(__dirname, '../../scoring-evidence'));
 const { buildApplySet, buildApplyPlan, resultToState, poolStatus, roleKey, greenhouseEmbedFallback, exceededBudget,
+  externalJobBudgetOptions,
   watchdogDecision, queueJobKey, unsupportedAutonomousApplyReason, applyCapabilityStatus,
   hasUsableDescription, applyUrlKey, linkedinJobId } = require(path.resolve(__dirname, '../../sourcing/apply-select'));
 
@@ -253,6 +254,8 @@ module.exports = (t) => {
   t.eq(resultToState('workday_create_rejected_no_visible_error', 0).status, 'needs_manual', 'Workday create rejected/no visible error → manual deferral');
   t.eq(resultToState('workday_account_exists_wrong_password', 0).status, 'needs_manual', 'Workday account exists/wrong password → manual deferral');
   t.eq(resultToState('workday_duplicate_record', 0).status, 'needs_manual', 'Workday duplicate draft record → manual deferral');
+  t.eq(resultToState('ownership_lost_ext_current_advanced', 0).status, 'needs_manual',
+    'ranked ownership loss is manual/non-retryable instead of an inferred failure');
   t.eq(resultToState('missing_required', 0).status, 'sourced', 'transient first fail → stays sourced (retry)');
   t.eq(resultToState('missing_required', 0).retry, true, 'transient marks retry');
   t.eq(resultToState('missing_required', 0, 1).status, 'needs_manual', 'E2E-safe maxAttempts=1 defers transient first fail');
@@ -271,6 +274,13 @@ module.exports = (t) => {
   t.eq(exceededBudget({ firstSeen: 1000, loads: 5 }, 1000 + 1000), true, 'over load budget (5 loads > 4)');
   t.eq(exceededBudget({ firstSeen: 1000, loads: 2 }, 1000 + 10000, { budgetMs: 5000 }), true, 'custom budgetMs honored');
   t.eq(exceededBudget({ firstSeen: 1000, loads: 10 }, 1000 + 1000, { maxLoads: 20 }), false, 'custom maxLoads honored');
+  const srBudget = externalJobBudgetOptions('jobs.smartrecruiters.com');
+  t.eq(exceededBudget({ firstSeen: 1000, loads: 5 }, 1000 + 60000, srBudget), false,
+    'SmartRecruiters: five fast landing handoffs do not exhaust the application budget');
+  t.eq(exceededBudget({ firstSeen: 1000, loads: 9 }, 1000 + 60000, srBudget), true,
+    'SmartRecruiters: the expanded landing budget remains bounded');
+  t.eq(externalJobBudgetOptions('tenant.wd1.myworkdayjobs.com').maxLoads, 12,
+    'Workday retains its longer auth/form reload budget');
 
   // --- watchdogDecision (SW-side force-advance) ---
   const Q = { status: 'applying', currentIndex: 2, runId: 'r1', jobs: [1, 2, 3, 4] };

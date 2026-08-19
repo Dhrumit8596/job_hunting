@@ -407,6 +407,16 @@
     return (now - (entry.firstSeen || now)) > budgetMs || (entry.loads || 0) > maxLoads;
   }
 
+  function externalJobBudgetOptions(hostname) {
+    const host = String(hostname || '').toLowerCase();
+    if (/workday\.com|myworkdayjobs\.com/.test(host)) return { budgetMs: 12 * 60 * 1000, maxLoads: 12 };
+    // SmartRecruiters' public posting can perform several full-page handoffs before /oneclick-ui
+    // hydrates. Five quick loads are not proof of a stalled form; keep the wall-clock bound while
+    // allowing the trusted landing click enough redirects to reach the application SPA.
+    if (/smartrecruiters\.com/.test(host)) return { budgetMs: 7 * 60 * 1000, maxLoads: 8 };
+    return {};
+  }
+
   function queueJobKey(job) {
     if (!job || typeof job !== 'object') return '';
     const url = applyUrlKey(job.applyUrl || job.listingUrl);
@@ -444,6 +454,7 @@
   const NEEDS_MANUAL = new Set(['workday_captcha', 'captcha', 'captcha_or_antibot', 'captcha_after_submit', 'email_verification_required',
     'linkedin_checkpoint', 'daily_limit', 'linkedin_daily_limit', 'chatbot_apply_manual',
     'ready_to_submit_review', 'stuck_budget', 'handler_timeout', 'success_unverified', 'unsupported_strategy',
+    'ownership_lost_ext_current_advanced',
     // These are stable ATS/UI blockers observed in live runs. Retrying them three times only
     // burns the batch budget; defer for manual review and let the queue advance immediately.
     'no_apply_btn_on_description', 'no_apply_path', 'no_submit_btn', 'wd_selectinput_blocked',
@@ -488,7 +499,7 @@
   }
 
   const API = { buildApplySet, buildApplyPlan, resultToState, poolStatus, roleKey, applyUrlKey, linkedinJobId, stableRecordId,
-    recordIdentityIds, appliedIdentity, greenhouseEmbedFallback, exceededBudget, queueJobKey,
+    recordIdentityIds, appliedIdentity, greenhouseEmbedFallback, exceededBudget, externalJobBudgetOptions, queueJobKey,
     watchdogDecision, unsupportedAutonomousApplyReason, applyCapabilityStatus, hasUsableDescription,
     evidenceMaterialGaps, hasCurrentScoringPolicy };
   if (root) root.PJAApplySelect = API;

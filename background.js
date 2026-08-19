@@ -14,6 +14,7 @@ try {
 // Nano (SLM) is disabled when DEV_MODE is true.
 const DEV_MODE = true;
 const DEV_SERVER = 'http://localhost:6174';
+const PJA_RUNTIME_BUILD = 'apply-observer-v2';
 
 function pjaSanitizeProfileForRuntimeQueue(profile) {
   const src = profile && typeof profile === 'object' ? profile : {};
@@ -500,6 +501,78 @@ function pjaCompactCompletedRankedRun(master, extra = {}) {
   };
 }
 
+// The dev-server watcher must not pull the description-rich ranked run, applied log, profile, and
+// full ledger merely to learn whether one exact run is active. Under browser pressure that large
+// storageReply can time out after the run was durably admitted, which used to become a false 404.
+// Return a run-shaped, privacy-safe snapshot that is sufficient for ApplyProgress/status views.
+function pjaCompactObservedApplyRun(run) {
+  if (!run || !run.runId) return null;
+  const results = pjaCompactRankedResults(run.results);
+  const counts = pjaRankedBucketCounts(results);
+  return {
+    schemaVersion: 2,
+    runId: run.runId,
+    status: run.status || '',
+    phase: run.phase || '',
+    category: run.category || '',
+    runMode: run.runMode || (run.applyAllAboveScore ? 'all_above_score' : 'target_confirmed'),
+    applyAllAboveScore: !!run.applyAllAboveScore,
+    targetConfirmed: run.targetConfirmed != null ? run.targetConfirmed : null,
+    dailyTarget: run.dailyTarget != null ? run.dailyTarget : null,
+    attemptCap: run.attemptCap != null ? run.attemptCap : null,
+    threshold: run.threshold != null ? run.threshold : null,
+    currentIndex: run.currentIndex != null ? run.currentIndex : 0,
+    inFlightIndex: run.inFlightIndex != null ? run.inFlightIndex : null,
+    inFlightTabId: run.inFlightTabId != null ? run.inFlightTabId : null,
+    inFlightAt: run.inFlightAt || null,
+    handlerTimeoutMs: run.handlerTimeoutMs != null ? run.handlerTimeoutMs : null,
+    workdayAttemptTimeoutMs: run.workdayAttemptTimeoutMs != null ? run.workdayAttemptTimeoutMs : null,
+    confirmedCount: run.confirmedCount != null ? run.confirmedCount : counts.confirmed,
+    remaining: run.remaining != null ? run.remaining : null,
+    counts,
+    jobs: Array.isArray(run.jobs) ? run.jobs.map(pjaCompactRankedJob).filter(Boolean) : [],
+    results,
+    blockedChannels: Array.isArray(run.blockedChannels) ? run.blockedChannels.slice(0, 20) : [],
+    startedAt: run.startedAt || null,
+    updatedAt: run.updatedAt || null,
+    lastTransitionAt: run.lastTransitionAt || null,
+    finishedAt: run.finishedAt || null,
+    terminalReason: run.terminalReason || '',
+    reportPath: run.reportPath || '',
+  };
+}
+
+function pjaSelectObservedApplyRun(storage, requestedRunId) {
+  const candidates = [
+    { slot: 'active', run: storage && storage.pja_ranked_apply },
+    { slot: 'completed', run: storage && storage.pja_last_completed_apply_run },
+    { slot: 'control', run: storage && storage.pja_apply_run_control },
+  ].filter(candidate => candidate.run && candidate.run.runId);
+  if (requestedRunId) return candidates.find(candidate => candidate.run.runId === requestedRunId) || null;
+  return candidates.find(candidate => /^(planning|applying|paused_for_patch|paused_for_fix)$/i.test(String(candidate.run.status || '')))
+    || candidates[0] || null;
+}
+
+function pjaCompactObservedRunEvents(ledger, runId) {
+  return Object.values(ledger && ledger.events || {})
+    .filter(event => event && event.runId === runId)
+    .sort((a, b) => Number(a.occurredAt || a.applicationAt) - Number(b.occurredAt || b.applicationAt))
+    .slice(-200)
+    .map(event => ({
+      eventId: event.eventId || event.id || '',
+      runId,
+      jobId: event.jobId || event.id || '',
+      status: event.status || '',
+      reason: event.reason || '',
+      company: event.company || '',
+      title: event.title || '',
+      channel: event.channel || '',
+      phase: event.phase || '',
+      applicationAt: event.applicationAt || null,
+      occurredAt: event.occurredAt || event.applicationAt || null,
+    }));
+}
+
 async function pjaPersistCompletedRankedRun(master, extra = {}) {
   if (!master || !master.runId) return null;
   const snapshot = pjaCompactCompletedRankedRun(master, extra);
@@ -566,6 +639,19 @@ async function pjaReinjectRankedTab(tabId, reason) {
   }
 }
 
+async function pjaRankedExternalApplyLoaded(tabId) {
+  if (tabId == null) return false;
+  try {
+    const results = await chrome.scripting.executeScript({
+      target: { tabId },
+      func: () => window.__pjaExtApplyLoaded === true,
+    });
+    return Array.isArray(results) && results.some(result => result && result.result === true);
+  } catch (_) {
+    return false;
+  }
+}
+
 function pjaScheduleRankedReinject(runId, index, tabId, delayMs) {
   if (!runId || tabId == null) return;
   setTimeout(async () => {
@@ -574,6 +660,11 @@ function pjaScheduleRankedReinject(runId, index, tabId, delayMs) {
       const master = d.pja_ranked_apply;
       if (!master || master.runId !== runId || master.status !== 'applying') return;
       if (master.currentIndex !== index || master.inFlightIndex !== index || master.inFlightTabId !== tabId) return;
+      // A long Workday/auth or AI-answer step can legitimately exceed this delay. Reinjecting over
+      // a live handler deletes its ownership guard and starts a second handler in the same tab,
+      // producing CDP detach/lock contention and duplicate navigation. Only repair a genuinely
+      // missing content script; the ranked watchdog owns terminalization of a loaded-but-stuck one.
+      if (await pjaRankedExternalApplyLoaded(tabId)) return;
       await pjaReinjectRankedTab(tabId, 'watchdog_' + delayMs);
     } catch (e) {
       console.warn('PJA ranked apply: reinject watchdog error', e.message);
@@ -670,13 +761,25 @@ async function pjaReconcileRankedExtCurrent(master) {
     const curIndex = (master.jobs || []).findIndex((candidate, idx) =>
       idx > master.currentIndex && pjaSameRankedJob(candidate, cur));
     if (curIndex <= master.currentIndex) return master;
+    // A ledger callback can advance and persist the master while a chrome.alarm tick is still
+    // holding an older object. Re-read before classifying any gap: the old implementation turned
+    // that ordinary handoff race into a fabricated stale_ext_current_reconciled failure.
+    const latestData = await new Promise(r => chrome.storage.local.get(
+      ['pja_ranked_apply', PJA_APPLICATION_LEDGER_KEY], r));
+    const latest = latestData.pja_ranked_apply;
+    if (latest && latest.runId === master.runId && latest.currentIndex >= curIndex) return latest;
+    if (latest && latest.runId === master.runId) master = latest;
+    master = await pjaReconcileRankedLedger(master, latestData[PJA_APPLICATION_LEDGER_KEY]);
+    if (master.currentIndex >= curIndex) return master;
     console.warn('PJA ranked apply: reconciling ext_current ahead of master', master.currentIndex, '→', curIndex, cur.company, cur.title);
     for (let idx = master.currentIndex; idx < curIndex; idx++) {
       const stale = master.jobs[idx];
       if (!stale) continue;
-      const hadSubmitClick = false; // kept explicit: stale external-current advance is not confirmation.
-      const reason = hadSubmitClick ? 'submit_unclear_ext_current_advanced' : 'stale_ext_current_reconciled';
-      master.results.failed.push({ ...stale, reason });
+      // No terminal ledger evidence exists, so neither failure nor submission can be inferred.
+      // Preserve it as a manual skip and make it non-retryable in corpus state; never resubmit a
+      // job after exact ownership was lost merely to keep the queue moving.
+      const reason = 'ownership_lost_ext_current_advanced';
+      master.results.skipped.push({ ...stale, reason });
       await pjaRestoreRankedFailureState(stale, reason, master);
     }
     master.currentIndex = curIndex;
@@ -1067,16 +1170,42 @@ async function pjaApplyWatchdogTick() {
       Date.now() - (ranked.inFlightAt || Date.now()) > rankedCapMs) {
     const stuck = ranked.jobs[ranked.currentIndex];
     if (stuck) {
-      const extState = await new Promise(r => chrome.storage.local.get('pja_ext_current', r));
+      const extState = await new Promise(r => chrome.storage.local.get(
+        ['pja_ext_current', 'pja_wd_auth_diag', 'pja_dbg_workday_auth'], r));
       const current = extState.pja_ext_current;
       const submitPending = !!(rankedIsWorkday && current && pjaSameRankedJob(current, stuck) && current._submitPending);
       const timeoutReason = submitPending ? 'submit_observation_timeout' : 'ranked_watchdog_timeout';
+      const stuckHost = pjaRankedApplyHostname(stuck.applyUrl);
+      const authDiag = extState.pja_wd_auth_diag || null;
+      const authResult = extState.pja_dbg_workday_auth || null;
+      const authDiagOwned = !!(rankedIsWorkday && authDiag &&
+        pjaRankedApplyHostname(authDiag.url) === stuckHost);
+      const authResultOwned = !!(rankedIsWorkday && authResult &&
+        pjaRankedApplyHostname(authResult.url) === stuckHost);
+      const diagnostic = pjaCompactApplyDiagnostic({
+        schemaVersion: 1,
+        phase: submitPending ? 'submit_observation' : 'pre_submit',
+        reason: timeoutReason,
+        ats: stuck.ats || stuck.strategy || '',
+        hostname: stuckHost,
+        url: stuck.applyUrl,
+        visibleErrors: authDiagOwned && Array.isArray(authDiag.errors) ? authDiag.errors : [],
+        formSummary: submitPending
+          ? 'ranked watchdog expired while explicit submit observation was pending'
+          : authDiagOwned || authResultOwned
+            ? 'ranked watchdog expired before submit during Workday auth/form handling' +
+              (authDiagOwned && authDiag.screen ? ' screen=' + authDiag.screen : '') +
+              (authResultOwned && authResult.result ? ' authResult=' + authResult.result : '')
+            : 'ranked watchdog expired with explicit no-submit state',
+        capturedAt: Date.now(),
+      });
       await pjaCloseRankedTab(ranked.inFlightTabId);
       await pjaRestoreRankedFailureState(stuck, timeoutReason, ranked);
       await pjaAppendApplicationEvent({ runId: ranked.runId,
         jobId: stuck.jobId || stuck.id, applyUrl: stuck.applyUrl, company: stuck.company, title: stuck.title,
         channel: stuck.channel, status: submitPending ? 'submitted' : 'failed', success: submitPending ? null : false,
-        reason: timeoutReason,
+        reason: timeoutReason, submitAttempted: submitPending,
+        phase: submitPending ? 'submit_observation' : 'pre_submit', diagnostic,
         applicationAt: stuck.applicationAt || ranked.inFlightAt, occurredAt: Date.now() });
     }
     return;
@@ -1234,10 +1363,41 @@ if (DEV_MODE) {
                 } catch (e) { data = { ok: false, error: e.code || e.message }; }
                 _wsReloadSocket.send(JSON.stringify({ cmd: 'importCorpusReply', reqId: msg.reqId, data }));
               })();
+            } else if (msg.cmd === 'pingExtension') {
+              try {
+                _wsReloadSocket.send(JSON.stringify({ cmd: 'pingExtensionReply', reqId: msg.reqId,
+                  data: { ok: true, build: PJA_RUNTIME_BUILD } }));
+              } catch (_) {}
             } else if (msg.cmd === 'getStorage') {
               chrome.storage.local.get(msg.keys, data => {
                 _wsReloadSocket.send(JSON.stringify({ cmd: 'storageReply', reqId: msg.reqId, data }));
               });
+            } else if (msg.cmd === 'getApplyRunSnapshot') {
+              // Exact-run observation is intentionally summarized inside the extension. Sending
+              // the raw ranked run plus the full ledger/profile/applied log can exceed the
+              // observer timeout while Chrome is busy, even though the run itself is healthy.
+              (async () => {
+                let data;
+                try {
+                  const keys = ['pja_ranked_apply', 'pja_last_completed_apply_run', 'pja_apply_run_control'];
+                  if (msg.includeEvents === true) keys.push(PJA_APPLICATION_LEDGER_KEY);
+                  const storage = await new Promise(resolve => chrome.storage.local.get(keys, resolve));
+                  const selected = pjaSelectObservedApplyRun(storage, String(msg.runId || '').trim());
+                  data = {
+                    observed: true,
+                    slot: selected && selected.slot || null,
+                    run: selected ? pjaCompactObservedApplyRun(selected.run) : null,
+                    events: selected && msg.includeEvents === true
+                      ? pjaCompactObservedRunEvents(storage[PJA_APPLICATION_LEDGER_KEY], selected.run.runId)
+                      : undefined,
+                  };
+                } catch (e) {
+                  data = { observed: false, error: e && e.message || String(e || 'apply run observation failed') };
+                }
+                try {
+                  _wsReloadSocket.send(JSON.stringify({ cmd: 'applyRunSnapshotReply', reqId: msg.reqId, data }));
+                } catch (_) {}
+              })();
             } else if (msg.cmd === 'getBrowserShortlist') {
               chrome.storage.local.get('pja_shortlist', data => {
                 const raw = Array.isArray(data.pja_shortlist) ? data.pja_shortlist : [];

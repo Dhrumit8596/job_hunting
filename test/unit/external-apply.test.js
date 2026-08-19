@@ -257,8 +257,11 @@ module.exports = (t) => {
   'external-apply: SmartRecruiters custom elements count as hydrated application controls');
   t.ok(externalSource.includes('function trustedPointClick(el)') &&
     externalSource.includes('isSmartRecruitersHost') &&
-    externalSource.includes('[SR] trusted Next click='),
-  'external-apply: SmartRecruiters step buttons use trusted clicks before synthetic fallback');
+    externalSource.includes('[SR] trusted Next click=') &&
+    externalSource.includes('[SR] trusted Apply landing click=') &&
+    externalSource.includes('externalJobBudgetOptions(location.hostname)') &&
+    externalSource.includes('maxLoads: 8'),
+  'external-apply: SmartRecruiters landing/step controls use trusted clicks and bounded SPA handoff headroom');
   t.ok(externalSource.includes('recoverEmailVerificationCode') &&
     externalSource.includes("type: 'OPEN_GMAIL_CODE_TAB'") &&
     externalSource.includes('retrying verification/submit after gmail code') &&

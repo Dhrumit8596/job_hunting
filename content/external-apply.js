@@ -1070,15 +1070,21 @@
       entry.loads += 1;
       clock[clockKey] = entry;
       await new Promise(r => chrome.storage.local.set({ pja_ext_jobclock: clock }, r));
-      const workdayBudgetOpts = /workday\.com|myworkdayjobs\.com/i.test(location.hostname)
-        ? { budgetMs: 12 * 60 * 1000, maxLoads: 12 }
-        : {};
+      const workdayBudgetOpts = (typeof window.PJAApplySelect !== 'undefined' &&
+          typeof window.PJAApplySelect.externalJobBudgetOptions === 'function')
+        ? window.PJAApplySelect.externalJobBudgetOptions(location.hostname)
+        : /workday\.com|myworkdayjobs\.com/i.test(location.hostname)
+          ? { budgetMs: 12 * 60 * 1000, maxLoads: 12 }
+          : /smartrecruiters\.com/i.test(location.hostname)
+            ? { budgetMs: 7 * 60 * 1000, maxLoads: 8 }
+            : {};
       const overBudget = (typeof window.PJAApplySelect !== 'undefined' && window.PJAApplySelect.exceededBudget)
         ? window.PJAApplySelect.exceededBudget(entry, now, workdayBudgetOpts)
         : (now - entry.firstSeen > 240000 || entry.loads > 4);
       if (overBudget) {
         try { chrome.runtime.sendMessage({ type: 'PJA_APPLY_OUTCOME', outcome: { filled: true, submitted: false, reactSelectError: true }, applyUrl: job.applyUrl }); } catch (_) {}
-        const detail = entry.loads > 4 ? entry.loads + ' loads' : Math.round((now - entry.firstSeen) / 1000) + 's';
+        const maxLoads = workdayBudgetOpts.maxLoads != null ? workdayBudgetOpts.maxLoads : 4;
+        const detail = entry.loads > maxLoads ? entry.loads + ' loads' : Math.round((now - entry.firstSeen) / 1000) + 's';
         console.log('PJA ext-apply: stuck_budget exceeded (' + detail + ') — deferring', job.company);
         const recovery = await runApplyRecoveryLoop('stuck_budget', {
           formSummary: 'cross-reload budget exceeded',
@@ -1378,6 +1384,13 @@
           const href = applyBtn.getAttribute('href');
           if (href && /^https?:\/\//i.test(href)) { window.location.href = href; }
           else { applyBtn.click(); }
+        } else if (isSmartRecruitersHost) {
+          // SmartRecruiters' Stencil landing button may ignore a synthetic DOM click or reload the
+          // public posting instead of entering /oneclick-ui. Use the existing trusted point-click
+          // bridge for this non-submit navigation, then keep the safe synthetic fallback.
+          const clicked = await trustedPointClick(applyBtn);
+          await addDbg('[SR] trusted Apply landing click=' + clicked);
+          if (!clicked) applyBtn.click();
         } else {
           applyBtn.click();
         }

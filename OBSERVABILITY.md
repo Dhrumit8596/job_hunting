@@ -68,6 +68,15 @@ raw logs or latest-run inference. Public progress includes phase, category, coun
 job identity, seconds since the last meaningful transition, health, and next action; it excludes
 profile values, descriptions, HTML, and form values.
 
+Exact-run observation uses a service-worker-produced compact snapshot. HTTP 404 means the extension
+answered and the requested ID was absent; HTTP 503 `application_run_state_unavailable` means the
+observer did not answer and is retryable. A watcher must retain the same runId across that 503 and
+must not admit a replacement run.
+
+`GET /health` reports both `clients` and `extensionResponsive`. A connected socket with
+`extensionResponsive:false` is not sufficient for live-run admission; `extensionBuild` identifies
+the worker command contract currently loaded.
+
 The exact-run endpoint is valid as soon as `/apply-all` returns: before a browser queue exists it
 reads the acknowledged `pja_apply_run_control` record and reports `sourcing` or `planning`. If that
 worker fails or times out, the same run becomes terminal `failed` and retains a bounded error;

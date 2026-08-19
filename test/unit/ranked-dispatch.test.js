@@ -38,10 +38,19 @@ module.exports = async (t) => {
 
   t.ok(source.includes('async function pjaReconcileRankedExtCurrent(master)') &&
     source.includes('reconciling ext_current ahead of master') &&
-    source.includes("reason = hadSubmitClick ? 'submit_unclear_ext_current_advanced' : 'stale_ext_current_reconciled'") &&
+    source.includes("['pja_ranked_apply', PJA_APPLICATION_LEDGER_KEY]") &&
+    source.includes('master = await pjaReconcileRankedLedger(master') &&
+    source.includes("const reason = 'ownership_lost_ext_current_advanced'") &&
+    source.includes('master.results.skipped.push') &&
     source.includes('master.inFlightIndex = curIndex') &&
     source.includes('master = await pjaReconcileRankedExtCurrent(master)'),
-  'ranked dispatch: pja_ext_current ahead of master reconciles stale one-job queue advancement');
+  'ranked dispatch: pja_ext_current handoff rechecks durable ledger/master ownership before a manual skip');
+
+  t.ok(source.includes('async function pjaRankedExternalApplyLoaded(tabId)') &&
+    source.includes('window.__pjaExtApplyLoaded === true') &&
+    source.includes('if (await pjaRankedExternalApplyLoaded(tabId)) return;') &&
+    source.includes('Only repair a genuinely') && source.includes('missing content script'),
+  'ranked dispatch: delayed reinjection never starts a second handler over a live content script');
 
   t.ok(source.includes('chrome.runtime.lastError') &&
     source.includes('external queue seed verification failed') &&
@@ -95,9 +104,11 @@ module.exports = async (t) => {
     source.includes('master = await pjaRecoverRankedLastFailure(master)'),
   'ranked dispatch: resume recovers SuccessFactors landing-page no-submit failures as terminal no_apply_path events');
 
-  t.ok(source.includes("chrome.storage.local.get('pja_ext_current'") &&
+  t.ok(source.includes("['pja_ext_current', 'pja_wd_auth_diag', 'pja_dbg_workday_auth']") &&
     source.includes('current._submitPending') &&
     source.includes("submitPending ? 'submit_observation_timeout' : 'ranked_watchdog_timeout'") &&
+    source.includes('submitAttempted: submitPending') &&
+    source.includes("phase: submitPending ? 'submit_observation' : 'pre_submit'") &&
     source.includes("status: submitPending ? 'submitted' : 'failed'") &&
     source.includes('success: submitPending ? null : false'),
   'ranked watchdog: a Workday submit-pending timeout remains unverified and is never converted to a retryable failure');
@@ -148,9 +159,21 @@ module.exports = async (t) => {
 
   const exactStatus = dev.slice(dev.indexOf("if (req.method === 'GET' && runStatusMatch)"),
     dev.indexOf("if (req.method === 'GET' && runEventsMatch)"));
-  t.ok(exactStatus.includes("'pja_profile'") && exactStatus.includes("'pja_resume_filename'") &&
-    exactStatus.includes('writeApplyRunReport(st || {}, { runId })'),
-  'exact-run report: terminal status polling cannot overwrite known profile/resume health');
+  t.ok(source.includes("msg.cmd === 'getApplyRunSnapshot'") &&
+    source.includes('pjaCompactObservedApplyRun') && source.includes('pjaCompactObservedRunEvents') &&
+    source.includes("cmd: 'applyRunSnapshotReply'") &&
+    dev.includes("wsAsk('getApplyRunSnapshot'") &&
+    exactStatus.includes("code: 'application_run_state_unavailable'") &&
+    exactStatus.includes('res.writeHead(503, CORS)') &&
+    exactStatus.includes("'pja_profile'") && exactStatus.includes("'pja_resume_filename'") &&
+    exactStatus.includes('writeApplyRunReport(reportStorage || {}, { runId })'),
+  'exact-run observer returns compact owned state, retries transport gaps, and exports only from observed detail');
+
+  t.ok(source.includes("const PJA_RUNTIME_BUILD = 'apply-observer-v2'") &&
+    source.includes("msg.cmd === 'pingExtension'") && source.includes("cmd: 'pingExtensionReply'") &&
+    dev.includes("wsAsk('pingExtension'") && dev.includes('extensionResponsive:') &&
+    dev.includes('extensionBuild:'),
+  'health: connected and command-responsive extension state are reported separately with a build marker');
 
   t.ok(source.includes('Acknowledge the durable run install before network/tab launch work') &&
     source.includes('setTimeout(() => {') && source.includes('pjaDispatchRankedCurrent(msg.master).catch'),

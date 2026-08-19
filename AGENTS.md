@@ -31,7 +31,7 @@ curl -X POST http://localhost:6174/reload
 **Check extension is connected:**
 ```bash
 curl http://localhost:6174/health
-# {"clients":1} = ready   {"clients":0} = go to chrome://extensions and click reload
+# clients=1 + extensionResponsive=true = ready; clients=0 or unresponsive = reload/diagnose
 ```
 
 Extension ID: `lpojofmpdljggmdmoamdggapnabfkham`
@@ -62,7 +62,8 @@ Use `/apply-all` for “apply N jobs” requests. Use `/start-ea` only for a del
 LinkedIn-Easy-Apply-only batch. Pass `queries:[...]` to `/apply-all` or `/source-v2` for a
 targeted sourcing run; those query terms are forwarded to discovery adapters before ranking.
 Follow the returned exact run at `/apply-runs/:runId`; `sourcing` and `planning` are observable
-phases before `pja_ranked_apply` exists. Never infer failure from the admission request ending.
+phases before `pja_ranked_apply` exists. A retryable 503 means observation was unavailable, not that
+the run is missing; retain the exact runId. Never infer failure from the admission request ending.
 
 **`/set-storage` gotcha:** the body JSON is passed directly to `chrome.storage.local.set()`. Send `{"pja_ext_queue": {...}}`, NOT `{"data": {"pja_ext_queue": {...}}}`.
 

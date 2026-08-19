@@ -379,8 +379,19 @@ async function watchRun(parsed, runId) {
   let lastPrintedAt = 0;
   let recoveryAttempts = 0;
   let missingRunRetries = 0;
+  let observerRetries = 0;
   while (Date.now() - started <= timeoutMs) {
-    const status = await getJson(parsed.port, `/apply-runs/${encoded}`);
+    let status;
+    try {
+      status = await getJson(parsed.port, `/apply-runs/${encoded}`);
+    } catch (e) {
+      observerRetries++;
+      process.stdout.write(JSON.stringify({ runId, status: 'status_retry', httpStatus: 0,
+        attempt: observerRetries, reason: 'exact run observer transport unavailable',
+        error: String(e && e.message || e || '').slice(0, 160) }) + '\n');
+      await sleep(Math.min(parsed.pollSeconds * 1000, 2000));
+      continue;
+    }
     if (!status.ok || !status.data || status.data.ok === false) {
       // The service worker may be briefly unavailable while an application tab is opening. The
       // exact-run endpoint must never fall back to a different run, but a bounded retry prevents a
@@ -392,11 +403,19 @@ async function watchRun(parsed, runId) {
         await sleep(Math.min(parsed.pollSeconds * 1000, 2000));
         continue;
       }
+      if (status.status === 503 && status.data && status.data.retryable === true) {
+        observerRetries++;
+        process.stdout.write(JSON.stringify({ runId, status: 'status_retry', httpStatus: 503,
+          attempt: observerRetries, reason: status.data.code || 'application run state temporarily unavailable' }) + '\n');
+        await sleep(Math.min(parsed.pollSeconds * 1000, 2000));
+        continue;
+      }
       process.stdout.write(JSON.stringify({ runId, status: 'status_error', httpStatus: status.status,
         error: status.data && status.data.error || 'status request failed' }) + '\n');
       return status.status === 404 ? 6 : 5;
     }
     missingRunRetries = 0;
+    observerRetries = 0;
     const progress = compactProgress(status.data);
     if (progress.runId !== runId) {
       process.stdout.write(JSON.stringify({ runId, status: 'ownership_mismatch', observedRunId: progress.runId }) + '\n');

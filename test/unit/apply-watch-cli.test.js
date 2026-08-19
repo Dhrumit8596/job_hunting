@@ -53,12 +53,18 @@ module.exports = async t => {
     if (req.method === 'GET' && req.url === '/apply-runs/apply-fixture') {
       statusHits++;
       if (statusHits === 1) {
+        res.statusCode = 503;
+        res.end(JSON.stringify({ ok: false, code: 'application_run_state_unavailable',
+          error: 'timeout', retryable: true }));
+        return;
+      }
+      if (statusHits === 2) {
         res.statusCode = 404;
         res.end(JSON.stringify({ ok: false, error: 'apply run not found' }));
         return;
       }
-      const planning = statusHits === 2;
-      const terminal = statusHits > 3;
+      const planning = statusHits === 3;
+      const terminal = statusHits > 4;
       res.end(JSON.stringify({ ok: true, clients: 1, run: {
         schemaVersion: 2, runId: 'apply-fixture', status: terminal ? 'done' : planning ? 'planning' : 'applying',
         phase: terminal ? 'terminal' : planning ? 'sourcing' : 'handler', category: 'greenhouse', currentIndex: terminal ? 1 : 0,
@@ -82,9 +88,10 @@ module.exports = async t => {
   const fixtureHandoff = path.join(os.tmpdir(), `pja-watch-fixture-${process.pid}.json`);
   try {
     const code = await CLI.watchRun({ port: fixture.address().port, timeoutMinutes: 1,
-      pollSeconds: 1, jsonLines: true, allowResume: false, handoffFile: fixtureHandoff }, 'apply-fixture');
+      pollSeconds: 0.01, jsonLines: true, allowResume: false, handoffFile: fixtureHandoff }, 'apply-fixture');
     t.eq(code, 0, 'watch CLI: fixture run is followed from active state to confirmed terminal success');
-    t.ok(statusHits >= 4, 'watch CLI: fixture watcher follows pre-queue planning, applying, and terminal state after a transient 404');
+    t.ok(statusHits >= 5,
+      'watch CLI: fixture watcher preserves exact ownership through transient 503/404, planning, applying, and terminal state');
     t.eq(reportHits, 1, 'watch CLI: fixture terminal handling exports exactly one report');
   } finally {
     try { fs.unlinkSync(fixtureHandoff); } catch (_) {}

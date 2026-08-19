@@ -36,8 +36,8 @@ sequenceDiagram
 
     User->>Entry: One click or one CLI command
     Entry->>Server: GET/POST /one-click-preflight
-    Server->>SW: WS getStorage
-    SW-->>Server: profile, resume, prefs, active-run state
+    Server->>SW: WS getStorage + getApplyRunSnapshot
+    SW-->>Server: profile/resume health + compact active-run state
     Entry->>Server: POST /apply-all
     Server->>SW: persist pja_apply_run_control(runId, sourcing)
     Server-->>Entry: 202 + runId + exact status/events URLs
@@ -93,8 +93,11 @@ Internal `/source-v2` and `/apply-run` calls use `local-json-client.js`, whose e
 timeout covers the complete response rather than inheriting Node fetch's shorter implicit header
 timeout. Transport failures identify the endpoint and configured duration.
 
-`GET /apply-runs/:runId` never falls back to another latest run; unknown IDs return 404. The shared
-pure modules are:
+`GET /apply-runs/:runId` never falls back to another latest run. The service worker summarizes the
+exact active/completed/control record before sending it over WebSocket, so observation does not
+serialize description-rich jobs, the full ledger, applied log, or profile. An observed missing ID
+returns 404; a timeout or unavailable observer returns retryable 503 and cannot prove absence. The
+shared pure modules are:
 
 - `apply-run-state.js` — versioned compact state, transition/health enums, ownership-safe reducer.
 - `apply-run-control.js` — pure pre-queue creation, freshness, and late-worker ownership rules.
@@ -116,8 +119,9 @@ candidate data remain outside run control.
 state and exports its report. `npm run apply:watch -- --run-id ID` resumes that observation in a new
 session. A compact gitignored `.pja-run.local.json` stores only the last followed ID/status; browser
 storage and the ledger remain authoritative. The watcher tolerates at most two transient 404s while
-the service worker changes tabs, then fails with the ownership/missing-run exit code; it never
-substitutes a latest or different run.
+the service worker changes tabs. It keeps the same exact ID through retryable observer 503s or
+loopback transport gaps until the overall watch deadline; it never substitutes a latest or different
+run.
 
 Category runs isolate both channel and strategy and use a run-scoped confirmed target, so one
 category's confirmations cannot satisfy another category. Their default evidence-scoring window is
