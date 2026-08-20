@@ -44,6 +44,7 @@ module.exports = (t) => {
   const settingsHtml = fs.readFileSync(path.join(root, 'settings/settings.html'), 'utf8');
   const settingsJs = fs.readFileSync(path.join(root, 'settings/settings.js'), 'utf8');
   const sidebar = fs.readFileSync(path.join(root, 'content/content.js'), 'utf8');
+  const indeedApply = fs.readFileSync(path.join(root, 'content/indeed-apply.js'), 'utf8');
   const shortlistHtml = fs.readFileSync(path.join(root, 'shortlist/shortlist.html'), 'utf8');
   const shortlistJs = fs.readFileSync(path.join(root, 'shortlist/shortlist.js'), 'utf8');
 
@@ -64,6 +65,13 @@ module.exports = (t) => {
     shortlistJs.includes('initAdvancedApplyTools') &&
     shortlistJs.includes('/apply-status'),
     'settings/popup/sidebar/shortlist present one production E2E flow and hide legacy launchers behind advanced mode'
+  );
+
+  t.ok(
+    sidebar.includes("UPDATE_CORPUS_STATE', id: job.id,\n              runId: job.runId || q.runId || null,\n              reason: 'linkedin_checkpoint'") &&
+    sidebar.includes("UPDATE_CORPUS_STATE', id: job.id,\n          runId: job.runId || queue.runId || null,") &&
+    indeedApply.includes("UPDATE_CORPUS_STATE', id: job.id,\n        runId: job.runId || q.runId || null,"),
+    'native apply paths carry exact ranked run ownership into e2e-safe corpus state updates'
   );
 
   t.ok(

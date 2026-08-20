@@ -5,7 +5,7 @@
 (function (root) {
   const AMBIGUOUS_SUBMISSION_RE = /submit_unclear|submit_observation_timeout|workday_transport_failure|submit_unconfirmed|success_unverified|submitted_unverified|tab_lost_outcome_unknown/i;
   const EXTERNAL_BLOCKER_RE = /captcha|daily_limit|checkpoint|email_verification_required|workday_account_locked|workday_account_exists_wrong_password|workday_captcha|google_sso_only/i;
-  const MANUAL_ONLY_RE = /workday_duplicate_record|ready_to_submit_review|chatbot_apply_manual|unsupported_|no_apply_path/i;
+  const MANUAL_ONLY_RE = /workday_duplicate_record|ready_to_submit_review|chatbot_apply_manual|unsupported_|no_apply_path|no_easy_apply/i;
   const HOST_BLOCKER_RE = /workday_duplicate_record|workday_captcha|workday_account_locked/i;
   const INFERRED_REASON_RE = /(?:^|[^a-z])(?:pre[-_ ]?nav[-_ ]?handled|submitted[-_ ]?assumed|unverified|unconfirmed|submit[-_ ]?unclear|assumed|inferred)(?:$|[^a-z])/i;
 

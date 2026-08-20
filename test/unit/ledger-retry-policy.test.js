@@ -56,6 +56,15 @@ module.exports = t => {
   t.eq(Policy.classifyLedgerEvent(ambiguous('failed', 'page_load_failed_before_submit')).blocksAutomaticRetry, false,
     'retry policy: explicit pre-submit page/transport failure remains eligible for bounded retry');
 
+  const noEasyApply = ambiguous('failed', 'no_easy_apply',
+    'https://www.linkedin.com/jobs/view/4440486124/?trackingId=test');
+  t.eq(Policy.classifyLedgerEvent(noEasyApply).category, 'failed_manual',
+    'retry policy: exhausted LinkedIn Easy Apply modal opening is manual, not an automatic retry');
+  t.eq(Policy.blockedLedgerRecords([noEasyApply]).length, 1,
+    'retry policy: no_easy_apply is blocked by default even when stale corpus state says sourced');
+  t.eq(Policy.blockedLedgerRecords([noEasyApply], { retryBlocked: true }).length, 0,
+    'retry policy: the existing explicit operator override still supports a verified targeted retry');
+
   t.eq(Policy.blockedLedgerRecords([submitted], { retryBlocked: true }).length, 0,
     'retry policy: existing explicit operator retry override remains supported');
   t.eq(Policy.blockedLedgerRecords([submitted], { retryBlockedHosts: ['acme.wd1.myworkdayjobs.com'] }).length, 0,

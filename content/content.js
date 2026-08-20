@@ -775,6 +775,7 @@ select.pcw-input{cursor:pointer}
           sessionStorage.setItem('pja_apply_queue', JSON.stringify(q));
           if (job) {
             if (job.id) chrome.runtime.sendMessage({ type: 'UPDATE_CORPUS_STATE', id: job.id,
+              runId: job.runId || q.runId || null,
               reason: 'linkedin_checkpoint' }, () => void chrome.runtime.lastError);
             chrome.runtime.sendMessage({ type: 'APPLICATION_LEDGER_EVENT', closeTab: !!job.rankedRun,
               event: { runId: job.runId || q.runId || null, jobId: job.jobId || job.id || null,
@@ -852,6 +853,7 @@ select.pcw-input{cursor:pointer}
       // does this itself). `id` is the corpus canonical id; jobId remains LinkedIn's source id.
       try {
         if (job.id) chrome.runtime.sendMessage({ type: 'UPDATE_CORPUS_STATE', id: job.id,
+          runId: job.runId || queue.runId || null,
           reason: result && result.success ? 'applied' : ((result && result.reason) || 'unknown') },
         () => void chrome.runtime.lastError);
       } catch (_) {}

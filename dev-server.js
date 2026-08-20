@@ -1218,7 +1218,7 @@ function developerRecommendation(row = {}) {
   if (/weak_match_evidence|too_many_(?:match|material)_gaps|hard_match_conflict|low_score_confidence|below_threshold|candidate_fingerprint_mismatch|scoring_policy_mismatch|unscored/.test(reason)) {
     return 'Scoring/ranking gate: rescore against the current resume/JD evidence or leave out as unsuitable for autonomous apply.';
   }
-  if (/prior_blocked_host|prior_blocked_record|deferred_retry_disabled|deferred_max_attempts/.test(reason)) {
+  if (/prior_blocked_host|prior_blocked_record|prior_attempted_record|prior_attempted_state|deferred_retry_disabled|deferred_max_attempts/.test(reason)) {
     return 'Suppression/retry gate: expected safety drop; use targeted retry only after the prior blocker is manually repaired.';
   }
   if (/unsupported_|missing_apply_url|ats_not_allowed|eligible_not_selected/.test(reason)) {
@@ -1333,6 +1333,9 @@ function renderApplyRunReport(storage, options = {}) {
       : runControl && runControl.runId === runId ? 'durable run control' : 'none';
   lines.push(`- State source: ${stateSource}`);
   if (ranked && ranked.runMode) lines.push(`- Run mode: ${safeReportText(ranked.runMode)}`);
+  if (ranked && Object.prototype.hasOwnProperty.call(ranked, 'unattemptedOnly')) {
+    lines.push(`- First-attempt-only: ${ranked.unattemptedOnly === true ? 'yes' : 'no'}`);
+  }
   lines.push(`- Current index: ${ranked && ranked.currentIndex != null ? ranked.currentIndex : 'unknown'} / ${ranked && Array.isArray(ranked.jobs) ? ranked.jobs.length : 'unknown'}`);
   lines.push(`- Confirmed: ${count('confirmed')}`);
   lines.push(`- Failed: ${count('failed')}`);
@@ -1633,6 +1636,7 @@ function writeApplyPlanningReport(planningDrops, options = {}) {
       scoringRounds: Array.isArray(options.scoringRounds) ? options.scoringRounds : [],
       scoringModelBatches: Number(options.scoringModelBatches || 0),
       scoringEvidenceSummary: options.scoringEvidenceSummary || null,
+      unattemptedOnly: options.unattemptedOnly === true,
       coverage: options.coverage === true,
       coverageCount: options.coverageCount != null ? Number(options.coverageCount) || 1 : undefined,
       channelCoverage: options.channelCoverage || null,
@@ -3422,6 +3426,9 @@ ${(description || '').slice(0, 6000)}`;
         const dailyTarget = applyAllAboveScore ? null : (o.targetConfirmed != null ? Math.max(1, Number(o.targetConfirmed) || 1)
           : Math.max(1, Number(dailyCap) || 1));
         const e2eSafe = o.e2eSafe === true;
+        // First-attempt-only selection is an explicit workflow contract. Keep it separate from
+        // e2eSafe, which bounds a single run but historically permits verified retryable failures.
+        const unattemptedOnly = o.unattemptedOnly === true;
         // Zero means keep every qualified reserve. The global dispatcher stops as soon as the
         // confirmed target is reached, so reserves replace failures without causing over-submit.
         const attemptCap = o.attemptCap != null ? Math.max(0, Number(o.attemptCap) || 0)
@@ -3539,6 +3546,7 @@ ${(description || '').slice(0, 6000)}`;
           maxAttempts: e2eSafe ? 1 : undefined,
           retryBlocked: o.retryBlocked === true,
           retryBlockedHosts: Array.isArray(o.retryBlockedHosts) ? o.retryBlockedHosts : [],
+          unattemptedOnly,
           candidateFingerprint: !rescore ? runtimeCandidateFingerprint : undefined,
           explainDrops: true, dropLimit: o.dropLimit != null ? o.dropLimit : 200 }, 'applySetReply', 60000);
         let jobs = (setResp && setResp.jobs) || [];
@@ -3811,6 +3819,7 @@ ${(description || '').slice(0, 6000)}`;
         if (uncoveredChannels.length) {
           const report = writeApplyPlanningReport(planningDrops || null,
             { status: 'channel_coverage_blocked', coverage: coverageMode, coverageCount, channelCoverage, strategyCoverage,
+              unattemptedOnly,
               scoringPolicyVersion: ScoringEvidence.SCORING_POLICY_VERSION, scoringRounds,
               scoringModelBatches, scoringEvidenceSummary, storage: control });
           res.writeHead(409, CORS); res.end(JSON.stringify({ success: false, stage: 'channel_coverage',
@@ -3822,6 +3831,7 @@ ${(description || '').slice(0, 6000)}`;
         if (uncoveredStrategies.length) {
           const report = writeApplyPlanningReport(planningDrops || null,
             { status: 'strategy_coverage_blocked', coverage: coverageMode, coverageCount, channelCoverage, strategyCoverage,
+              unattemptedOnly,
               scoringPolicyVersion: ScoringEvidence.SCORING_POLICY_VERSION, scoringRounds,
               scoringModelBatches, scoringEvidenceSummary, storage: control });
           res.writeHead(409, CORS); res.end(JSON.stringify({ success: false, stage: 'strategy_coverage',
@@ -3833,6 +3843,7 @@ ${(description || '').slice(0, 6000)}`;
         if (!jobs.length) {
           const report = writeApplyPlanningReport(planningDrops || null,
             { status: dryRun ? 'dry_run_nothing_eligible' : 'nothing_eligible',
+              unattemptedOnly,
               coverage: coverageMode, coverageCount, channelCoverage, strategyCoverage,
               scoringPolicyVersion: ScoringEvidence.SCORING_POLICY_VERSION, scoringRounds,
               scoringModelBatches, scoringEvidenceSummary, storage: control });
@@ -3881,7 +3892,7 @@ ${(description || '').slice(0, 6000)}`;
             runId, category, runMode, applyAllAboveScore, targetConfirmed: dailyTarget, dailyTarget, attemptCap, threshold,
             targetScope, day: targetScope === 'day' ? day : '', calendarDay: day, timeZone,
             confirmedCount: alreadyConfirmedToday, remaining: remainingTarget,
-            stopBeforeSubmit, e2eSafe,
+            stopBeforeSubmit, e2eSafe, unattemptedOnly,
             workdayAttemptTimeoutMs: o.workdayAttemptTimeoutMs != null ? Math.max(30000, Number(o.workdayAttemptTimeoutMs) || 0) : undefined,
             planningDrops: planningDrops || null,
             coverage: coverageMode, coverageCount, channelCoverage, strategyCoverage,
@@ -3907,12 +3918,13 @@ ${(description || '').slice(0, 6000)}`;
         const previewLimit = Math.max(1, Math.min(500, Number(o.previewLimit) || 12));
         const report = dryRun ? writeApplyPlanningReport(planningDrops || null,
           { status: 'dry_run_planned', jobs: queueJobs, coverage: coverageMode, coverageCount,
+            unattemptedOnly,
             channelCoverage, strategyCoverage, scoringPolicyVersion: ScoringEvidence.SCORING_POLICY_VERSION,
             scoringRounds, scoringModelBatches, scoringEvidenceSummary, storage: control }) : null;
         res.end(JSON.stringify({ success: true, dryRun, planned: queueJobs.length,
           runMode, applyAllAboveScore, targetConfirmed: remainingTarget, dailyTarget,
           alreadyConfirmedToday, remainingTarget,
-          day, timeZone, targetScope, category, assistedExcluded, includeAssisted, e2eSafe,
+          day, timeZone, targetScope, category, assistedExcluded, includeAssisted, e2eSafe, unattemptedOnly,
           reserveCount: applyAllAboveScore ? 0 : Math.max(0, queueJobs.length - remainingTarget), runId, byChannel,
           byStrategy, channelCoverage, strategyCoverage, coverage: coverageMode, coverageCount, corpusTotal: setResp.total,
           planningDrops: planningDrops || null, report, scoringRounds, scoringModelBatches,

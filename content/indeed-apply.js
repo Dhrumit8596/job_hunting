@@ -278,6 +278,7 @@
     else { q.results.skipped.push({ company: job.company, title: job.title, skipReason: result.reason }); }
     try {
       if (job.id) chrome.runtime.sendMessage({ type: 'UPDATE_CORPUS_STATE', id: job.id,
+        runId: job.runId || q.runId || null,
         reason: result.success ? 'applied' : (result.reason || 'unknown') },
       () => void chrome.runtime.lastError);
     } catch (_) {}

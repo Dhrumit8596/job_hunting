@@ -99,6 +99,19 @@ module.exports = async (t) => {
     source.includes("duplicateBlockedHosts.has(pjaRankedApplyHostname(master.jobs[master.currentIndex].applyUrl))"),
   'ranked dispatch: Workday tenant-level duplicate/captcha blockers skip remaining jobs on the same tenant');
 
+  t.ok(source.includes('attemptedRecords: opts && opts.unattemptedOnly === true ? ledgerEvents : []') &&
+    source.includes('unattemptedOnly: opts && opts.unattemptedOnly === true') &&
+    source.includes('e2eSafe: !!(master && master.e2eSafe)') &&
+    source.includes('unattemptedOnly: !!(master && master.unattemptedOnly)') &&
+    source.includes('e2eSafe: !!run.e2eSafe') &&
+    source.includes('unattemptedOnly: !!run.unattemptedOnly') &&
+    dev.includes('const unattemptedOnly = o.unattemptedOnly === true;') &&
+    dev.includes('retryBlockedHosts: Array.isArray(o.retryBlockedHosts) ? o.retryBlockedHosts : [],\n          unattemptedOnly,') &&
+    dev.includes('unattemptedOnly: options.unattemptedOnly === true') &&
+    dev.includes("First-attempt-only: ${ranked.unattemptedOnly === true ? 'yes' : 'no'}") &&
+    dev.includes('stopBeforeSubmit, e2eSafe, unattemptedOnly'),
+  'ranked planning: explicit first-attempt-only runs exclude prior identities and remain auditable without changing generic e2e-safe retries');
+
   t.ok(source.includes('async function pjaRecoverRankedLastFailure(master)') &&
     source.includes("recoveredReason = isSuccessFactors && reason === 'no_submit_btn' ? 'no_apply_path' : reason") &&
     source.includes('workday_duplicate_record|workday_account_locked') &&

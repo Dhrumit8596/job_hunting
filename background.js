@@ -118,6 +118,11 @@ async function pjaBuildApplySet(opts) {
     includeUnscored: opts && opts.includeUnscored === true,
     appliedRecords: recs,
     blockedRecords,
+    // First-attempt-only workflows must exclude every prior ledger identity, including ordinary
+    // pre-submit failures that remain retryable in the generic planner. The separate collection
+    // preserves normal retry semantics whenever the caller does not request this gate.
+    attemptedRecords: opts && opts.unattemptedOnly === true ? ledgerEvents : [],
+    unattemptedOnly: opts && opts.unattemptedOnly === true,
     blockedHosts,
   };
   if (opts && Object.prototype.hasOwnProperty.call(opts, 'candidateFingerprint')) {
@@ -552,6 +557,8 @@ function pjaCompactCompletedRankedRun(master, extra = {}) {
     dailyTarget: master && master.dailyTarget != null ? master.dailyTarget : null,
     attemptCap: master && master.attemptCap != null ? master.attemptCap : null,
     threshold: master && master.threshold != null ? master.threshold : null,
+    e2eSafe: !!(master && master.e2eSafe),
+    unattemptedOnly: !!(master && master.unattemptedOnly),
     day: master && master.day || '',
     timeZone: master && master.timeZone || 'America/Los_Angeles',
     currentIndex: master && master.currentIndex != null ? master.currentIndex : 0,
@@ -592,6 +599,8 @@ function pjaCompactObservedApplyRun(run) {
     dailyTarget: run.dailyTarget != null ? run.dailyTarget : null,
     attemptCap: run.attemptCap != null ? run.attemptCap : null,
     threshold: run.threshold != null ? run.threshold : null,
+    e2eSafe: !!run.e2eSafe,
+    unattemptedOnly: !!run.unattemptedOnly,
     currentIndex: run.currentIndex != null ? run.currentIndex : 0,
     inFlightIndex: run.inFlightIndex != null ? run.inFlightIndex : null,
     inFlightTabId: run.inFlightTabId != null ? run.inFlightTabId : null,

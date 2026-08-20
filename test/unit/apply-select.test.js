@@ -99,6 +99,41 @@ module.exports = (t) => {
   }] }).map(j => j.id), ['greenhouse:11'], 'blockedRecords suppress only the known manual-blocked requisition');
   t.eq(buildApplySet(exactCorpus, { threshold: 70, blockedHosts: ['boards.greenhouse.io'] }).length, 0,
     'blockedHosts suppress every posting on a known blocked tenant/host');
+  const priorRetryableAttempt = { company: 'Acme', title: 'Process Quality Engineer', jobId: '10',
+    applyUrl: 'https://boards.greenhouse.io/acme/jobs/10', status: 'failed', reason: 'missing_required' };
+  t.eq(buildApplySet(exactCorpus, { threshold: 70 }).map(j => j.id), ['greenhouse:10', 'greenhouse:11'],
+    'generic selection retains ordinary retryable failures when no first-attempt-only records are supplied');
+  t.eq(buildApplySet(exactCorpus, { threshold: 70,
+    attemptedRecords: [priorRetryableAttempt], unattemptedOnly: false }).map(j => j.id),
+    ['greenhouse:10', 'greenhouse:11'],
+    'attempted records do not change generic selection unless the explicit first-attempt-only gate is enabled');
+  const unattemptedPlan = buildApplyPlan(exactCorpus, { threshold: 70,
+    attemptedRecords: [priorRetryableAttempt], unattemptedOnly: true, retryBlocked: true });
+  t.eq({ selected: unattemptedPlan.jobs.map(j => j.id), priorAttempted: unattemptedPlan.dropCounts.prior_attempted_record },
+    { selected: ['greenhouse:11'], priorAttempted: 1 },
+    'first-attempt-only selection uses stable identity across title drift without poisoning a sibling requisition or obeying retryBlocked');
+  const aliasCorpus = corpus([{ id: 'workday:R77', company: 'Alias Co', title: 'Process Engineer',
+    applyUrl: 'https://alias.wd5.myworkdayjobs.com/jobs/Process-Engineer_R77', fit: 83 }]);
+  aliasCorpus.index['workday:R77'].sourceRefs = [{ id: 'linkedin:4447770000',
+    listingUrl: 'https://www.linkedin.com/jobs/view/4447770000/' }];
+  t.eq(buildApplyPlan(aliasCorpus, { threshold: 70, unattemptedOnly: true,
+    attemptedRecords: [{ id: 'linkedin:4447770000', company: 'Alias Co', title: 'Process Quality Engineer',
+      applyUrl: 'https://www.linkedin.com/jobs/view/4447770000/', status: 'failed' }] }).dropCounts.prior_attempted_record,
+    1, 'first-attempt-only selection recognizes an attempted LinkedIn source alias after direct ATS resolution');
+  const attemptedStateCorpus = corpus([
+    { id: 'greenhouse:state-1', company: 'State Co', title: 'Process Engineer',
+      applyUrl: 'https://boards.greenhouse.io/state/jobs/1', fit: 82, status: 'sourced', attempts: 1 },
+    { id: 'greenhouse:state-2', company: 'State Co', title: 'Process Engineer',
+      applyUrl: 'https://boards.greenhouse.io/state/jobs/2', fit: 81, status: 'sourced', attempts: 0 },
+  ]);
+  t.eq(buildApplySet(attemptedStateCorpus, { threshold: 70 }).map(j => j.id),
+    ['greenhouse:state-1', 'greenhouse:state-2'],
+    'generic selection preserves sourced retry attempts when first-attempt-only is not requested');
+  const attemptedStatePlan = buildApplyPlan(attemptedStateCorpus,
+    { threshold: 70, unattemptedOnly: true });
+  t.eq({ selected: attemptedStatePlan.jobs.map(j => j.id), priorState: attemptedStatePlan.dropCounts.prior_attempted_state },
+    { selected: ['greenhouse:state-2'], priorState: 1 },
+    'first-attempt-only selection drops sourced attempts without excluding an unattempted sibling requisition');
   const collisionCorpus = corpus([
     { id: 'workday:alpha:R1234', company: 'Alpha Fab', title: 'Process Engineer', applyUrl: 'https://alpha.example/jobs/R1234', fit: 90 },
     { id: 'workday:beta:R1234', company: 'Beta Fab', title: 'Process Engineer', applyUrl: 'https://beta.example/jobs/R1234', fit: 89 },
@@ -267,6 +302,8 @@ module.exports = (t) => {
   t.eq(resultToState('no_submit_btn', 0).status, 'needs_manual', 'no submit button → immediate manual deferral');
   t.eq(resultToState('no_apply_btn_on_description', 0).status, 'needs_manual', 'no apply path → immediate manual deferral');
   t.eq(resultToState('no_apply_path', 0).status, 'needs_manual', 'invalid/stale apply path → immediate manual deferral');
+  t.eq(resultToState('no_easy_apply', 0).status, 'needs_manual',
+    'LinkedIn modal-open exhaustion → immediate manual deferral instead of automatic retry');
   t.eq(resultToState('wd_selectinput_blocked', 0).status, 'needs_manual', 'Workday selectinput blocker → manual deferral');
   t.eq(resultToState('workday_auth_sign_in_error', 0).status, 'needs_manual', 'Workday auth error → manual deferral');
   t.eq(resultToState('workday_create_rejected_no_visible_error', 0).status, 'needs_manual', 'Workday create rejected/no visible error → manual deferral');

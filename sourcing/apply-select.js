@@ -243,6 +243,10 @@
     if (Array.from(postingIds).some(x => identity.ids.has(x)) || postingUrls.some(x => identity.urls.has(x)) || identity.roles.has(roleKey(p))) return 'already_applied';
     const blockedIdentity = context.blockedIdentity;
     if (Array.from(postingIds).some(x => blockedIdentity.ids.has(x)) || postingUrls.some(x => blockedIdentity.urls.has(x)) || blockedIdentity.roles.has(roleKey(p))) return 'prior_blocked_record';
+    const attemptedIdentity = context.attemptedIdentity;
+    if (context.unattemptedOnly && (Array.from(postingIds).some(x => attemptedIdentity.ids.has(x)) ||
+        postingUrls.some(x => attemptedIdentity.urls.has(x)) || attemptedIdentity.roles.has(roleKey(p)))) return 'prior_attempted_record';
+    if (context.unattemptedOnly && Number(st.attempts || 0) > 0) return 'prior_attempted_state';
     let applyHost = '';
     try { applyHost = new URL(String(p.applyUrl || '')).hostname.toLowerCase(); } catch (_) {}
     if (applyHost && context.blockedHosts.has(applyHost)) return 'prior_blocked_host';
@@ -280,8 +284,10 @@
     const identity = appliedIdentity(opts.appliedRecords || [], opts.appliedRoleKeys instanceof Set
       ? Array.from(opts.appliedRoleKeys) : (opts.appliedRoleKeys || []));
     const blockedIdentity = appliedIdentity(opts.blockedRecords || []);
+    const attemptedIdentity = appliedIdentity(opts.attemptedRecords || []);
     const blockedHosts = new Set((opts.blockedHosts || []).map(x => String(x || '').toLowerCase()).filter(Boolean));
-    const context = { identity, blockedIdentity, blockedHosts };
+    const context = { identity, blockedIdentity, attemptedIdentity,
+      unattemptedOnly: opts.unattemptedOnly === true, blockedHosts };
     const dropLimit = opts.dropLimit != null ? Math.max(0, Number(opts.dropLimit) || 0) : 200;
     const dropped = [], dropCounts = {};
     for (const id of Object.keys(index)) {
@@ -320,6 +326,8 @@
     const identity = appliedIdentity(opts.appliedRecords || [], opts.appliedRoleKeys instanceof Set
       ? Array.from(opts.appliedRoleKeys) : (opts.appliedRoleKeys || []));
     const blockedIdentity = appliedIdentity(opts.blockedRecords || []);
+    const attemptedIdentity = appliedIdentity(opts.attemptedRecords || []);
+    const unattemptedOnly = opts.unattemptedOnly === true;
     const blockedHosts = new Set((opts.blockedHosts || []).map(x => String(x || '').toLowerCase()).filter(Boolean));
     const index = (corpus && corpus.index) || {};
     const state = (corpus && corpus.state) || {};
@@ -353,6 +361,9 @@
       const postingUrls = [p.applyUrl, p.listingUrl, ...(p.sourceRefs || []).flatMap(r => r ? [r.applyUrl, r.listingUrl] : [])].map(applyUrlKey).filter(Boolean);
       if (Array.from(postingIds).some(x => identity.ids.has(x)) || postingUrls.some(x => identity.urls.has(x)) || identity.roles.has(roleKey(p))) continue;
       if (Array.from(postingIds).some(x => blockedIdentity.ids.has(x)) || postingUrls.some(x => blockedIdentity.urls.has(x)) || blockedIdentity.roles.has(roleKey(p))) continue;
+      if (unattemptedOnly && (Array.from(postingIds).some(x => attemptedIdentity.ids.has(x)) ||
+          postingUrls.some(x => attemptedIdentity.urls.has(x)) || attemptedIdentity.roles.has(roleKey(p)))) continue;
+      if (unattemptedOnly && Number(st.attempts || 0) > 0) continue;
       let applyHost = '';
       try { applyHost = new URL(String(p.applyUrl || '')).hostname.toLowerCase(); } catch (_) {}
       if (applyHost && blockedHosts.has(applyHost)) continue;
@@ -624,7 +635,7 @@
     'ownership_lost_ext_current_advanced',
     // These are stable ATS/UI blockers observed in live runs. Retrying them three times only
     // burns the batch budget; defer for manual review and let the queue advance immediately.
-    'no_apply_btn_on_description', 'no_apply_path', 'no_submit_btn', 'wd_selectinput_blocked',
+    'no_apply_btn_on_description', 'no_apply_path', 'no_easy_apply', 'no_submit_btn', 'wd_selectinput_blocked',
     'workday_auth_sign_in_error', 'workday_create_rejected_no_visible_error',
     'workday_account_exists_wrong_password', 'workday_duplicate_record',
     // Submit was attempted but acceptance could not be observed. Never retry an application that
