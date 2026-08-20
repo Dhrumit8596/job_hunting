@@ -94,6 +94,10 @@ function mergePosting(existing, job, modality) {
     Number(new Date(job.lastSeenAt)) >= Number(new Date(existing.lastSeenAt)) ? job.lastSeenAt : existing.lastSeenAt;
   existing.matchedQueries = Array.from(new Set([...(existing.matchedQueries || []),
     ...(job.matchedQueries || [])])).slice(0, 20);
+  existing.sourceAliases = Array.from(new Set([...(existing.sourceAliases || []),
+    ...(job.sourceAliases || [])])).slice(0, 20);
+  existing.careerHosts = Array.from(new Set([...(existing.careerHosts || []),
+    ...(job.careerHosts || [])])).slice(0, 20);
   const pageRefs = [...(existing.sourcePages || []), ...(job.sourcePages || [])];
   existing.sourcePages = Array.from(new Map(pageRefs.map(ref => [
     [ref && ref.source, ref && ref.query, ref && ref.page].join('|'), ref])).values()).slice(-40);
@@ -123,6 +127,8 @@ function buildPosting(id, rk, mk, job, modality) {
     descriptionStatus: job.descriptionStatus || (job.description ? 'complete' : 'needs_description'),
     sourcePlatform: job.sourcePlatform || '', sourceJobId: String(job.sourceJobId || job.id || ''),
     sourceBoard: job.sourceBoard || '',
+    sourceAliases: Array.isArray(job.sourceAliases) ? job.sourceAliases.slice(0, 20) : [],
+    careerHosts: Array.isArray(job.careerHosts) ? job.careerHosts.slice(0, 20) : [],
     listingUrl: job.listingUrl || '', channel: job.channel || '', channels: job.channel ? [job.channel] : [],
     query: job.query || '', discoveredAt: job.discoveredAt || job.scrapedAt || '',
     firstDiscoveredAt: job.firstDiscoveredAt || job.discoveredAt || job.scrapedAt || '',

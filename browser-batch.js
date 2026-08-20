@@ -129,6 +129,22 @@
     return { list: Array.from(byId.values()), counts, acceptedIds, rejectedIds };
   }
 
+  function mergeRouteInspection(existing, updates) {
+    const byId = new Map((Array.isArray(updates) ? updates : []).map(row =>
+      [text(row && row.id), row]).filter(([id]) => id));
+    let persisted = 0;
+    const list = (Array.isArray(existing) ? existing : []).map(job => {
+      const platform = text(job && (job.sourcePlatform || job.platform)).toLowerCase();
+      const update = platform === 'linkedin' ? byId.get(jobId(job)) : null;
+      if (!update) return job;
+      persisted++;
+      return { ...job, routeLandingStatus: text(update.status), routeLandingReason: text(update.reason),
+        routeLandingAttemptedAt: Number(update.attemptedAt) || Date.now(),
+        routeLandingAttempts: (Number(job.routeLandingAttempts) || 0) + 1 };
+    });
+    return { list, persisted, requested: byId.size };
+  }
+
   async function sendAcknowledged(send, envelope, options = {}) {
     const attempts = Math.max(1, Math.min(4, Number(options.attempts) || 3));
     let lastReason = 'persistence_unacknowledged';
@@ -183,7 +199,8 @@
     return !!current && current !== previous;
   }
 
-  const api = { stableHash, batchId, recordKey, descriptionReady, mergeRecord, mergeBatch, sendAcknowledged,
+  const api = { stableHash, batchId, recordKey, descriptionReady, mergeRecord, mergeBatch,
+    mergeRouteInspection, sendAcknowledged,
     pageContinuationDecision, resultIdsChanged };
   if (root) root.PJABrowserBatch = api;
   if (typeof module !== 'undefined' && module.exports) module.exports = api;

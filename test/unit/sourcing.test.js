@@ -49,6 +49,8 @@ module.exports = (t) => {
     'relocation: explicitly international remote remains excluded');
   const bayTarget = { city: 'Santa Clara', state: 'CA', zip: '95051' };
   t.eq(isWithinTargetRadius('San Jose, CA', bayTarget, 60), true, 'target loc: nearby city inside configured radius');
+  t.eq(isWithinTargetRadius('Burlingame, CA', bayTarget, 60), true,
+    'target loc: known Peninsula city inside the configured radius is not rejected as unknown');
   t.eq(isWithinTargetRadius('Irvine, CA', bayTarget, 60), false, 'target loc: far CA city outside configured radius');
   t.eq(isEligibleTargetLocation('Remote - US', true, { targetLocation: bayTarget, targetRadiusMiles: 60, remotePolicy: 'us_or_ca_remote_allowed' }), true,
     'target loc: US remote allowed by configured remote policy');

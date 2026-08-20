@@ -1696,6 +1696,19 @@ if (DEV_MODE) {
                     listingUrl: j.listingUrl || j.url || '', applyUrl: j.applyUrl || '',
                     externalApplyUrl: j.externalApplyUrl || '', detectedAts: j.detectedAts || '',
                     needsAtsResolution: !!j.needsAtsResolution,
+                    hydrationStatus: j.hydrationStatus || '', hydrationReason: j.hydrationReason || '',
+                    fitScore: Number.isFinite(Number(j.fitScore)) ? Number(j.fitScore) : null,
+                    scoreKind: j.scoreKind || '',
+                    routeResolutionStatus: j.routeResolutionStatus || '',
+                    routeResolutionReason: j.routeResolutionReason || '',
+                    routeResolutionAttempts: Number(j.routeResolutionAttempts) || 0,
+                    routeResolutionAttemptedAt: j.routeResolutionAttemptedAt || '',
+                    routeLandingStatus: j.routeLandingStatus || '',
+                    routeLandingReason: j.routeLandingReason || '',
+                    routeLandingAttempts: Number(j.routeLandingAttempts) || 0,
+                    routeLandingAttemptedAt: j.routeLandingAttemptedAt || '',
+                    hydrationAttempts: Number(j.hydrationAttempts) || 0,
+                    hydrationAttemptedAt: j.hydrationAttemptedAt || '',
                     description: String(j.description || '').slice(0, 20000),
                     descriptionStatus: j.descriptionStatus || '', pipelineStatus: j.pipelineStatus || '',
                     status: j.status || '', query: j.query || '', scrapedAt: j.scrapedAt || '',
@@ -2351,6 +2364,39 @@ if (DEV_MODE) {
                   chrome.tabs.onUpdated.addListener(onUpd);
                 });
               }
+            } else if (msg.cmd === 'persistBrowserRouteInspection') {
+              (async () => {
+                let data;
+                try {
+                  const allowed = new Set(['direct_lookup_evidence', 'hint_extracted', 'ambiguous_direct_urls',
+                    'unattested_direct_url', 'no_explicit_route_evidence', 'inspection_failed']);
+                  const updates = new Map((Array.isArray(msg.updates) ? msg.updates : []).slice(0, 20)
+                    .map(row => {
+                      const id = String(row && row.id || '').trim();
+                      const status = String(row && row.status || '').trim();
+                      if (!id || !allowed.has(status)) return null;
+                      return [id, { status, reason: String(row && row.reason || '').slice(0, 120),
+                        attemptedAt: Number(row && row.attemptedAt) || Date.now() }];
+                    }).filter(Boolean));
+                  const current = await new Promise(resolve => chrome.storage.local.get(
+                    ['pja_apply_run_control', 'pja_shortlist'], resolve));
+                  const decision = self.PJASourceSafety.sourceDecision({ runId: msg.runId || '',
+                    deadlineMs: msg.deadlineMs, control: current.pja_apply_run_control,
+                    controlObserved: Object.prototype.hasOwnProperty.call(current, 'pja_apply_run_control'), connected: true });
+                  self.PJASourceSafety.assertSourceDecision(decision);
+                  const merged = self.PJABrowserBatch.mergeRouteInspection(current.pja_shortlist || [],
+                    Array.from(updates, ([id, update]) => ({ id, ...update })));
+                  const list = merged.list;
+                  await new Promise((resolve, reject) => chrome.storage.local.set({ pja_shortlist: list }, () => {
+                    if (chrome.runtime.lastError) reject(new Error(chrome.runtime.lastError.message)); else resolve();
+                  }));
+                  data = { ok: true, requested: merged.requested, persisted: merged.persisted };
+                } catch (error) {
+                  data = { ok: false, error: error && error.code || String(error && error.message || error) };
+                }
+                try { _wsReloadSocket.send(JSON.stringify({ cmd: 'persistBrowserRouteInspectionReply',
+                  reqId: msg.reqId, data })); } catch (_) {}
+              })();
             } else if (msg.cmd === 'enrichBrowserLeads') {
               (async () => {
                 let data;
@@ -2378,19 +2424,69 @@ if (DEV_MODE) {
                     controlObserved: Object.prototype.hasOwnProperty.call(current, 'pja_apply_run_control'), connected: true });
                   self.PJASourceSafety.assertSourceDecision(beforePersist);
                   const now = Date.now();
+                  const requested = new Set(ids);
+                  let supportedResolved = 0, descriptionsHydrated = 0, noProgress = 0;
                   const list = (current.pja_shortlist || []).map(job => {
                     const id = String(job.id || job.jobId || job.sourceJobId || '');
+                    const platform = String(job.sourcePlatform || job.platform || '').toLowerCase();
+                    if (platform !== 'linkedin' || !requested.has(id)) return job;
+                    const completed = !!(result.applyUrls &&
+                      Object.prototype.hasOwnProperty.call(result.applyUrls, id));
+                    // Voyager stops at the owned deadline. IDs after that stop were never examined
+                    // and must remain untouched so a later bounded pass can select them.
+                    if (!completed) return job;
                     const route = result.applyUrls && result.applyUrls[id];
                     const description = result.descriptions && result.descriptions[id];
-                    if (!route && !description) return job;
-                    const patch = { ...job, lastSeenAt: job.lastSeenAt || now };
-                    if (route) Object.assign(patch, { externalApplyUrl: route, applyUrl: route,
-                      needsAtsResolution: false, resolutionMethod: 'linkedin_voyager_job_id',
+                    const needsRoute = job.needsAtsResolution === true;
+                    const needsDescription = !job.description ||
+                      /^(missing|stale|needs_description)$/i.test(String(job.descriptionStatus || ''));
+                    const routeStrategy = route && self.PJADetectAts && self.PJADetectAts.detectAts(route) || '';
+                    const routeCapability = routeStrategy && self.PJAApplySelect &&
+                      self.PJAApplySelect.applyCapabilityStatus(route, routeStrategy);
+                    const supportedRoute = !!(route && routeStrategy && routeCapability &&
+                      /^supported/.test(String(routeCapability.status || '')) &&
+                      self.PJAApplySelect.isVoyagerPostingSpecificRoute(route, routeStrategy));
+                    const unresolvedLanding = needsRoute && !supportedRoute && self.PJAApplySelect &&
+                      self.PJAApplySelect.safeUnresolvedLandingUrl(route);
+                    const patch = { ...job };
+                    if (needsRoute) Object.assign(patch, {
+                      routeResolutionAttempts: (Number(job.routeResolutionAttempts) || 0) + 1,
+                      routeResolutionAttemptedAt: now,
+                      routeResolutionStatus: supportedRoute ? 'resolved' : 'unresolved',
+                      routeResolutionReason: supportedRoute ? '' : unresolvedLanding
+                        ? 'voyager_destination_requires_official_resolution'
+                        : route ? 'voyager_destination_not_supported' : 'voyager_no_destination',
+                    });
+                    if (needsDescription) Object.assign(patch, {
+                      hydrationAttempts: (Number(job.hydrationAttempts) || 0) + 1,
+                      hydrationAttemptedAt: now,
+                    });
+                    if (supportedRoute) Object.assign(patch, { externalApplyUrl: route, applyUrl: route,
+                      detectedAts: routeStrategy, needsAtsResolution: false,
+                      resolutionMethod: 'linkedin_voyager_job_id_supported_destination',
                       resolutionConfidence: 'high', resolutionReason: '' });
-                    if (description) Object.assign(patch, { description: String(description).slice(0, 20000),
+                    else if (unresolvedLanding) Object.assign(patch, {
+                      externalApplyUrl: unresolvedLanding, applyUrl: unresolvedLanding,
+                      detectedAts: '', needsAtsResolution: true,
+                      resolutionMethod: 'linkedin_voyager_offsite_landing',
+                      resolutionConfidence: 'lookup_only',
+                      resolutionReason: 'requires_current_official_unique_match',
+                    });
+                    if (supportedRoute) supportedResolved++;
+                    if (description) {
+                      descriptionsHydrated++;
+                      Object.assign(patch, { description: String(description).slice(0, 20000),
                       descriptionStatus: String(description).length > 20000 ? 'partial' : 'full',
                       hydrationStatus: 'hydration_success', hydrationMethod: 'linkedin_voyager_job_posting',
                       hydrationReason: '', hydratedAt: now, pipelineStatus: 'score_pending', status: 'score_pending' });
+                    } else if (needsDescription) Object.assign(patch, {
+                      hydrationStatus: 'hydration_no_progress', hydrationReason: 'voyager_description_missing',
+                    });
+                    if (!supportedRoute && !description) noProgress++;
+                    // A null result may be a 404, auth/transport failure, or deadline edge. Persist
+                    // its cooldown diagnostics without refreshing listing freshness; only positive
+                    // route/JD evidence proves the posting was observed live now.
+                    if (!route && !description) return patch;
                     const merged = self.PJABrowserBatch.mergeRecord(job, patch, { observedAt: now });
                     return merged.record || merged;
                   });
@@ -2398,7 +2494,8 @@ if (DEV_MODE) {
                     if (chrome.runtime.lastError) reject(new Error(chrome.runtime.lastError.message)); else resolve();
                   }));
                   data = { ok: true, requested: ids.length, completed: result.completed || 0,
-                    resolved: result.resolved || 0, hydrated: result.hydrated || 0 };
+                    resolved: supportedResolved, hydrated: descriptionsHydrated, noProgress,
+                    voyagerDestinationsObserved: Number(result.resolved) || 0 };
                 } catch (error) {
                   data = { ok: false, error: error && error.code || String(error && error.message || error) };
                 }

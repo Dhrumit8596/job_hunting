@@ -3275,10 +3275,16 @@ ${(description || '').slice(0, 6000)}`;
         let browserEnrichment = { attempted: 0, resolved: 0, hydrated: 0, status: 'not_needed' };
         if (o.browserHydration !== false && SourceSafety.remainingDeadlineMs(sourceWindow.deadlineMs) >= 120000) {
           const { selectHydrationFrontier } = require('./sourcing/browser-enrichment');
-          const hydrationFrontier = selectHydrationFrontier(browserJobs, {
-            limit: o.browserHydrationLimit != null ? Number(o.browserHydrationLimit) : 20,
+          const linkedInHydrationCandidates = browserJobs.filter(job =>
+            /^linkedin$/i.test(String(job.sourcePlatform || job.platform || '')));
+          const hydrationFrontier = selectHydrationFrontier(linkedInHydrationCandidates, {
+            limit: o.browserHydrationLimit != null ? Number(o.browserHydrationLimit) : 50,
             freshAfter: Date.now() - (o.maxBrowserAgeMs != null ? Number(o.maxBrowserAgeMs) : 48 * 60 * 60 * 1000),
-          }).filter(job => /^linkedin$/i.test(String(job.sourcePlatform || job.platform || '')));
+            routeRetryCooldownMs: o.browserRouteRetryCooldownMs != null
+              ? Number(o.browserRouteRetryCooldownMs) : 6 * 60 * 60 * 1000,
+            hydrationRetryCooldownMs: o.browserHydrationRetryCooldownMs != null
+              ? Number(o.browserHydrationRetryCooldownMs) : 6 * 60 * 60 * 1000,
+          });
           if (hydrationFrontier.length) {
             await assertGuard('before_browser_enrichment');
             const enrichTimeoutMs = Math.max(1000, Math.min(90000,
@@ -3306,8 +3312,32 @@ ${(description || '').slice(0, 6000)}`;
           seniorityBand: searchPolicy.seniorityBand,
           browserJobs,
           discoveryAdapters,
+          routeResolutionLimit: o.routeResolutionLimit != null ? Number(o.routeResolutionLimit) : 20,
+          routeResolutionConcurrency: o.routeResolutionConcurrency,
+          routeResolutionTimeoutMs: o.routeResolutionTimeoutMs,
+          routeResolutionMaxBytes: o.routeResolutionMaxBytes,
+          routeResolutionMaxRedirects: o.routeResolutionMaxRedirects,
+          landingRetryCooldownMs: o.routeLandingRetryCooldownMs,
           maxBrowserAgeMs: o.maxBrowserAgeMs != null ? Number(o.maxBrowserAgeMs) : 48 * 60 * 60 * 1000,
           guard: assertGuard });
+        if (write && report.routeResolution && report.routeResolution.inspected > 0) {
+          const updates = (report.routeResolution.outcomes || []).map(row => ({ id: row.id,
+            status: row.status, reason: row.reason || '', attemptedAt: row.attemptedAt }));
+          await assertGuard('before_route_inspection_persist');
+          const persisted = await wsAsk('persistBrowserRouteInspection', { updates,
+            runId: guardOptions.runId || '', deadlineMs: sourceWindow.deadlineMs },
+          'persistBrowserRouteInspectionReply', 30000);
+          await assertGuard('after_route_inspection_persist');
+          if (!persisted || persisted.ok !== true || Number(persisted.persisted) !== Number(persisted.requested)) {
+            throw SourceSafety.sourceError('route_inspection_persistence_failed',
+              persisted && persisted.error || 'route_inspection_persistence_failed', 503);
+          }
+          report.routeResolution.persistence = { status: 'committed', requested: persisted.requested,
+            persisted: persisted.persisted };
+        } else if (report.routeResolution) {
+          report.routeResolution.persistence = { status: write ? 'not_needed' : 'dry_not_persisted',
+            requested: 0, persisted: 0 };
+        }
         if (browserScan) report.browserScan = browserScan;
         if (browserDiscovery) report.browserDiscovery = browserDiscovery;
         report.browserEnrichment = browserEnrichment;

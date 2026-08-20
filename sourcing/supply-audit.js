@@ -93,7 +93,7 @@ function routeReadiness(posting, options = {}) {
   try { host = new URL(applyUrl).hostname.toLowerCase(); } catch (_) {
     return { supported: false, autonomous: false, reason: 'invalid_apply_url', channel };
   }
-  const strategy = detectAts(applyUrl) || String(posting && (posting.detectedAts || posting.ats) || '').toLowerCase();
+  const strategy = ApplySelect.destinationStrategy(posting, channel);
   if (/(^|\.)(linkedin|indeed|glassdoor)\.com$/i.test(host) && !detectAts(applyUrl)) {
     return { supported: false, autonomous: false, reason: 'aggregator_without_apply_destination', channel };
   }
@@ -216,7 +216,8 @@ function summarizeSupply(corpus, opts = {}) {
     const hasScore = st.fitScore != null && Number.isFinite(score);
     const family = roleFamily(p.title);
     const level = seniority(p.title);
-    const ats = String(p.detectedAts || p.ats || 'unknown').toLowerCase();
+    const destination = String(ApplySelect.destinationStrategy(p, postingChannel(p)) || 'unknown').toLowerCase();
+    const ats = destination === 'linkedin_ea' ? 'linkedin' : destination;
     inc(result.byRoleFamily, family);
     inc(result.bySeniority, level);
     inc(result.byAts, ats);

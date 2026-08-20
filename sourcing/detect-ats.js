@@ -33,7 +33,11 @@
     try { host = new URL(String(url || '')).hostname.toLowerCase(); }
     catch (_) { return ''; }
     if (!host) return '';
-    for (const [needle, ats] of HOST_MAP) if (host.includes(needle)) return ats;
+    for (const [needle, ats] of HOST_MAP) {
+      // Host ownership is a DNS-label boundary, not a substring. Without this boundary check,
+      // `greenhouse.io.attacker.example` would be misclassified as an official Greenhouse route.
+      if (host === needle || host.endsWith('.' + needle)) return ats;
+    }
     return '';
   }
 

@@ -13,7 +13,7 @@ const TITLE_EXCLUDE = /\b(technician|operator|assistant|supervisor|manager|direc
 const DOMAIN_EXCLUDE = /\b(software|firmware|machine learning|\bml\b|\bai\b|artificial intelligence|data scientist|data engineer|bioinformatics|computational|cloud|devops|\bsre\b|web|frontend|front-end|backend|back-end|full.?stack|security engineer|network engineer|support engineer|service desk|research engineer|cost engineer|developer|field applications?\b|research scientist|principal scientist|staff scientist|scientist iii|computer vision|\bnlp\b|platform engineer|sales engineer|solutions engineer|applications? scientist|compiler|verification engineer|physical design|design verification|asic|\brtl\b|fpga)\b/i;
 
 // California or US-remote.
-const CA_LOC = /\b(california|\bca\b|san jose|santa clara|sunnyvale|fremont|alameda|oakland|san francisco|south san francisco|\bssf\b|menlo park|palo alto|mountain view|pleasanton|milpitas|hayward|newark|san diego|irvine|carlsbad|roseville|sacramento|livermore|union city|redwood city|foster city|san carlos|emeryville|berkeley)\b/i;
+const CA_LOC = /\b(california|\bca\b|san jose|santa clara|sunnyvale|fremont|alameda|oakland|san francisco|south san francisco|\bssf\b|menlo park|palo alto|mountain view|pleasanton|milpitas|hayward|newark|san diego|irvine|carlsbad|roseville|sacramento|livermore|union city|redwood city|san mateo|burlingame|foster city|san carlos|emeryville|berkeley)\b/i;
 const NON_US_LOC = /\b(canada|ontario|quebec|british columbia|vancouver|toronto|montreal|mexico|europe|united kingdom|\buk\b|ireland|germany|france|italy|spain|netherlands|sweden|poland|romania|israel|india|china|taiwan|japan|korea|singapore|australia|brazil|argentina|united arab emirates|uae|abu dhabi|dubai|emea|apac|apj|latam)\b/i;
 const US_LOC = /\b(united states|u\.s\.|usa|alabama|alaska|arizona|arkansas|california|colorado|connecticut|delaware|florida|georgia|hawaii|idaho|illinois|indiana|iowa|kansas|kentucky|louisiana|maine|maryland|massachusetts|michigan|minnesota|mississippi|missouri|montana|nebraska|nevada|new hampshire|new jersey|new mexico|new york|north carolina|north dakota|ohio|oklahoma|oregon|pennsylvania|rhode island|south carolina|south dakota|tennessee|texas|utah|vermont|virginia|washington|west virginia|wisconsin|wyoming|district of columbia|washington,? dc|phoenix|chandler|hillsboro|portland|austin|dallas|boise|albany|malta,? ny|manassas)\b/i;
 const US_STATE_CODE = /(?:^|[,\s])(AL|AK|AZ|AR|CA|CO|CT|DE|FL|GA|HI|ID|IL|IN|IA|KS|KY|LA|ME|MD|MA|MI|MN|MS|MO|MT|NE|NV|NH|NJ|NM|NY|NC|ND|OH|OK|OR|PA|RI|SC|SD|TN|TX|UT|VT|VA|WA|WV|WI|WY|DC)(?:\s|,|$)/;
@@ -26,6 +26,7 @@ const CITY_COORDS = {
   'menlo park, ca': [37.4530, -122.1817],
   'redwood city, ca': [37.4852, -122.2364],
   'san mateo, ca': [37.5630, -122.3255],
+  'burlingame, ca': [37.5779, -122.3481],
   'foster city, ca': [37.5585, -122.2711],
   'san carlos, ca': [37.5072, -122.2605],
   'milpitas, ca': [37.4323, -121.8996],

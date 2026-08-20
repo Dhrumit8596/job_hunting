@@ -62,6 +62,23 @@ module.exports = async t => {
   'browser freshness: rediscovery refreshes lastSeenAt while preserving original date, JD, and valid score');
   t.eq(refreshed.matchedQueries, ['quality engineer', 'manufacturing quality engineer'],
     'browser freshness: rediscovery merges query attribution');
+  const backedOff = Batch.mergeRecord(hydrated, { ...hydrated,
+    routeResolutionStatus: 'unresolved', routeResolutionReason: 'voyager_no_destination',
+    routeResolutionAttempts: 1, routeResolutionAttemptedAt: 450,
+    hydrationAttempts: 1, hydrationAttemptedAt: 450 }, { observedAt: 450 }).record;
+  t.eq({ status: backedOff.routeResolutionStatus, reason: backedOff.routeResolutionReason,
+    routeAttempts: backedOff.routeResolutionAttempts, hydrationAttempts: backedOff.hydrationAttempts },
+  { status: 'unresolved', reason: 'voyager_no_destination', routeAttempts: 1, hydrationAttempts: 1 },
+  'browser enrichment: an acknowledged null result persists cooldown metadata without erasing a valid JD or score');
+  const identityCollision = Batch.mergeRouteInspection([
+    { id: 'shared-1', sourcePlatform: 'linkedin', routeLandingAttempts: 0 },
+    { id: 'shared-1', sourcePlatform: 'glassdoor', routeLandingAttempts: 0 },
+  ], [{ id: 'shared-1', status: 'no_explicit_route_evidence', reason: 'no_route', attemptedAt: 500 }]);
+  t.eq(identityCollision.list.map(row => ({ platform: row.sourcePlatform,
+    status: row.routeLandingStatus || '', attempts: row.routeLandingAttempts })), [
+    { platform: 'linkedin', status: 'no_explicit_route_evidence', attempts: 1 },
+    { platform: 'glassdoor', status: '', attempts: 0 },
+  ], 'browser route persistence: a raw ID collision mutates only the LinkedIn-owned record');
   const newlyHydrated = Batch.mergeRecord({ id: '8', sourcePlatform: 'linkedin', title: 'Process Engineer',
     description: '', descriptionStatus: 'missing', fitScore: 74, scoreKind: 'heuristic' },
   { id: '8', sourcePlatform: 'linkedin', title: 'Process Engineer',

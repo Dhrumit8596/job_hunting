@@ -23,6 +23,8 @@ module.exports = (t) => {
   t.eq(detectAts('https://jobs.ashbyhq.com/acme/uuid'), 'ashby', 'detectAts: ashby');
   t.eq(detectAts('https://acme.wd1.myworkdayjobs.com/careers'), 'workday', 'detectAts: workday');
   t.eq(detectAts('https://careers.acme.com/job/1'), '', 'detectAts: unknown host -> empty');
+  t.eq(detectAts('https://greenhouse.io.attacker.example/acme/jobs/1'), '',
+    'detectAts: a suffix-spoofed hostname is not treated as an official ATS');
   t.eq(detectAts('not a url'), '', 'detectAts: garbage -> empty');
   t.eq(detectSlug('https://boards.greenhouse.io/stripe/jobs/1', 'greenhouse'), 'stripe', 'detectSlug: greenhouse slug');
   t.eq(detectSlug('https://acme.wd5.myworkdayjobs.com/x', 'workday'), 'acme', 'detectSlug: workday tenant');
@@ -50,6 +52,23 @@ module.exports = (t) => {
   t.eq(r2.dupByRole, 1, 'upsert: exact-URL duplicate counted');
   t.eq(Object.keys(store.index).length, 2, 'store: still 2 unique');
   t.eq(store.index['greenhouse:1'].description, 'A much richer requirements description.', 'upsert: duplicate enriches description instead of discarding it');
+
+  // Source-registry aliases and career-host attestations are part of route evidence. They must
+  // survive both the initial normalized-store write and a later exact-URL merge so browser mirrors
+  // can be matched against the official posting without weakening company identity.
+  const routeEvidence = createStore();
+  upsert(routeEvidence, [makeJob({ id: 'R-086504', title: 'Supplier Quality Engineer II',
+    company: 'Johnson & Johnson', location: 'Santa Clara, CA', ats: 'workday',
+    applyUrl: 'https://jj.wd5.myworkdayjobs.com/en-US/JJ/job/x_R-086504' })
+  ], 'api-registry');
+  upsert(routeEvidence, [{ id: 'R-086504', title: 'Supplier Quality Engineer II',
+    company: 'Johnson & Johnson', location: 'Santa Clara, CA', ats: 'workday',
+    applyUrl: 'https://jj.wd5.myworkdayjobs.com/en-US/JJ/job/x_R-086504',
+    sourceAliases: ['Shockwave Medical'], careerHosts: ['careers.jnj.com'] }], 'api-registry');
+  t.eq({ aliases: routeEvidence.index['workday:R-086504'].sourceAliases,
+    hosts: routeEvidence.index['workday:R-086504'].careerHosts },
+  { aliases: ['Shockwave Medical'], hosts: ['careers.jnj.com'] },
+  'store: official company aliases and career hosts survive normalized insert and merge');
 
   // Same ATS + same title/location but distinct requisition ids must both survive.
   const distinct = upsert(store, [makeJob({ id: 3, title: 'Quality Engineer', company: 'Acme', location: 'Fremont, CA', ats: 'greenhouse' })], 'api-registry', j => ({ fitScore: prescore(j) }));

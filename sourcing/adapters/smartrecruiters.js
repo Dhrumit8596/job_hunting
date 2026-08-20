@@ -100,12 +100,15 @@ async function enrichDetails(rows, source, opts = {}) {
   return rows;
 }
 
-function searchTerms(source, queries, profileQueryLimit = 10) {
+function searchTerms(source, queries, profileQueryLimit = 20, routeHints = []) {
   const sourceTerms = Array.isArray(source && source.queries) && source.queries.length
     ? source.queries : [source && source.query || ''];
-  const profileTerms = (Array.isArray(queries) ? queries : []).slice(0, Math.max(0, Number(profileQueryLimit) || 0));
+  const configuredTerms = sourceTerms.map(value => String(value || '').trim()).filter(Boolean);
+  const hintTerms = (Array.isArray(routeHints) ? routeHints : []).slice(0, 10);
+  const profileLimit = Math.min(20, Math.max(0, Number(profileQueryLimit) || 0));
+  const profileTerms = (Array.isArray(queries) ? queries : []).slice(0, profileLimit);
   const out = [], seen = new Set();
-  for (const value of [...sourceTerms, ...profileTerms, '']) {
+  for (const value of [...configuredTerms, ...hintTerms, ...profileTerms, '']) {
     const text = String(value || '').trim();
     const key = text.toLowerCase();
     if (seen.has(key)) continue;
@@ -121,6 +124,7 @@ function hydrationRows(rows, source, opts = {}) {
     targetRadiusMiles: opts.targetRadiusMiles,
     locationStrictness: opts.locationStrictness,
     remotePolicy: opts.remotePolicy,
+    seniorityBand: opts.seniorityBand,
   };
   const eligible = (rows || []).filter(raw => filterJobs([normalize(raw, source)], filterOpts).length > 0);
   const cap = Number(opts.detailMax);
@@ -128,11 +132,12 @@ function hydrationRows(rows, source, opts = {}) {
 }
 
 async function fetchJobs(source, { timeoutMs = 15000, max = 200, detailConcurrency = 6, detailMax = 0,
-  queries = [], profileQueryLimit = 10, profileQueryMax = 100,
-  nationwideUS = false, targetLocation, targetRadiusMiles, locationStrictness, remotePolicy } = {}) {
+  queries = [], profileQueryLimit = 20, profileQueryMax = 100, routeHints = [],
+  nationwideUS = false, targetLocation, targetRadiusMiles, locationStrictness, remotePolicy,
+  seniorityBand } = {}) {
   if (!source.slug) return [];
   const byId = new Map();
-  const searches = searchTerms(source, queries, profileQueryLimit);
+  const searches = searchTerms(source, queries, profileQueryLimit, routeHints);
   const sourceSearches = new Set((Array.isArray(source.queries) && source.queries.length
     ? source.queries : [source.query || '']).map(q => String(q || '').trim().toLowerCase()).filter(Boolean));
   for (const query of searches) {
@@ -169,7 +174,7 @@ async function fetchJobs(source, { timeoutMs = 15000, max = 200, detailConcurren
   }
   const out = Array.from(byId.values());
   const relevant = hydrationRows(out, source, { detailMax, nationwideUS, targetLocation,
-    targetRadiusMiles, locationStrictness, remotePolicy });
+    targetRadiusMiles, locationStrictness, remotePolicy, seniorityBand });
   await enrichDetails(relevant, source, { timeoutMs, detailConcurrency });
   return out.map(j => normalize(j, source));
 }

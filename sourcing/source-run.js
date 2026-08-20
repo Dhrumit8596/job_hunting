@@ -11,13 +11,14 @@ const { filterJobs } = require('./filter');
 const { prescore } = require('./prescore');
 const { createStore, upsert, excludeApplied, gateReport, descriptionFingerprint } = require('./jobstore');
 const { normalizeBrowserJobs } = require('./browser-import');
-const { detectAts } = require('./detect-ats');
 const { resolveAgainstOfficial } = require('./browser-enrichment');
+const { inspectUnknownDirectRoutes } = require('./route-resolution');
+const ApplySelect = require('./apply-select');
 
 const AUTONOMOUS_UNSUPPORTED_ATS = new Set(['eightfold', 'successfactors', 'jobicy', 'remotive']);
 const AUTONOMOUS_SUPPORTED_STRATEGIES = new Set([
   'linkedin_ea', 'indeed', 'greenhouse', 'lever', 'ashby', 'workday', 'smartrecruiters',
-  'workable', 'breezy', 'bamboohr', 'paylocity', 'rippling', 'jobvite', 'generic',
+  'workable', 'breezy', 'bamboohr', 'paylocity', 'rippling', 'jobvite',
 ]);
 
 const DEFAULT_QUERIES = [
@@ -121,18 +122,8 @@ function qualitySummary(store, sourcingReport, opts = {}) {
   };
 }
 
-function isAggregatorHost(url) {
-  try { return /(^|\.)(linkedin|indeed|glassdoor)\.com$/i.test(new URL(String(url || '')).hostname); }
-  catch (_) { return false; }
-}
-
 function autonomousApplyStrategy(job) {
-  const channel = String(job && job.channel || '').toLowerCase();
-  if (channel === 'linkedin_easy_apply' || job && job.isEasyApply === true) return 'linkedin_ea';
-  if (channel === 'indeed_apply' || job && job.indeedApply === true) return 'indeed';
-  const strategy = String(detectAts(job && job.applyUrl) || job && job.detectedAts || job && job.ats || '').toLowerCase();
-  if (isAggregatorHost(job && job.applyUrl) && !detectAts(job && job.applyUrl)) return '';
-  return strategy || 'generic';
+  return ApplySelect.destinationStrategy(job, job && job.channel);
 }
 
 function autonomousApplyFilter(jobs, enabled) {
@@ -145,7 +136,8 @@ function autonomousApplyFilter(jobs, enabled) {
     const ats = String(job && job.ats || '').toLowerCase();
     const strategy = autonomousApplyStrategy(job);
     if (!strategy || AUTONOMOUS_UNSUPPORTED_ATS.has(ats) || AUTONOMOUS_UNSUPPORTED_ATS.has(strategy)) return false;
-    return AUTONOMOUS_SUPPORTED_STRATEGIES.has(strategy);
+    const capability = ApplySelect.applyCapabilityStatus(job && job.applyUrl, strategy);
+    return AUTONOMOUS_SUPPORTED_STRATEGIES.has(strategy) && /^supported/.test(String(capability.status || ''));
   });
 }
 
@@ -159,12 +151,35 @@ async function sourceAll(opts = {}) {
   const report = { modalityA: {}, modalityB: {} };
   const guard = typeof opts.guard === 'function' ? opts.guard : async () => {};
 
+  // Resolve bounded, posting-specific landing evidence before registry fetch. Requisition tokens
+  // only expand the matching employer's official API queries; they never become an apply route on
+  // their own. Even an embedded supported ATS link remains lookup evidence until a current
+  // official row uniquely matches the browser company/title/location identity.
+  await guard('before_route_hint_resolution');
+  const landingResolution = await inspectUnknownDirectRoutes(opts.browserJobs || [], sources, {
+    fetchFn: opts.routeResolutionFetch,
+    limit: opts.routeResolutionLimit,
+    concurrency: opts.routeResolutionConcurrency,
+    timeoutMs: opts.routeResolutionTimeoutMs,
+    maxBytes: opts.routeResolutionMaxBytes,
+    maxRedirects: opts.routeResolutionMaxRedirects,
+    landingRetryCooldownMs: opts.landingRetryCooldownMs,
+    now: opts.now,
+  });
+  await guard('after_route_hint_resolution');
+  const normalizedBrowserJobs = normalizeBrowserJobs(landingResolution.jobs);
+  report.routeResolution = { inspected: landingResolution.inspected,
+    directHints: landingResolution.directHints, hintsExtracted: landingResolution.hintsExtracted,
+    outcomes: landingResolution.outcomes.slice(0, 50) };
+
   // --- Modality A: API registry ---
   await guard('before_source_all_registry');
   const a = await fetchAll(sources, { concurrency: opts.concurrency || 8, timeoutMs: 12000,
     queries, nationwideUS: opts.nationwideUS === true,
     targetLocation: opts.targetLocation, targetRadiusMiles: opts.targetRadiusMiles,
-    locationStrictness: opts.locationStrictness, remotePolicy: opts.remotePolicy });
+    locationStrictness: opts.locationStrictness, remotePolicy: opts.remotePolicy,
+    seniorityBand: opts.seniorityBand,
+    routeHints: landingResolution.hints });
   await guard('after_source_all_registry');
   const filterOpts = { nationwideUS: opts.nationwideUS === true,
     targetLocation: opts.targetLocation, targetRadiusMiles: opts.targetRadiusMiles,
@@ -205,10 +220,12 @@ async function sourceAll(opts = {}) {
   // Their content scripts write normalized-enough records into pja_shortlist. Folding them into
   // the same corpus makes source-v2—not a separate legacy list—the ranking source of truth.
   await guard('before_browser_capture_merge');
-  const allCapturedRaw = normalizeBrowserJobs(opts.browserJobs || []);
+  const allCapturedRaw = normalizedBrowserJobs;
   // Prefer a unique exact official posting already fetched in this owned run. The direct URL then
   // becomes the dedupe key, merging browser query/page provenance into that official record.
-  const officialResolution = resolveAgainstOfficial(allCapturedRaw, Object.values(store.index));
+  const currentOfficialPostings = Object.values(store.index).filter(posting =>
+    (posting.modalities || [posting.modality]).includes('api-registry'));
+  const officialResolution = resolveAgainstOfficial(allCapturedRaw, currentOfficialPostings);
   const allCaptured = officialResolution.jobs;
   const browserNow = opts.now != null ? Number(opts.now) : Date.now();
   const browserMaxAge = opts.maxBrowserAgeMs != null ? Number(opts.maxBrowserAgeMs) : null;
@@ -235,6 +252,7 @@ async function sourceAll(opts = {}) {
     needsDescription: cEligible.filter(j => !j.description || j.descriptionStatus === 'missing' || j.descriptionStatus === 'stale').length,
     channelHydration: hydrationSummary.byChannel,
     hydrationStatuses: hydrationSummary.overallStatuses,
+    routeInspection: report.routeResolution,
     resolution: { resolved: officialResolution.resolved, ambiguous: officialResolution.ambiguous,
       noMatch: officialResolution.noMatch, identityMismatch: officialResolution.identityMismatch,
       outcomes: officialResolution.outcomes.slice(0, 100) },
@@ -274,4 +292,4 @@ if (require.main === module) {
 }
 
 module.exports = { sourceAll, printReport, normalizeBrowserJob: require('./browser-import').normalizeBrowserJob,
-  DEFAULT_QUERIES, postingAgeDays, qualitySummary, autonomousApplyFilter };
+  DEFAULT_QUERIES, postingAgeDays, qualitySummary, autonomousApplyStrategy, autonomousApplyFilter };

@@ -3,6 +3,7 @@
 const { getAdapter } = require('./adapters');
 const { filterJobs } = require('./filter');
 const { dedupe, appliedKeySet } = require('./dedupe');
+const { hintsForSource, sourceCareerHosts } = require('./route-resolution');
 
 function ageDays(value, now = Date.now()) {
   const text = String(value || '').trim();
@@ -59,8 +60,17 @@ async function fetchAll(sources, opts = {}) {
       const label = src.name || src.slug || src.ats;
       if (!ad) { stats.push(sourceYieldStats(label, src.ats, [], opts, 'no-adapter')); continue; }
       try {
-        const got = await ad.fetchJobs(src, opts);
-        for (const job of got) if (job && !job.sourceBoard) job.sourceBoard = label;
+        const sourceHints = hintsForSource(src, opts.routeHints || []);
+        const got = await ad.fetchJobs(src, { ...opts, routeHints: sourceHints });
+        const sourceAliases = Array.from(new Set((Array.isArray(src.aliases) ? src.aliases : [])
+          .map(value => String(value || '').trim()).filter(Boolean)));
+        const careerHosts = sourceCareerHosts(src);
+        for (const job of got) if (job) {
+          if (!job.sourceBoard) job.sourceBoard = label;
+          job.sourceName = String(src.name || '').trim();
+          if (sourceAliases.length) job.sourceAliases = sourceAliases.slice();
+          if (careerHosts.length) job.careerHosts = careerHosts.slice();
+        }
         jobs.push(...got);
         stats.push(sourceYieldStats(label, src.ats, got, opts));
       } catch (e) {

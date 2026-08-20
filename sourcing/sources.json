@@ -444,6 +444,9 @@
     {
       "ats": "workday",
       "name": "Applied Materials",
+      "aliases": ["Applied Materials, Inc."],
+      "careerHosts": ["careers.appliedmaterials.com", "jobs.appliedmaterials.com"],
+      "routeHosts": ["dsp.prng.co"],
       "apiUrl": "https://amat.wd1.myworkdayjobs.com/wday/cxs/amat/External/jobs",
       "siteBase": "https://amat.wd1.myworkdayjobs.com/en-US/External",
       "queries": ["Quality Engineer", "Product Engineer"],
@@ -530,6 +533,26 @@
       "name": "Intel",
       "apiUrl": "https://intel.wd1.myworkdayjobs.com/wday/cxs/intel/External/jobs",
       "siteBase": "https://intel.wd1.myworkdayjobs.com/en-US/External"
+    },
+    {
+      "ats": "workday",
+      "name": "Johnson & Johnson",
+      "aliases": ["J&J", "Johnson & Johnson MedTech", "Shockwave Medical", "Shockwave Medical, Inc."],
+      "careerHosts": ["careers.jnj.com"],
+      "apiUrl": "https://jj.wd5.myworkdayjobs.com/wday/cxs/jj/JJ/jobs",
+      "siteBase": "https://jj.wd5.myworkdayjobs.com/en-US/JJ",
+      "queries": ["Quality Engineer", "Process Engineer", "Manufacturing Engineer"],
+      "perQueryMax": 40
+    },
+    {
+      "ats": "workday",
+      "name": "Cisco",
+      "aliases": ["Cisco Systems", "Cisco Systems, Inc."],
+      "careerHosts": ["careers.cisco.com", "jobs.cisco.com"],
+      "apiUrl": "https://cisco.wd5.myworkdayjobs.com/wday/cxs/cisco/Cisco_Careers/jobs",
+      "siteBase": "https://cisco.wd5.myworkdayjobs.com/en-US/Cisco_Careers",
+      "queries": ["Manufacturing Engineer", "Quality Engineer", "Process Engineer"],
+      "perQueryMax": 40
     },
     {
       "ats": "lever",
@@ -663,6 +686,19 @@
     },
     {
       "ats": "ashby",
+      "slug": "skydio",
+      "name": "Skydio",
+      "aliases": ["Skydio, Inc."],
+      "careerHosts": ["skydio.com"]
+    },
+    {
+      "ats": "ashby",
+      "slug": "marianaminerals",
+      "name": "Mariana Minerals",
+      "careerHosts": ["marianaminerals.com"]
+    },
+    {
+      "ats": "ashby",
       "slug": "lumilens",
       "name": "Lumilens"
     },
@@ -705,6 +741,13 @@
       "ats": "greenhouse",
       "slug": "mill",
       "name": "Mill"
+    },
+    {
+      "ats": "greenhouse",
+      "slug": "cellink",
+      "name": "CelLink",
+      "aliases": ["CelLink Corporation", "CelLink Technologies"],
+      "careerHosts": ["cellinktechnologies.com", "cel-link.com"]
     },
     {
       "ats": "greenhouse",

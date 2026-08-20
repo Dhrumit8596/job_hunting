@@ -41,6 +41,28 @@ module.exports = (t) => {
   t.eq(successfactors.every(s => s.locationSearch === 'United States' && /^https:\/\//.test(s.baseUrl)), true,
     'every SuccessFactors source is US-scoped and uses a secure branded board');
 
+  const jj = sources.find(s => s.ats === 'workday' && s.name === 'Johnson & Johnson');
+  t.eq({ apiUrl: jj && jj.apiUrl, alias: jj && jj.aliases.includes('Shockwave Medical'),
+    host: jj && jj.careerHosts.includes('careers.jnj.com') },
+  { apiUrl: 'https://jj.wd5.myworkdayjobs.com/wday/cxs/jj/JJ/jobs', alias: true, host: true },
+  'Johnson & Johnson Workday source carries the validated endpoint and exact Shockwave employer route metadata');
+  const cisco = sources.find(s => s.ats === 'workday' && s.name === 'Cisco');
+  t.eq({ apiUrl: cisco && cisco.apiUrl, host: cisco && cisco.careerHosts.includes('careers.cisco.com') },
+  { apiUrl: 'https://cisco.wd5.myworkdayjobs.com/wday/cxs/cisco/Cisco_Careers/jobs', host: true },
+  'Cisco Workday source carries its validated public CXS endpoint and registered careers host');
+  t.eq(sources.filter(s => s.ats === 'ashby' && ['skydio', 'marianaminerals'].includes(s.slug))
+    .map(s => s.slug).sort(), ['marianaminerals', 'skydio'],
+  'validated Skydio and Mariana Minerals Ashby boards are registered');
+  const cellink = sources.find(s => s.ats === 'greenhouse' && s.slug === 'cellink');
+  t.eq({ name: cellink && cellink.name, alias: cellink && cellink.aliases.includes('CelLink Corporation'),
+    host: cellink && cellink.careerHosts.includes('cellinktechnologies.com') },
+  { name: 'CelLink', alias: true, host: true },
+  'validated CelLink Greenhouse board carries exact employer aliases and career-host metadata');
+  const amat = sources.find(s => s.ats === 'workday' && s.name === 'Applied Materials');
+  t.eq({ careerHosts: amat && amat.careerHosts.slice().sort(), routeHosts: amat && amat.routeHosts },
+  { careerHosts: ['careers.appliedmaterials.com', 'jobs.appliedmaterials.com'], routeHosts: ['dsp.prng.co'] },
+  'Applied Materials route hints require its registered employer hosts, including the bounded prng redirect origin');
+
   t.eq(sources.filter(s => s.ats === 'greenhouse' && s.slug === 'nuro').length, 1,
     'Nuro exact duplicate is removed');
   t.eq(sources.filter(s => s.slug === 'foundry-robotics').map(s => s.ats), ['ashby'],

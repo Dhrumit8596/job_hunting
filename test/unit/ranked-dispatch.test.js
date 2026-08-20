@@ -168,10 +168,40 @@ module.exports = async (t) => {
 
   t.ok(source.includes("msg.cmd === 'getBrowserShortlist'") &&
     source.includes('needsAtsResolution: !!j.needsAtsResolution') &&
+    source.includes('routeResolutionAttempts: Number(j.routeResolutionAttempts) || 0') &&
+    source.includes('routeResolutionAttemptedAt: j.routeResolutionAttemptedAt') &&
+    source.includes("routeLandingStatus: j.routeLandingStatus || ''") &&
+    source.includes('routeLandingAttempts: Number(j.routeLandingAttempts) || 0') &&
+    source.includes('routeLandingAttemptedAt: j.routeLandingAttemptedAt') &&
+    source.includes("hydrationStatus: j.hydrationStatus || ''") &&
+    source.includes("hydrationReason: j.hydrationReason || ''") &&
+    source.includes('hydrationAttempts: Number(j.hydrationAttempts) || 0') &&
     source.includes('firstDiscoveredAt: j.firstDiscoveredAt || j.discoveredAt') &&
     source.includes('lastSeenAt: j.lastSeenAt || j.scrapedAt || j.discoveredAt') &&
     source.includes('j.matchedQueries.slice(0, 20)') && source.includes('j.sourcePages.slice(-40)'),
   'browser shortlist: bounded projection preserves immutable discovery and current rediscovery provenance');
+
+  t.ok(dev.includes('const linkedInHydrationCandidates = browserJobs.filter') &&
+    dev.includes('selectHydrationFrontier(linkedInHydrationCandidates') &&
+    dev.includes(': 50,') && dev.includes('browserRouteRetryCooldownMs') &&
+    dev.includes('browserHydrationRetryCooldownMs') &&
+    source.includes("Object.prototype.hasOwnProperty.call(result.applyUrls, id)") &&
+    source.includes("if (platform !== 'linkedin' || !requested.has(id)) return job") &&
+    source.includes('isVoyagerPostingSpecificRoute(route, routeStrategy)') &&
+    source.includes('safeUnresolvedLandingUrl(route)') &&
+    source.includes("resolutionMethod: 'linkedin_voyager_offsite_landing'") &&
+    source.includes("resolutionConfidence: 'lookup_only'") &&
+    source.includes('if (!route && !description) return patch') &&
+    source.includes("msg.cmd === 'persistBrowserRouteInspection'") &&
+    source.includes('self.PJABrowserBatch.mergeRouteInspection') &&
+    dev.includes("wsAsk('persistBrowserRouteInspection'") &&
+    dev.includes("'persistBrowserRouteInspectionReply'") &&
+    dev.includes("SourceSafety.sourceError('route_inspection_persistence_failed'") &&
+    source.includes('routeResolutionStatus: supportedRoute ? \'resolved\' : \'unresolved\'') &&
+    source.includes("'voyager_destination_not_supported'") &&
+    source.includes('self.PJAApplySelect.applyCapabilityStatus(route, routeStrategy)') &&
+    source.includes('voyagerDestinationsObserved'),
+  'browser enrichment: LinkedIn is filtered before the fifty-row frontier and every null/unsupported route is durably backed off');
 
   t.ok(source.includes("'pja_discovery_scan_tabs'") &&
     source.includes("chrome.tabs.create({ url: scanUrl, active: true }") &&

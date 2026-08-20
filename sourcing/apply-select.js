@@ -118,20 +118,114 @@
     return '';
   }
 
+  function isPostingSpecificSupportedRoute(applyUrl, strategy) {
+    let u;
+    try { u = new URL(String(applyUrl || '')); } catch (_) { return false; }
+    const detected = detectAts(u.toString());
+    const s = String(strategy || detected || '').toLowerCase();
+    if (!detected || detected !== s) return false;
+    const parts = u.pathname.split('/').filter(Boolean);
+    if (s === 'greenhouse') {
+      return /\/jobs\/\d+\/?$/i.test(u.pathname) ||
+        /\/embed\/job_app\/?$/i.test(u.pathname) && !!(u.searchParams.get('token') || u.searchParams.get('gh_jid'));
+    }
+    if (s === 'lever') return parts.length >= 2 && !/^(?:jobs?|team|apply|search|about)$/i.test(parts[1]);
+    if (s === 'ashby') return parts.length >= 2 && !/^(?:jobs?|team|apply|search|about)$/i.test(parts[1]);
+    if (s === 'workday') {
+      const tail = parts[parts.length - 1] || '';
+      return parts.some(part => /^job$/i.test(part)) &&
+        (/_((?:[a-z]{0,5}-?)?\d[\w-]{2,})$/i.test(tail) || /^(?:[a-z]{0,5}-?)?\d[\w-]{2,}$/i.test(tail));
+    }
+    if (s === 'smartrecruiters') return parts.length >= 2 && /^\d{5,}(?:-|$)/.test(parts[1]);
+    if (s === 'workable') return /\/j\/[^/]+/i.test(u.pathname);
+    if (s === 'breezy') return /\/p\/[^/]+/i.test(u.pathname);
+    if (s === 'bamboohr') return /\/careers\/[^/]+/i.test(u.pathname);
+    if (s === 'paylocity') return /\/jobs\/(?:details\/)?[^/]+/i.test(u.pathname);
+    if (s === 'rippling') return /\/jobs\/[^/]+/i.test(u.pathname);
+    if (s === 'jobvite') return /\/job\/[^/]+/i.test(u.pathname);
+    return false;
+  }
+
+  function isVoyagerPostingSpecificRoute(applyUrl, strategy) {
+    if (!isPostingSpecificSupportedRoute(applyUrl, strategy)) return false;
+    let u;
+    try { u = new URL(String(applyUrl || '')); } catch (_) { return false; }
+    const s = String(strategy || detectAts(u.toString()) || '').toLowerCase();
+    const parts = u.pathname.split('/').filter(Boolean);
+    const token = parts[1] || '';
+    if (s === 'greenhouse') return /\/jobs\/\d+\/?$/i.test(u.pathname) ||
+      /\/embed\/job_app\/?$/i.test(u.pathname) && /^\d+$/.test(u.searchParams.get('token') || u.searchParams.get('gh_jid') || '');
+    if (s === 'lever') return /^[0-9a-f]{8}-[0-9a-f-]{20,}$/i.test(token);
+    if (s === 'ashby') return /^[0-9a-f]{8}-[0-9a-f-]{20,}$/i.test(token);
+    if (s === 'workday' || s === 'smartrecruiters') return true;
+    if (s === 'workable') return parts.some((part, index) => /^j$/i.test(part) && /^[a-z0-9-]{5,}$/i.test(parts[index + 1] || ''));
+    if (s === 'breezy') return parts.some((part, index) => /^p$/i.test(part) && /^[a-z0-9-]{5,}$/i.test(parts[index + 1] || ''));
+    if (s === 'bamboohr') return /\/careers\/\d+/i.test(u.pathname);
+    if (s === 'paylocity') return /\/jobs\/(?:details\/)?\d+/i.test(u.pathname);
+    if (s === 'rippling') return /\/jobs\/[a-z0-9-]{5,}/i.test(u.pathname);
+    if (s === 'jobvite') return /\/job\/[a-z0-9-]{4,}/i.test(u.pathname);
+    return false;
+  }
+
+  function safeUnresolvedLandingUrl(value) {
+    let u;
+    try { u = new URL(String(value || '')); } catch (_) { return ''; }
+    if (!/^https?:$/.test(u.protocol)) return '';
+    const host = u.hostname.toLowerCase().replace(/^\[|\]$/g, '');
+    if (!host || host === 'localhost' || host.endsWith('.localhost') || host.endsWith('.local') ||
+        host === '0.0.0.0' || host === '::1' || host.includes(':') ||
+        /(^|\.)(linkedin|indeed|glassdoor)\.com$/i.test(host)) return '';
+    const octets = host.split('.').map(Number);
+    if (octets.length === 4 && octets.every(Number.isInteger) &&
+        (octets[0] === 10 || octets[0] === 127 || octets[0] === 0 ||
+         octets[0] === 169 && octets[1] === 254 ||
+         octets[0] === 172 && octets[1] >= 16 && octets[1] <= 31 ||
+         octets[0] === 192 && octets[1] === 168)) return '';
+    u.hash = '';
+    return u.toString();
+  }
+
   function applyCapabilityStatus(applyUrl, strategy) {
     const unsupportedReason = unsupportedAutonomousApplyReason(applyUrl, strategy);
     if (unsupportedReason) return { status: 'unsupported', reason: unsupportedReason };
     const s = String(strategy || '').toLowerCase();
+    if (/^(greenhouse|lever|ashby|workday|smartrecruiters|workable|breezy|bamboohr|paylocity|rippling|jobvite)$/.test(s) &&
+        !isPostingSpecificSupportedRoute(applyUrl, s)) {
+      return { status: 'unknown_needs_resolution', reason: 'apply_destination_not_posting_specific' };
+    }
     if (/^(workday|indeed|linkedin_ea)$/.test(s)) return { status: 'supported_but_auth_sensitive', reason: '' };
-    if (/^(greenhouse|lever|ashby|smartrecruiters|workable|breezy|bamboohr|paylocity|rippling|jobvite|generic)$/.test(s)) {
+    if (/^(greenhouse|lever|ashby|smartrecruiters|workable|breezy|bamboohr|paylocity|rippling|jobvite)$/.test(s)) {
       return { status: 'supported', reason: '' };
     }
     return { status: 'unknown_needs_resolution', reason: 'unknown_apply_strategy' };
   }
 
+  function destinationStrategy(posting, channel) {
+    const p = posting || {};
+    const c = String(channel || p.channel || '').toLowerCase();
+    if (c === 'linkedin_easy_apply') return 'linkedin_ea';
+    if (c === 'indeed_apply') return 'indeed';
+    // Route detection and route attestation are separate facts. A recognized ATS hostname does
+    // not override an explicit unresolved marker from browser discovery.
+    if (p.needsAtsResolution === true) return '';
+    const byUrl = detectAts(p.applyUrl);
+    if (byUrl) return byUrl;
+    if (p.needsAtsResolution !== true && p.detectedAts) {
+      const detected = String(p.detectedAts).toLowerCase();
+      if (!/^(?:indeed|linkedin|linkedin_ea)$/.test(detected)) return detected;
+    }
+    // `ats` on browser captures records where the posting was discovered (often LinkedIn), not
+    // where an off-site application is submitted. Never turn that provenance into a destination.
+    const source = String(p.sourcePlatform || '').toLowerCase();
+    const legacy = String(p.ats || '').toLowerCase();
+    if (source && legacy === source) return '';
+    if (/^(?:indeed|linkedin|linkedin_ea)$/.test(legacy)) return '';
+    return legacy;
+  }
+
   function compactPlanJob(id, p, st, reason, extra = {}) {
     let strategy = extra.strategy || '';
-    if (!strategy && p) strategy = detectAts(p.applyUrl) || p.detectedAts || p.ats || '';
+    if (!strategy && p) strategy = destinationStrategy(p, extra.channel);
     let channel = extra.channel || p && p.channel || '';
     if (!channel && p && (p.isEasyApply || (p.ats === 'linkedin' && p.sourcePlatform === 'linkedin'))) channel = p.isEasyApply ? 'linkedin_easy_apply' : '';
     if (!channel && p && p.indeedApply) channel = 'indeed_apply';
@@ -143,7 +237,8 @@
       company: p && p.company || '',
       title: p && p.title || '',
       channel,
-      ats: p && (p.ats || p.detectedAts) || strategy || '',
+      ats: channel === 'linkedin_easy_apply' ? 'linkedin'
+        : channel === 'indeed_apply' ? 'indeed' : strategy || '',
       strategy,
       fitScore: st && st.fitScore != null && Number.isFinite(Number(st.fitScore)) ? Number(st.fitScore) : null,
       status: st && st.status || 'sourced',
@@ -264,9 +359,7 @@
     if (!channel && p.indeedApply) channel = 'indeed_apply';
     if (!channel) channel = 'external';
     if (channelAllow && !channelAllow.has(String(channel).toLowerCase())) return 'channel_not_allowed';
-    const strategy = channel === 'linkedin_easy_apply' ? 'linkedin_ea'
-      : channel === 'indeed_apply' ? 'indeed'
-      : detectAts(p.applyUrl) || p.detectedAts || p.ats || '';
+    const strategy = destinationStrategy(p, channel);
     const aggregatorOnly = /(^|\.)(linkedin|indeed|glassdoor)\.com$/i.test(applyHost);
     if (channel === 'external' && aggregatorOnly && !detectAts(p.applyUrl)) return 'aggregator_without_apply_destination';
     const capability = applyCapabilityStatus(p.applyUrl, strategy || 'generic');
@@ -379,9 +472,7 @@
       if (!channel && p.indeedApply) channel = 'indeed_apply';
       if (!channel) channel = 'external';
       if (channelAllow && !channelAllow.has(String(channel).toLowerCase())) continue;
-      const strategy = channel === 'linkedin_easy_apply' ? 'linkedin_ea'
-        : channel === 'indeed_apply' ? 'indeed'
-        : detectAts(p.applyUrl) || p.detectedAts || p.ats || '';
+      const strategy = destinationStrategy(p, channel);
       // Browser aggregator listings whose external destination was not resolved are valid sourcing
       // leads, but they are not safe autonomous-apply targets yet. Classify them before capability
       // lookup so LinkedIn/Indeed/Glassdoor external rows are not mislabeled unknown handlers.
@@ -392,7 +483,9 @@
       if (atsAllow && !atsAllow.has(String(strategy).toLowerCase())) continue; // outside the allow-list
       out.push({
         id, applyUrl: p.applyUrl, company: p.company, title: p.title, location: p.location,
-        ats: p.ats || '', fitScore: hasFit ? Number(fit) : null, attempts: st.attempts || 0, strategy, channel,
+        ats: channel === 'linkedin_easy_apply' ? 'linkedin'
+          : channel === 'indeed_apply' ? 'indeed' : strategy,
+        fitScore: hasFit ? Number(fit) : null, attempts: st.attempts || 0, strategy, channel,
         applyStrategyStatus: capability.status,
         sourcePlatform: p.sourcePlatform || '', sourceJobId: p.sourceJobId || '',
         discoveredAt: p.discoveredAt || '',
@@ -682,7 +775,10 @@
     sameLifecycleJob, applyLifecycleOwnership, watchdogDecision, missingTabRecoveryDecision,
     classifyMissingTabOutcome, diagnosticOwnsRankedJob, workdayGmailOwnership,
     emailCodeSubmitRisk, emailCodeOwnership, submittedUnverifiedReason,
-    unsupportedAutonomousApplyReason, applyCapabilityStatus, hasUsableDescription,
+    unsupportedAutonomousApplyReason, isPostingSpecificSupportedRoute, isVoyagerPostingSpecificRoute,
+    safeUnresolvedLandingUrl,
+    applyCapabilityStatus,
+    destinationStrategy, hasUsableDescription,
     evidenceMaterialGaps, hasCurrentScoringPolicy, timestampMs, browserFreshnessAt };
   if (root) root.PJAApplySelect = API;
   if (typeof module !== 'undefined' && module.exports) module.exports = API;

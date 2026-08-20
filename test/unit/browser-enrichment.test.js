@@ -38,6 +38,35 @@ module.exports = async t => {
     { ...official, id: 'gh-2', location: 'Fremont, CA', applyUrl: 'https://jobs.lever.co/acme/2' }]);
   t.eq(decoratedAmbiguous.ambiguous, 1,
     'browser resolution: multiple presentation-compatible official requisitions remain unresolved');
+  const suffixAlias = Enrichment.resolveAgainstOfficial([
+    { ...lead, company: 'Penumbra, Inc.' },
+  ], [{ ...official, company: 'Penumbra' }]);
+  t.eq({ resolved: suffixAlias.resolved, method: suffixAlias.jobs[0].resolutionMethod },
+    { resolved: 1, method: 'official_unique_company_alias_title_location' },
+  'browser resolution: a unique legal-suffix company alias resolves only with exact title and location');
+  const attestedAlias = Enrichment.resolveAgainstOfficial([
+    { ...lead, company: 'Shockwave Medical', title: 'Supplier Quality Engineer II', location: 'Santa Clara, CA' },
+  ], [{ ...official, company: 'Johnson & Johnson', title: 'Supplier Quality Engineer II',
+    location: 'Santa Clara, California, United States', sourceAliases: ['Shockwave Medical'],
+    applyUrl: 'https://jj.wd5.myworkdayjobs.com/en-US/JJ/job/x_R-086504' }]);
+  t.eq({ resolved: attestedAlias.resolved, method: attestedAlias.jobs[0].resolutionMethod },
+    { resolved: 1, method: 'official_unique_company_alias_title_location' },
+  'browser resolution: an explicit source alias resolves a unique exact-title exact-location official posting');
+  const aliasWrongCity = Enrichment.resolveAgainstOfficial([
+    { ...lead, company: 'Shockwave Medical', title: 'Supplier Quality Engineer II', location: 'San Jose, CA' },
+  ], [{ ...official, company: 'Johnson & Johnson', title: 'Supplier Quality Engineer II',
+    location: 'Santa Clara, CA', sourceAliases: ['Shockwave Medical'] }]);
+  t.eq(aliasWrongCity.noMatch, 1,
+    'browser resolution: an employer alias never relaxes exact location compatibility');
+  const staleBrowserJd = Enrichment.resolveAgainstOfficial([
+    { ...lead, description: 'Old browser description.', descriptionStatus: 'stale' },
+  ], [{ ...official, description: 'Current official requirements.', descriptionStatus: 'complete',
+    hydratedAt: '2026-08-19T12:00:00Z' }]);
+  t.eq({ description: staleBrowserJd.jobs[0].description,
+    status: staleBrowserJd.jobs[0].descriptionStatus,
+    method: staleBrowserJd.jobs[0].hydrationMethod },
+  { description: 'Current official requirements.', status: 'complete', method: 'official_record_merge' },
+  'browser resolution: a stale browser JD cannot override the current official posting evidence');
 
   const now = Date.parse('2026-08-19T12:00:00Z');
   const routeOnly = { ...lead, id: 'route-only', sourcePlatform: 'linkedin', channel: 'external',
@@ -48,8 +77,33 @@ module.exports = async t => {
     needsAtsResolution: false, description: 'Complete requirements.', descriptionStatus: 'full', lastSeenAt: now - 1000 };
   const frontier = Enrichment.selectHydrationFrontier([assistedMissing, readyFull, routeOnly], {
     limit: 20, freshAfter: now - 86400000 });
-  t.eq(frontier.map(row => row.id), ['route-only', 'assisted'],
-    'browser enrichment: full-JD unresolved routes remain eligible and outrank already-routed assisted hydration');
+  t.eq(frontier.map(row => row.id), ['assisted', 'route-only'],
+    'browser enrichment: independent missing-JD and unresolved-route lanes both retain capacity');
+  const lanes = Enrichment.selectHydrationFrontier([
+    ...Array.from({ length: 4 }, (_, i) => ({ ...routeOnly, id: 'full-route-' + i })),
+    ...Array.from({ length: 4 }, (_, i) => ({ ...assistedMissing, id: 'missing-jd-' + i })),
+  ], { limit: 4, freshAfter: now - 86400000, now });
+  t.eq({ total: lanes.length,
+    missing: lanes.filter(row => !row.description).length,
+    routes: lanes.filter(row => row.needsAtsResolution).length },
+  { total: 4, missing: 2, routes: 2 },
+  'browser enrichment: a bounded frontier reserves half its capacity for each independent supply lane');
+  const cooled = { ...routeOnly, id: 'cooled', fitScore: 99, routeResolutionStatus: 'unresolved',
+    routeResolutionAttemptedAt: now - 1000 };
+  const untouched = { ...routeOnly, id: 'untouched', fitScore: 75 };
+  t.eq(Enrichment.selectHydrationFrontier([cooled, untouched], {
+    limit: 1, freshAfter: now - 86400000, now, routeRetryCooldownMs: 3600000 })[0].id, 'untouched',
+  'browser enrichment: recent null route results back off so untouched leads can enter the next bounded pass');
+  t.eq(Enrichment.selectHydrationFrontier([cooled], {
+    limit: 10, freshAfter: now - 86400000, now, routeRetryCooldownMs: 3600000 }), [],
+  'browser enrichment: a recently unresolved route is excluded, not merely deprioritized into an undersized frontier');
+  const hydrationCooled = { ...assistedMissing, id: 'hydration-cooled',
+    hydrationStatus: 'hydration_no_progress', hydrationAttemptedAt: now - 1000 };
+  t.eq(Enrichment.selectHydrationFrontier([hydrationCooled], {
+    limit: 10, freshAfter: now - 86400000, now, hydrationRetryCooldownMs: 3600000 }), [],
+  'browser enrichment: a recent missing-JD null result also receives a bounded retry cooldown');
+  t.eq(Enrichment.selectHydrationFrontier([untouched], { limit: 0, now }), [],
+    'browser enrichment: an explicit zero limit performs no enrichment work');
   const bounded = Enrichment.selectHydrationFrontier(Array.from({ length: 60 }, (_, i) => ({
     ...routeOnly, id: 'route-' + i })), { limit: 100, freshAfter: now - 86400000 });
   t.eq(bounded.length, 50, 'browser enrichment: route-resolution frontier retains its hard fifty-row cap');

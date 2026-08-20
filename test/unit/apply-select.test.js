@@ -8,7 +8,9 @@ const { buildApplySet, buildApplyPlan, resultToState, poolStatus, roleKey, green
   watchdogDecision, queueJobKey, applyLifecycleOwnership, missingTabRecoveryDecision,
   classifyMissingTabOutcome, diagnosticOwnsRankedJob, workdayGmailOwnership,
   emailCodeSubmitRisk, emailCodeOwnership, submittedUnverifiedReason,
-  unsupportedAutonomousApplyReason, applyCapabilityStatus,
+  unsupportedAutonomousApplyReason, isPostingSpecificSupportedRoute, isVoyagerPostingSpecificRoute,
+  safeUnresolvedLandingUrl,
+  applyCapabilityStatus, destinationStrategy,
   hasUsableDescription, applyUrlKey, linkedinJobId, browserFreshnessAt } = require(path.resolve(__dirname, '../../sourcing/apply-select'));
 
 function corpus(entries) {
@@ -32,6 +34,28 @@ module.exports = (t) => {
   t.eq(applyUrlKey('https://www.linkedin.com/jobs/search-results/?currentJobId=4429434522&keywords=jobs&f_AL=true'),
     applyUrlKey('https://www.linkedin.com/jobs/view/4429434522/'),
     'LinkedIn identity: search-result and canonical view URLs de-duplicate to one key');
+  t.eq(destinationStrategy({ ats: 'linkedin', sourcePlatform: 'linkedin', channel: 'external',
+    needsAtsResolution: true, applyUrl: 'https://careers.example.com/jobs/R1' }), '',
+  'destination strategy: LinkedIn provenance never becomes an off-site application strategy');
+  t.eq(destinationStrategy({ ats: 'linkedin', sourcePlatform: 'linkedin', channel: 'external',
+    applyUrl: 'https://jobs.ashbyhq.com/acme/job-1/application' }), 'ashby',
+  'destination strategy: a supported direct URL overrides its LinkedIn discovery provenance');
+  t.eq(destinationStrategy({ channel: 'external', needsAtsResolution: true,
+    applyUrl: 'https://boards.greenhouse.io/acme/jobs/123' }), '',
+  'destination strategy: an explicit unresolved marker blocks a recognized ATS hostname until attestation');
+  t.eq(destinationStrategy({ channel: 'external', needsAtsResolution: false,
+    applyUrl: 'https://careers.example.com/jobs/R1', detectedAts: 'indeed' }), '',
+  'destination strategy: external metadata cannot impersonate the Indeed native channel');
+  t.eq(destinationStrategy({ channel: 'external', needsAtsResolution: false,
+    applyUrl: 'https://careers.example.com/jobs/R2', detectedAts: 'linkedin_ea' }), '',
+  'destination strategy: external metadata cannot impersonate the LinkedIn Easy Apply channel');
+  const unresolvedLandingCorpus = corpus([{ id: 'linkedin:lookup-only', company: 'Shockwave Medical',
+    title: 'Supplier Quality Engineer II', applyUrl: 'https://careers.jnj.com/en/jobs/r-086504',
+    fit: 95, channel: 'external' }]);
+  unresolvedLandingCorpus.index['linkedin:lookup-only'].sourcePlatform = 'linkedin';
+  unresolvedLandingCorpus.index['linkedin:lookup-only'].needsAtsResolution = true;
+  t.eq(buildApplySet(unresolvedLandingCorpus, { threshold: 75 }), [],
+    'route resolution: a retained corporate landing cannot enter the live queue before official resolution');
 
   const c = corpus([
     { id: 'greenhouse:1', company: 'Carbon', title: 'Process Engineer', applyUrl: 'https://boards.greenhouse.io/carbon/jobs/1', fit: 82 },
@@ -56,6 +80,14 @@ module.exports = (t) => {
   t.eq(set.map(j => j.id), ['greenhouse:1', 'gh:5', 'greenhouse:2'], 'sorted by fit desc');
   t.eq(set[0].fitScore, 82, 'highest fit first (dead gh:6=88 excluded)');
   t.eq(set.map(j => j.strategy).every(Boolean), true, 'every job stamped with a strategy');
+  const linkedInOriginExternal = corpus([{ id: 'linkedin:external', company: 'Acme',
+    title: 'Test Engineer', applyUrl: 'https://jobs.ashbyhq.com/acme/job-1/application', fit: 81,
+    ats: 'linkedin', channel: 'external' }]);
+  linkedInOriginExternal.index['linkedin:external'].sourcePlatform = 'linkedin';
+  t.eq(buildApplySet(linkedInOriginExternal, { threshold: 75 }).map(job => ({
+    ats: job.ats, strategy: job.strategy, sourcePlatform: job.sourcePlatform })),
+  [{ ats: 'ashby', strategy: 'ashby', sourcePlatform: 'linkedin' }],
+  'destination strategy: queued off-site jobs report the owning ATS while preserving discovery provenance');
   const plan = buildApplyPlan(c, { threshold: 70, dailyCap: 30 });
   t.eq(plan.jobs.map(j => j.id), set.map(j => j.id), 'buildApplyPlan preserves buildApplySet selected jobs');
   t.eq(plan.dropCounts.below_threshold, 1, 'buildApplyPlan explains below-threshold planning drops');
@@ -135,8 +167,10 @@ module.exports = (t) => {
     { selected: ['greenhouse:state-2'], priorState: 1 },
     'first-attempt-only selection drops sourced attempts without excluding an unattempted sibling requisition');
   const collisionCorpus = corpus([
-    { id: 'workday:alpha:R1234', company: 'Alpha Fab', title: 'Process Engineer', applyUrl: 'https://alpha.example/jobs/R1234', fit: 90 },
-    { id: 'workday:beta:R1234', company: 'Beta Fab', title: 'Process Engineer', applyUrl: 'https://beta.example/jobs/R1234', fit: 89 },
+    { id: 'workday:alpha:R1234', company: 'Alpha Fab', title: 'Process Engineer',
+      applyUrl: 'https://alpha.wd5.myworkdayjobs.com/en-US/Careers/job/Process-Engineer_R1234', fit: 90 },
+    { id: 'workday:beta:R1234', company: 'Beta Fab', title: 'Process Engineer',
+      applyUrl: 'https://beta.wd5.myworkdayjobs.com/en-US/Careers/job/Process-Engineer_R1234', fit: 89 },
   ]);
   collisionCorpus.index['workday:alpha:R1234'].sourceJobId = 'R1234';
   collisionCorpus.index['workday:beta:R1234'].sourceJobId = 'R1234';
@@ -283,6 +317,37 @@ module.exports = (t) => {
     'unsupported_eightfold_portal_auth', 'unsupported: Eightfold/GF auth portal route');
   t.eq(applyCapabilityStatus('https://careers.gf.com/careers/apply?pid=563980769981826', 'eightfold').status,
     'unsupported', 'capability registry marks Eightfold as unsupported before apply');
+  t.eq(applyCapabilityStatus('https://careers.example.com/jobs/123', 'generic').status,
+    'unknown_needs_resolution',
+  'capability registry never admits an unattested corporate generic form into an autonomous queue');
+  t.eq(isPostingSpecificSupportedRoute('https://boards.greenhouse.io/acme', 'greenhouse'), false,
+    'capability registry: an ATS board home is not a posting-specific apply destination');
+  t.eq(isVoyagerPostingSpecificRoute('https://boards.greenhouse.io/acme/jobs/search', 'greenhouse'), false,
+    'Voyager route gate: a Greenhouse search path is not a posting');
+  t.eq(isVoyagerPostingSpecificRoute('https://jobs.lever.co/acme/team', 'lever'), false,
+    'Voyager route gate: a Lever team path is not a posting');
+  t.eq(isVoyagerPostingSpecificRoute('https://jobs.ashbyhq.com/acme/about', 'ashby'), false,
+    'Voyager route gate: an Ashby about path is not a posting');
+  t.eq(isVoyagerPostingSpecificRoute('https://acme.wd5.myworkdayjobs.com/en-US/Careers/job/foo', 'workday'), false,
+    'Voyager route gate: a Workday job-shaped path without a requisition token stays lookup-only');
+  t.eq(isVoyagerPostingSpecificRoute('https://jobs.ashbyhq.com/acme/' +
+    'd4fdb4b0-9fc4-4a1e-bfea-e7c2ff9b587a/application', 'ashby'), true,
+  'Voyager route gate: a strong Ashby posting identity remains supported');
+  t.eq(isPostingSpecificSupportedRoute('https://greenhouse.io.attacker.example/acme/jobs/123', 'greenhouse'), false,
+    'capability registry: a suffix-spoofed ATS hostname fails closed');
+  t.eq(safeUnresolvedLandingUrl('https://careers.jnj.com/en/jobs/r-086504'),
+    'https://careers.jnj.com/en/jobs/r-086504',
+  'route resolution: a public non-aggregator landing may be retained only as lookup evidence');
+  t.eq(safeUnresolvedLandingUrl('http://127.0.0.1/private'), '',
+    'route resolution: private landing URLs are never retained for follow-up inspection');
+  t.eq(applyCapabilityStatus('https://boards.greenhouse.io/acme', 'greenhouse'),
+    { status: 'unknown_needs_resolution', reason: 'apply_destination_not_posting_specific' },
+  'capability registry: a recognized ATS hostname still requires a posting-specific path');
+  t.eq(applyCapabilityStatus('https://careers.example.com/jobs/R1', 'workable'),
+    { status: 'unknown_needs_resolution', reason: 'apply_destination_not_posting_specific' },
+  'capability registry: metadata cannot attest a supported secondary ATS on an unrelated host');
+  t.eq(applyCapabilityStatus('https://apply.workable.com/acme/j/ABC123/', 'workable').status, 'supported',
+    'capability registry: a posting-specific secondary ATS URL remains supported');
   const unsupportedCorpus = corpus([
     { id: 'sf:bad', company: 'TSMC', title: 'Engineer', applyUrl: 'https://ro.careers.tsmc.com/talentcommunity/apply/1213393266/?locale=en_US', fit: 90, ats: 'successfactors' },
     { id: 'jobicy:bad', company: 'Spirax', title: 'Engineer', applyUrl: 'https://jobicy.com/jobs/146657-associate-application-engineer', fit: 90, ats: 'jobicy' },
