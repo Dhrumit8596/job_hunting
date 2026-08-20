@@ -22,6 +22,10 @@
     return out;
   }
 
+  function validStringArray(values) {
+    return Array.isArray(values) && values.every(value => typeof value === 'string' && clean(value));
+  }
+
   function normalizeGap(item) {
     // A string is the legacy/malformed shape. Count it as material rather than silently relaxing
     // an old score that was not produced under the structured transferability contract.
@@ -81,6 +85,60 @@
 
   function isCurrentPolicy(state) {
     return !!state && state.scoringPolicyVersion === SCORING_POLICY_VERSION;
+  }
+
+  function isQualifyingTransferability(state) {
+    const level = clean(state && state.transferability && state.transferability.level).toLowerCase();
+    return level === 'direct' || level === 'adjacent';
+  }
+
+  // A matching fingerprint alone does not make a cached model result reusable. Failed/partial
+  // responses have historically been persisted with the current policy marker and a heuristic
+  // fit score, but without the evidence needed to audit that score. Keep those rows in the bounded
+  // scoring frontier while allowing complete below-threshold results to remain cached.
+  function hasCompleteScoreEvidence(state) {
+    if (!isCurrentPolicy(state) || typeof state.fitScore !== 'number' ||
+        !Number.isFinite(state.fitScore) || state.fitScore < 0 || state.fitScore > 100) return false;
+    if (!validStringArray(state.matchEvidence)) return false;
+    const evidenceCount = uniqueStrings(state.matchEvidence, 8).length;
+    // Zero direct matches is a valid, reusable explanation for an unrelated below-threshold job.
+    // At the autonomous-qualification boundary the scoring contract requires at least three.
+    if (Number(state.fitScore) >= 75 && evidenceCount < 3) return false;
+    if (typeof state.confidence !== 'string' || !/^(high|medium|low)$/i.test(clean(state.confidence))) return false;
+
+    const transferability = state.transferability;
+    if (!transferability || typeof transferability !== 'object' ||
+        typeof transferability.level !== 'string' ||
+        typeof transferability.rationale !== 'string') return false;
+    const transferLevel = clean(transferability.level).toLowerCase();
+    if (!TRANSFER_LEVELS.has(transferLevel) || !clean(transferability.rationale)) return false;
+
+    if (!Array.isArray(state.gapDetails)) return false;
+    for (const key of ['gaps', 'materialGaps', 'trainableGaps', 'preferredGaps', 'conflicts']) {
+      if (!validStringArray(state[key])) return false;
+    }
+    if (Number(state.fitScore) >= 75 &&
+        (!/^(high|medium)$/i.test(clean(state.confidence)) || state.conflicts.length > 0 ||
+          !isQualifyingTransferability(state))) return false;
+    if (!state.gapDetails.every(gap => gap && typeof gap === 'object' &&
+        typeof gap.text === 'string' && clean(gap.text) &&
+        typeof gap.severity === 'string' && GAP_SEVERITIES.has(clean(gap.severity).toLowerCase()) &&
+        typeof gap.basis === 'string' &&
+        /^(required|preferred|unclear)$/.test(clean(gap.basis).toLowerCase()))) return false;
+
+    // The derived arrays are load-bearing gates (especially materialGaps/maxGaps), so merely
+    // having all fields is insufficient. Require them to be the canonical projections of the
+    // structured details; otherwise a stale or partially persisted score could hide a material
+    // gap by leaving the derived array empty.
+    const details = normalizeGapDetails(state.gapDetails);
+    if (details.length !== state.gapDetails.length) return false;
+    const canonical = values => uniqueStrings(values, 12).map(value => value.toLowerCase()).sort();
+    const same = (left, right) => JSON.stringify(canonical(left)) === JSON.stringify(canonical(right));
+    const bySeverity = severity => details.filter(gap => gap.severity === severity).map(gap => gap.text);
+    return same(state.gaps, details.map(gap => gap.text)) &&
+      same(state.materialGaps, bySeverity('material')) &&
+      same(state.trainableGaps, bySeverity('trainable')) &&
+      same(state.preferredGaps, bySeverity('preferred'));
   }
 
   function materialGaps(state) {
@@ -143,8 +201,9 @@ core function or several explicit minimums are not evidenced. A score of 75+ is 
 or adjacent work only when at least three direct resume-to-requirement matches cover most core
 duties, there are no hard conflicts, and confidence is medium or high.`;
 
-  const API = { SCORING_POLICY_VERSION, SCORE_POLICY_PROMPT, clean, uniqueStrings, normalizeGap,
+  const API = { SCORING_POLICY_VERSION, SCORE_POLICY_PROMPT, clean, uniqueStrings, validStringArray, normalizeGap,
     normalizeGapDetails, normalizeTransferability, normalizeScoreResult, isCurrentPolicy,
+    isQualifyingTransferability, hasCompleteScoreEvidence,
     materialGaps, gapCounts, shouldCapBelowQualification, summarize };
   if (root) root.PJAScoringEvidence = API;
   if (typeof module !== 'undefined' && module.exports) module.exports = API;

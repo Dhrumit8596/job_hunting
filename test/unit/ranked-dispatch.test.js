@@ -112,6 +112,31 @@ module.exports = async (t) => {
     dev.includes('stopBeforeSubmit, e2eSafe, unattemptedOnly'),
   'ranked planning: explicit first-attempt-only runs exclude prior identities and remain auditable without changing generic e2e-safe retries');
 
+  const exactCandidateGate = dev.indexOf('PlanningDiagnostics.exactCandidateFailure({');
+  const rankedStart = dev.indexOf("wsAsk('startRankedApply'");
+  t.ok(dev.includes('requireExactCandidateIds: o.requireExactCandidateIds === true') &&
+    dev.includes('ScoringFrontier.exactCandidateIdMembership(candidateIds, jobs)') &&
+    dev.includes('if (!dryRun && requireExactCandidateIds && !candidateSelection.exact)') &&
+    dev.includes("status: 'exact_candidate_ids_blocked'") &&
+    exactCandidateGate >= 0 && rankedStart > exactCandidateGate &&
+    dev.includes('requireExactCandidateIds, candidateSelection,') &&
+    dev.includes('Exact candidate IDs: required; requested'),
+  'ranked planning: opt-in exact candidate IDs refuse a partial live queue before start and remain visible in plans/reports');
+  t.ok(source.includes("'apply-planning-diagnostics.js'") &&
+    dev.includes('PlanningDiagnostics.compactWorkerFailure(applyResp.data)') &&
+    dev.includes('JSON.stringify({ success: false, runId: requestedRunId, ...planningFailure })') &&
+    dev.includes('PlanningDiagnostics.compactWorkerFailure(worker.data)') &&
+    dev.includes('Object.assign(terminalPatch, ownedPlanningFailure)') &&
+    source.includes('self.PJAPlanningDiagnostics.compactWorkerFailure(run)') &&
+    dev.includes('const planningFailure = PlanningDiagnostics.compactWorkerFailure(ranked)') &&
+    dev.includes('...(planningFailure || {})'),
+  'ranked planning: sanitized exact-ID and scoring diagnostics survive internal bubbling, durable ownership, and exact-run observation');
+
+  t.ok(dev.includes('(!requireEvidence || ScoringEvidence.isQualifyingTransferability(j))') &&
+    dev.includes("reason = 'rescore_stretch_transferability'") &&
+    dev.includes('stretch_transferability|below_threshold'),
+  'ranked planning: evidence-required runs reject stretch transferability with an explicit planning-drop reason');
+
   t.ok(source.includes('async function pjaRecoverRankedLastFailure(master)') &&
     source.includes("recoveredReason = isSuccessFactors && reason === 'no_submit_btn' ? 'no_apply_path' : reason") &&
     source.includes('workday_duplicate_record|workday_account_locked') &&

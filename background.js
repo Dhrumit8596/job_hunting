@@ -3,7 +3,8 @@
 // Load the IndexedDB corpus + apply-selection modules into the SW global scope. Wrapped so a load
 // failure can never brick the whole service worker. Order matters: apply-select needs detect-ats.
 try {
-  importScripts('cdp-selfheal.js', 'scoring-evidence.js', 'idb-store.js', 'sourcing/detect-ats.js', 'sourcing/apply-select.js',
+  importScripts('cdp-selfheal.js', 'scoring-evidence.js', 'apply-planning-diagnostics.js',
+    'idb-store.js', 'sourcing/detect-ats.js', 'sourcing/apply-select.js',
     'content/apply-router.js', 'application-ledger.js', 'ledger-retry-policy.js',
     'sourcing/source-safety.js', 'browser-batch.js');
 } catch (e) { console.error('PJA: module load failed', e); }
@@ -587,6 +588,8 @@ function pjaCompactObservedApplyRun(run) {
   if (!run || !run.runId) return null;
   const results = pjaCompactRankedResults(run.results);
   const counts = pjaRankedBucketCounts(results);
+  const planningFailure = self.PJAPlanningDiagnostics &&
+    self.PJAPlanningDiagnostics.compactWorkerFailure(run);
   return {
     schemaVersion: 2,
     runId: run.runId,
@@ -619,6 +622,7 @@ function pjaCompactObservedApplyRun(run) {
     finishedAt: run.finishedAt || null,
     terminalReason: run.terminalReason || '',
     reportPath: run.reportPath || '',
+    ...(planningFailure || {}),
   };
 }
 

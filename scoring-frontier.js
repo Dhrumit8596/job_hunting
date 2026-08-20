@@ -13,10 +13,10 @@ function partition(jobs, options = {}) {
   const stale = [];
   for (const job of rows) {
     const postingFingerprint = String(job.postingDescriptionFingerprint || job.descriptionFingerprint || '');
-    const cached = job.scoreKind === 'llm' && job.fitScore != null && postingFingerprint &&
+    const cached = job.scoreKind === 'llm' && postingFingerprint &&
       job.descriptionFingerprint === postingFingerprint &&
       String(job.candidateFingerprint || '') === candidateFingerprint &&
-      ScoringEvidence.isCurrentPolicy(job);
+      ScoringEvidence.hasCompleteScoreEvidence(job);
     (cached ? reusable : stale).push(job);
   }
   const needsScore = limit > 0 ? stale.slice(0, limit) : stale;
@@ -68,7 +68,46 @@ function roundPlan(total, options = {}) {
   return rounds;
 }
 
+function summarizeBatch(rows, attempted = 0) {
+  const all = Array.isArray(rows) ? rows.filter(Boolean) : [];
+  const successful = all.filter(row => row.fitScore != null && !row.scoreError);
+  const failures = all.filter(row => row.fitScore == null || row.scoreError);
+  const unavailable = failures.find(row => row.scoreError === 'ai_engine_unavailable' &&
+    row.scoreErrorRetryable === false);
+  const attemptedCount = Math.max(Number(attempted) || 0, all.length);
+  return {
+    successful,
+    failures,
+    attempted: attemptedCount,
+    scored: successful.length,
+    failed: Math.max(failures.length, attemptedCount - successful.length),
+    engineUnavailable: !!unavailable,
+    failureCode: unavailable && unavailable.scoreError || failures[0] && failures[0].scoreError || '',
+    failureReason: unavailable && unavailable.scoreErrorReason || failures[0] && failures[0].scoreErrorReason || '',
+    retryable: unavailable ? false : failures.length ? failures.every(row => row.scoreErrorRetryable !== false) : null,
+    engine: unavailable && unavailable.scoreErrorEngine || failures[0] && failures[0].scoreErrorEngine || '',
+  };
+}
+
+function exactCandidateIdMembership(requestedValues, selectedValues) {
+  const valueId = value => String(value && typeof value === 'object' ? value.id : value || '').trim();
+  const requested = new Set(Array.from(requestedValues || []).map(valueId).filter(Boolean));
+  const selected = new Set(Array.from(selectedValues || []).map(valueId).filter(Boolean));
+  const missingCandidateIds = [...requested].filter(id => !selected.has(id));
+  const unexpectedCandidateIds = [...selected].filter(id => !requested.has(id));
+  return {
+    exact: requested.size > 0 && missingCandidateIds.length === 0 && unexpectedCandidateIds.length === 0,
+    requestedCount: requested.size,
+    selectedCount: selected.size,
+    missingCandidateIds,
+    unexpectedCandidateIds,
+  };
+}
+
 function continueAfterRound(result = {}, options = {}) {
+  if (result.engineUnavailable === true) {
+    return { continue: false, reason: 'ai_engine_unavailable' };
+  }
   if (Number(result.qualifiedTotal || 0) >= Math.max(1, Number(options.reserveTarget) || 30)) {
     return { continue: false, reason: 'qualified_reserve_target_reached' };
   }
@@ -80,4 +119,4 @@ function continueAfterRound(result = {}, options = {}) {
 }
 
 module.exports = { partition, sourcePriority, deterministicPriority, sortForScoring,
-  roundPlan, continueAfterRound };
+  roundPlan, summarizeBatch, exactCandidateIdMembership, continueAfterRound };

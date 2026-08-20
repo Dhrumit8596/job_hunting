@@ -27,10 +27,12 @@ const { normalizeEnginePreference, parseEngine, codexModel, codexReasoningEffort
 const { scoringExcerpt } = require('./scoring-context');
 const ApplyProgress = require('./apply-progress');
 const ApplyRunControl = require('./apply-run-control');
+const PlanningDiagnostics = require('./apply-planning-diagnostics');
 const ApplyReportHealth = require('./apply-report-health');
 const LocalJsonClient = require('./local-json-client');
 const ScoringEvidence = require('./scoring-evidence');
 const ScoringFrontier = require('./scoring-frontier');
+const ScoringExecution = require('./scoring-execution');
 const SearchPolicy = require('./sourcing/search-policy');
 const SourceSafety = require('./sourcing/source-safety');
 const { decideRecovery } = require('./apply-recovery-policy');
@@ -1215,7 +1217,7 @@ function developerRecommendation(row = {}) {
   if (/outside_target_location/.test(reason)) {
     return 'Location safety gate: verify profile target-location preferences and keep stale/out-of-radius corpus rows out of apply planning.';
   }
-  if (/weak_match_evidence|too_many_(?:match|material)_gaps|hard_match_conflict|low_score_confidence|below_threshold|candidate_fingerprint_mismatch|scoring_policy_mismatch|unscored/.test(reason)) {
+  if (/weak_match_evidence|too_many_(?:match|material)_gaps|hard_match_conflict|low_score_confidence|stretch_transferability|below_threshold|candidate_fingerprint_mismatch|scoring_policy_mismatch|unscored/.test(reason)) {
     return 'Scoring/ranking gate: rescore against the current resume/JD evidence or leave out as unsuitable for autonomous apply.';
   }
   if (/prior_blocked_host|prior_blocked_record|prior_attempted_record|prior_attempted_state|deferred_retry_disabled|deferred_max_attempts/.test(reason)) {
@@ -1336,6 +1338,10 @@ function renderApplyRunReport(storage, options = {}) {
   if (ranked && Object.prototype.hasOwnProperty.call(ranked, 'unattemptedOnly')) {
     lines.push(`- First-attempt-only: ${ranked.unattemptedOnly === true ? 'yes' : 'no'}`);
   }
+  if (ranked && ranked.requireExactCandidateIds === true) {
+    const selection = ranked.candidateSelection || {};
+    lines.push(`- Exact candidate IDs: required; requested ${Number(selection.requestedCount || 0)}, selected ${Number(selection.selectedCount || 0)}, exact ${selection.exact === true ? 'yes' : 'no'}`);
+  }
   lines.push(`- Current index: ${ranked && ranked.currentIndex != null ? ranked.currentIndex : 'unknown'} / ${ranked && Array.isArray(ranked.jobs) ? ranked.jobs.length : 'unknown'}`);
   lines.push(`- Confirmed: ${count('confirmed')}`);
   lines.push(`- Failed: ${count('failed')}`);
@@ -1349,7 +1355,11 @@ function renderApplyRunReport(storage, options = {}) {
   }
   if (ranked && ranked.scoringPolicyVersion) {
     lines.push(`- Scoring policy: ${safeReportText(ranked.scoringPolicyVersion)}`);
-    lines.push(`- Scoring model batches: ${Number(ranked.scoringModelBatches || 0)}`);
+    lines.push(`- Scoring model batches: attempted ${Number(ranked.scoringModelBatches || 0)}; fully successful ${Number(ranked.scoringModelBatchesSucceeded || 0)}`);
+    const availability = ranked.scoringAvailability || {};
+    if (availability.status) {
+      lines.push(`- Scoring availability: ${safeReportText(availability.status)}; attempted ${Number(availability.attempted || 0)}, scored ${Number(availability.scored || 0)}, failed ${Number(availability.failed || 0)}${availability.reason ? `; reason ${safeReportText(availability.reason)}` : ''}${availability.retryable == null ? '' : `; retryable ${availability.retryable ? 'yes' : 'no'}`}`);
+    }
     const evidenceSummary = ranked.scoringEvidenceSummary || {};
     const transfer = evidenceSummary.transferability || {};
     const gaps = evidenceSummary.gapTotals || {};
@@ -1635,8 +1645,12 @@ function writeApplyPlanningReport(planningDrops, options = {}) {
       scoringPolicyVersion: options.scoringPolicyVersion || '',
       scoringRounds: Array.isArray(options.scoringRounds) ? options.scoringRounds : [],
       scoringModelBatches: Number(options.scoringModelBatches || 0),
+      scoringModelBatchesSucceeded: Number(options.scoringModelBatchesSucceeded || 0),
+      scoringAvailability: options.scoringAvailability || null,
       scoringEvidenceSummary: options.scoringEvidenceSummary || null,
       unattemptedOnly: options.unattemptedOnly === true,
+      requireExactCandidateIds: options.requireExactCandidateIds === true,
+      candidateSelection: options.candidateSelection || null,
       coverage: options.coverage === true,
       coverageCount: options.coverageCount != null ? Number(options.coverageCount) || 1 : undefined,
       channelCoverage: options.channelCoverage || null,
@@ -1707,6 +1721,7 @@ function summarizeApplyStatus(storage = {}, options = {}) {
   const activeRanked = storage.pja_ranked_apply || null;
   const completedRanked = storage.pja_last_completed_apply_run || null;
   const ranked = ApplyProgress.runFromStorage(storage, options.runId) || null;
+  const planningFailure = PlanningDiagnostics.compactWorkerFailure(ranked);
   const results = ranked && ranked.results || {};
   const count = key => Array.isArray(results[key]) ? results[key].length
     : ranked && ranked.counts && ranked.counts[key] != null ? Number(ranked.counts[key]) || 0
@@ -1750,6 +1765,7 @@ function summarizeApplyStatus(storage = {}, options = {}) {
       failed: count('failed'),
       skipped: count('skipped'),
       unverified: count('unverified'),
+      ...(planningFailure || {}),
       currentJob: currentJob ? {
         company: safeReportText(currentJob.company || ''),
         title: safeReportText(currentJob.title || ''),
@@ -1823,22 +1839,8 @@ async function scoreJobChunk(batch) {
 }
 
 async function scoreJobChunkWithRetry(batch, chunkIndex, maxAttempts = 3) {
-  let lastError = null;
-  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
-    try {
-      const scores = await scoreJobChunk(batch);
-      const got = new Set((scores || []).map(s => String(s && s.id)));
-      if (got.size === batch.length) return scores;
-      if (got.size > 0 && attempt === maxAttempts) return scores;
-      lastError = new Error(`partial score result ${got.size}/${batch.length}`);
-    } catch (e) {
-      lastError = e;
-    }
-    const waitMs = 750 * attempt + Math.floor(Math.random() * 250);
-    console.log(`[PJA] chunk ${chunkIndex + 1} score attempt ${attempt}/${maxAttempts} failed: ${lastError && lastError.message}; retrying in ${waitMs}ms`);
-    await new Promise(r => setTimeout(r, waitMs));
-  }
-  throw lastError || new Error('score chunk failed');
+  return ScoringExecution.scoreJobChunkWithRetry(batch, chunkIndex,
+    { maxAttempts, scoreChunk: scoreJobChunk, log: message => console.log(message) });
 }
 
 // Score all jobs in chunks of 10, with bounded concurrency. Resilient: a chunk that errors
@@ -1856,23 +1858,51 @@ async function scoreAll(jobs, concurrency = 3) {
   const chunks = [];
   for (let i = 0; i < jobs.length; i += 10) chunks.push(jobs.slice(i, i + 10));
   const byId = {};
-  let next = 0, done = 0;
+  const failuresById = {};
+  let circuitFailure = null;
+  let next = 0;
+  const failureMetadata = error => ({
+    code: error && error.code || 'llm_score_failed',
+    reason: error && error.reason || 'score_chunk_failed',
+    retryable: !(error && error.retryable === false),
+    engine: error && error.engine || '',
+  });
   async function worker() {
     while (next < chunks.length) {
       const idx = next++;
+      if (circuitFailure) {
+        for (const job of chunks[idx]) failuresById[String(job.id)] = circuitFailure;
+        console.log(`[PJA] skipped score chunk ${idx + 1}/${chunks.length}: ${circuitFailure.code} (${circuitFailure.reason})`);
+        continue;
+      }
       let scores = [];
       try { scores = await scoreJobChunkWithRetry(chunks[idx], idx); }
-      catch (e) { console.log(`[PJA] chunk ${idx + 1} failed: ${e.message}`); }
+      catch (e) {
+        scores = ScoringExecution.partialRowsFromError(chunks[idx], e);
+        const scoredIds = new Set(scores.map(row => String(row.id)));
+        const failure = failureMetadata(e);
+        for (const job of chunks[idx]) {
+          if (!scoredIds.has(String(job.id))) failuresById[String(job.id)] = failure;
+        }
+        if (failure.retryable === false) circuitFailure = failure;
+        console.log(`[PJA] score chunk ${idx + 1}/${chunks.length} failed: ${failure.code} (${failure.reason})`);
+      }
       for (const s of scores) if (s && s.id != null) byId[String(s.id)] = s;
-      console.log(`[PJA] scored chunk ${++done}/${chunks.length}`);
+      if (scores.length) console.log(`[PJA] scored chunk ${idx + 1}/${chunks.length}: ${scores.length}/${chunks[idx].length} jobs`);
     }
   }
   await Promise.all(Array.from({ length: Math.min(concurrency, chunks.length || 1) }, worker));
   const { tnAdjustScore, medicalWaferBoost } = require('./sourcing/filter');
   return jobs.map(j => {
     const result = byId[String(j.id)] || null;
-    if (!result) return { ...j, fitScore: null, scoreError: 'llm_score_failed',
+    if (!result) {
+      const failure = failuresById[String(j.id)] || { code: 'llm_score_failed',
+        reason: 'incomplete_score_result', retryable: true, engine: '' };
+      return { ...j, fitScore: null, scoreError: failure.code,
+        scoreErrorReason: failure.reason, scoreErrorRetryable: failure.retryable,
+        scoreErrorEngine: failure.engine,
       ...ScoringEvidence.normalizeScoreResult({ score: null, transferability: { level: 'stretch' } }) };
+    }
     const evidence = ScoringEvidence.normalizeScoreResult(result);
     let fitScore = medicalWaferBoost(j.title, j.company, j.description, tnAdjustScore(j.title, evidence.score));
     if (evidence.matchEvidence.length < minEvidenceForFitScore(fitScore) || evidence.conflicts.length ||
@@ -2780,16 +2810,24 @@ ${(description || '').slice(0, 6000)}`;
         const t0 = Date.now();
 
         const scored = await scoreAll(batch, 1);
-        const scores = scored.map(j => ({ id: j.id, score: j.fitScore,
+        const batchSummary = ScoringFrontier.summarizeBatch(scored, batch.length);
+        const scores = batchSummary.successful.map(j => ({ id: j.id, score: j.fitScore,
           scoringPolicyVersion: j.scoringPolicyVersion || '', matchEvidence: j.matchEvidence || [],
           gaps: j.gaps || [], gapDetails: j.gapDetails || [], materialGaps: j.materialGaps || [],
           trainableGaps: j.trainableGaps || [], preferredGaps: j.preferredGaps || [],
           transferability: j.transferability || null, conflicts: j.conflicts || [],
           confidence: j.confidence || 'low' }));
 
-        console.log(`done (${Date.now() - t0}ms) scores=[${scores.map(s=>s.score).join(',')}]`);
-        res.writeHead(200, CORS);
-        res.end(JSON.stringify({ success: true, scores }));
+        const scoringAvailability = { status: batchSummary.engineUnavailable ? 'unavailable' :
+          batchSummary.failed ? 'degraded' : 'available', code: batchSummary.failureCode,
+          reason: batchSummary.failureReason, retryable: batchSummary.retryable,
+          engine: batchSummary.engine, attempted: batchSummary.attempted,
+          scored: batchSummary.scored, failed: batchSummary.failed };
+        console.log(`done (${Date.now() - t0}ms) scored=${batchSummary.scored}/${batchSummary.attempted}`);
+        const unavailable = batchSummary.engineUnavailable && batchSummary.scored === 0;
+        res.writeHead(unavailable ? 503 : 200, CORS);
+        res.end(JSON.stringify({ success: !unavailable, code: unavailable ? 'ai_engine_unavailable' : undefined,
+          scores, scoringAvailability }));
       } catch (e) {
         console.error(`\n[PJA] Batch error: ${e.message}`);
         res.writeHead(500, CORS);
@@ -2968,9 +3006,14 @@ ${(description || '').slice(0, 6000)}`;
             }), workflowBudgets.workflowTimeoutMs);
             const failed = !worker.ok || worker.data && worker.data.success === false;
             if (failed) {
-              await persistApplyRunControl({ runId: requestedRunId, status: 'failed', phase: 'terminal',
-                terminalReason: String(worker.data && (worker.data.error || worker.data.stage) || `worker_http_${worker.status}`).slice(0, 120),
-                error: String(worker.data && worker.data.error || `HTTP ${worker.status}`).slice(0, 500) });
+              const ownedPlanningFailure = PlanningDiagnostics.compactWorkerFailure(worker.data);
+              const terminalPatch = { runId: requestedRunId, status: 'failed', phase: 'terminal',
+                terminalReason: ownedPlanningFailure ? ownedPlanningFailure.code :
+                  String(worker.data && (worker.data.error || worker.data.stage) || `worker_http_${worker.status}`).slice(0, 120),
+                error: ownedPlanningFailure ? ownedPlanningFailure.error :
+                  String(worker.data && worker.data.error || `HTTP ${worker.status}`).slice(0, 500) };
+              if (ownedPlanningFailure) Object.assign(terminalPatch, ownedPlanningFailure);
+              await persistApplyRunControl(terminalPatch);
             } else {
               const applyResult = worker.data && worker.data.apply || {};
               const noQueue = !applyResult.dryRun && Number(applyResult.planned) === 0;
@@ -3098,6 +3141,7 @@ ${(description || '').slice(0, 6000)}`;
           includeAssisted: o.includeAssisted !== false,
           perCompanyCap: o.perCompanyCap != null ? o.perCompanyCap : 2,
           e2eSafe: o.e2eSafe !== false,
+          requireExactCandidateIds: o.requireExactCandidateIds === true,
           workdayAttemptTimeoutMs: SourceSafety.resolveWorkdayAttemptTimeoutMs(o),
           coverage: coverageMode,
           coverageCount,
@@ -3152,6 +3196,13 @@ ${(description || '').slice(0, 6000)}`;
 
         if (o._ownedRunControl) await persistApplyRunControl({ runId: requestedRunId, status: 'planning', phase: 'planning' });
         const applyResp = await postLocalJson('/apply-run', applyBody, workflowBudgets.applyTimeoutMs);
+        const planningFailure = applyResp.status >= 400
+          ? PlanningDiagnostics.compactWorkerFailure(applyResp.data) : null;
+        if (planningFailure) {
+          res.writeHead(applyResp.status, CORS);
+          res.end(JSON.stringify({ success: false, runId: requestedRunId, ...planningFailure }));
+          return;
+        }
         res.writeHead(applyResp.status || (applyResp.ok ? 200 : 502), CORS);
         const startedRunId = applyResp.data && applyResp.data.runId || requestedRunId;
         res.end(JSON.stringify({ success: !!(applyResp.ok && (!applyResp.data || applyResp.data.success !== false)),
@@ -3532,6 +3583,7 @@ ${(description || '').slice(0, 6000)}`;
           }).filter(Boolean));
         const candidateIds = new Set((Array.isArray(o.candidateIds) ? o.candidateIds : [])
           .map(value => String(value || '').trim()).filter(Boolean));
+        const requireExactCandidateIds = o.requireExactCandidateIds === true;
         const denied = j => companyDeny.has(String(j.company || '').trim().toLowerCase()) ||
           titleDeny.some(term => String(j.title || '').toLowerCase().includes(term));
         const allowed = j => (!candidateAllow.size || candidateAllow.has(candidateKey(j))) &&
@@ -3625,6 +3677,9 @@ ${(description || '').slice(0, 6000)}`;
         const strategyCoverage = {};
         const scoringRounds = [];
         let scoringModelBatches = 0;
+        let scoringModelBatchesSucceeded = 0;
+        const scoringAvailability = { status: 'available', code: '', reason: '', retryable: null,
+          engine: '', attempted: 0, scored: 0, failed: 0 };
         let scoringEvidenceSummary = ScoringEvidence.summarize([]);
         for (const strategy of requiredStrategies) {
           const candidates = jobs.filter(j => strategyKey(j) === strategy);
@@ -3663,66 +3718,94 @@ ${(description || '').slice(0, 6000)}`;
           const reserveTarget = Math.min(30, Math.max(10, Number(o.reserveTarget) || 30));
           const evidenceQualified = j => j && j.fitScore >= threshold &&
             (!requireEvidence || hasEnoughMatchEvidence(j)) &&
+            (!requireEvidence || ScoringEvidence.isQualifyingTransferability(j)) &&
             (!requireEvidence || ScoringEvidence.materialGaps(j).length <= maxGaps) &&
             (!requireEvidence || !(j.conflicts || []).length) &&
             (!requireEvidence || ['high', 'medium'].includes(String(j.confidence || '').toLowerCase()));
           for (const round of ScoringFrontier.roundPlan(needsScore.length, { maximum: scoreCandidateLimit, roundSize: 100 })) {
             const roundStart = scored.length;
+            const roundAttemptedStart = scoringAvailability.attempted;
+            const roundFailedStart = scoringAvailability.failed;
             const roundRows = needsScore.slice(round.offset, round.offset + round.size);
+            let roundProcessed = 0;
+            let scoringCircuitOpen = false;
             for (let batchOffset = 0; batchOffset < roundRows.length; batchOffset += 10) {
-            const stubs = roundRows.slice(batchOffset, batchOffset + 10);
-            const detailResp = await wsAsk('getApplyDescriptions', { ids: stubs.map(j => j.id) },
-              'applyDescriptionsReply', 30000);
-            if (detailResp.error) {
-              for (const j of stubs) planningDrops = appendPlanningDrop(planningDrops, j,
-                'rescore_description_unavailable', planningDropLimit);
-              continue;
-            }
-            const details = new Map((detailResp.jobs || []).map(row => [String(row && row.id || ''), row]));
-            const hydrated = [];
-            for (const stub of stubs) {
-              const detail = details.get(String(stub.id));
-              if (!detail || !detail.description || !detail.descriptionReady ||
-                  /^(missing|stale|needs_description)$/i.test(String(detail.descriptionStatus || ''))) {
-                planningDrops = appendPlanningDrop(planningDrops, stub, 'rescore_description_unavailable', planningDropLimit);
+              const stubs = roundRows.slice(batchOffset, batchOffset + 10);
+              roundProcessed += stubs.length;
+              const detailResp = await wsAsk('getApplyDescriptions', { ids: stubs.map(j => j.id) },
+                'applyDescriptionsReply', 30000);
+              if (detailResp.error) {
+                for (const j of stubs) planningDrops = appendPlanningDrop(planningDrops, j,
+                  'rescore_description_unavailable', planningDropLimit);
                 continue;
               }
-              hydrated.push({ ...stub, description: detail.description,
-                descriptionStatus: detail.descriptionStatus || stub.descriptionStatus,
-                postingDescriptionFingerprint: detail.descriptionFingerprint || stub.postingDescriptionFingerprint });
-            }
-            const batchScored = hydrated.length ? await scoreAll(hydrated, 1) : [];
-            if (hydrated.length) scoringModelBatches += 1;
-            if (batchScored.length) {
-              await wsAsk('updateScores', { scores: batchScored.map(j => {
-                const fp = j.postingDescriptionFingerprint || descriptionFingerprint(j.description);
-                return { id: j.id, fitScore: j.fitScore, descriptionFingerprint: fp,
-                  candidateFingerprint: runtimeCandidateFingerprint,
-                  evidenceFingerprint: `${fp}:${runtimeCandidateFingerprint}:${ScoringEvidence.SCORING_POLICY_VERSION}`,
-                  scoringPolicyVersion: j.scoringPolicyVersion,
-                  matchEvidence: j.matchEvidence, gaps: j.gaps, gapDetails: j.gapDetails,
-                  materialGaps: j.materialGaps, trainableGaps: j.trainableGaps,
-                  preferredGaps: j.preferredGaps, transferability: j.transferability,
-                  conflicts: j.conflicts, confidence: j.confidence };
-              }) }, 'updateScoresReply', 120000);
-              // Do not retain description text beyond this scoring batch.
-              scored.push(...batchScored.map(j => { const out = { ...j }; delete out.description; return out; }));
-            }
+              const details = new Map((detailResp.jobs || []).map(row => [String(row && row.id || ''), row]));
+              const hydrated = [];
+              for (const stub of stubs) {
+                const detail = details.get(String(stub.id));
+                if (!detail || !detail.description || !detail.descriptionReady ||
+                    /^(missing|stale|needs_description)$/i.test(String(detail.descriptionStatus || ''))) {
+                  planningDrops = appendPlanningDrop(planningDrops, stub, 'rescore_description_unavailable', planningDropLimit);
+                  continue;
+                }
+                hydrated.push({ ...stub, description: detail.description,
+                  descriptionStatus: detail.descriptionStatus || stub.descriptionStatus,
+                  postingDescriptionFingerprint: detail.descriptionFingerprint || stub.postingDescriptionFingerprint });
+              }
+              const batchScored = hydrated.length ? await scoreAll(hydrated, 1) : [];
+              if (hydrated.length) scoringModelBatches += 1;
+              const batchSummary = ScoringFrontier.summarizeBatch(batchScored, hydrated.length);
+              scoringAvailability.attempted += batchSummary.attempted;
+              scoringAvailability.scored += batchSummary.scored;
+              scoringAvailability.failed += batchSummary.failed;
+              if (hydrated.length && batchSummary.failed === 0) scoringModelBatchesSucceeded += 1;
+              if (batchSummary.failed) {
+                scoringAvailability.status = batchSummary.engineUnavailable ? 'unavailable' : 'degraded';
+                scoringAvailability.code = batchSummary.failureCode || 'llm_score_failed';
+                scoringAvailability.reason = batchSummary.failureReason || 'score_chunk_failed';
+                scoringAvailability.retryable = batchSummary.retryable;
+                scoringAvailability.engine = batchSummary.engine || scoringAvailability.engine;
+                const dropReason = batchSummary.engineUnavailable ? 'rescore_ai_engine_unavailable' : 'rescore_scoring_failed';
+                for (const j of batchSummary.failures) {
+                  planningDrops = appendPlanningDrop(planningDrops, j, dropReason, planningDropLimit);
+                }
+              }
+              if (batchSummary.successful.length) {
+                await wsAsk('updateScores', { scores: batchSummary.successful.map(j => {
+                  const fp = j.postingDescriptionFingerprint || descriptionFingerprint(j.description);
+                  return { id: j.id, fitScore: j.fitScore, descriptionFingerprint: fp,
+                    candidateFingerprint: runtimeCandidateFingerprint,
+                    evidenceFingerprint: `${fp}:${runtimeCandidateFingerprint}:${ScoringEvidence.SCORING_POLICY_VERSION}`,
+                    scoringPolicyVersion: j.scoringPolicyVersion,
+                    matchEvidence: j.matchEvidence, gaps: j.gaps, gapDetails: j.gapDetails,
+                    materialGaps: j.materialGaps, trainableGaps: j.trainableGaps,
+                    preferredGaps: j.preferredGaps, transferability: j.transferability,
+                    conflicts: j.conflicts, confidence: j.confidence };
+                }) }, 'updateScoresReply', 120000);
+                // Do not retain description text beyond this scoring batch.
+                scored.push(...batchSummary.successful.map(j => { const out = { ...j }; delete out.description; return out; }));
+              }
+              if (batchSummary.engineUnavailable) { scoringCircuitOpen = true; break; }
             }
             const roundScored = scored.slice(roundStart);
+            const roundAttempted = scoringAvailability.attempted - roundAttemptedStart;
+            const roundFailed = scoringAvailability.failed - roundFailedStart;
             const qualified = roundScored.filter(evidenceQualified).length;
             const qualifiedTotal = reusable.filter(evidenceQualified).length + scored.filter(evidenceQualified).length;
-            const remaining = Math.max(0, needsScore.length - round.offset - round.size);
-            const decision = ScoringFrontier.continueAfterRound({ scored: roundScored.length,
+            const remaining = Math.max(0, needsScore.length - round.offset - roundProcessed);
+            const decision = ScoringFrontier.continueAfterRound({ attempted: roundAttempted,
+              scored: roundScored.length, failed: roundFailed, engineUnavailable: scoringCircuitOpen,
               qualified, qualifiedTotal, remaining }, { reserveTarget });
             scoringRounds.push({ round: scoringRounds.length + 1, candidates: roundRows.length,
-              scored: roundScored.length, qualified, qualifiedTotal, remaining, decision: decision.reason });
+              attempted: roundAttempted, scored: roundScored.length, failed: roundFailed,
+              qualified, qualifiedTotal, remaining, decision: decision.reason });
             scoringRounds[scoringRounds.length - 1].evidence = ScoringEvidence.summarize(roundScored);
-            stoppedAt = round.offset + round.size;
-            if (!decision.continue) { stoppedAt = round.offset + round.size; break; }
+            stoppedAt = round.offset + roundProcessed;
+            if (!decision.continue) break;
           }
           for (const j of needsScore.slice(stoppedAt)) planningDrops = appendPlanningDrop(planningDrops, j,
-            'progressive_scoring_early_stop', planningDropLimit);
+            scoringAvailability.status === 'unavailable' ? 'progressive_scoring_engine_unavailable' :
+              'progressive_scoring_early_stop', planningDropLimit);
           const scoredPool = reusable.concat(scored);
           scoringEvidenceSummary = ScoringEvidence.summarize(scoredPool);
           for (const channel of requiredChannels) channelCoverage[channel].scored = scoredPool.filter(j =>
@@ -3735,6 +3818,7 @@ ${(description || '').slice(0, 6000)}`;
               if (j.fitScore == null) reason = 'rescore_missing_fit_score';
               else if (j.fitScore < threshold) reason = 'rescore_below_threshold';
               else if (requireEvidence && !hasEnoughMatchEvidence(j)) reason = 'rescore_weak_match_evidence';
+              else if (requireEvidence && !ScoringEvidence.isQualifyingTransferability(j)) reason = 'rescore_stretch_transferability';
               else if (requireEvidence && ScoringEvidence.materialGaps(j).length > maxGaps) reason = 'rescore_too_many_material_gaps';
               else if (requireEvidence && (j.conflicts || []).length) reason = 'rescore_hard_match_conflict';
               else if (requireEvidence && !['high', 'medium'].includes(String(j.confidence || '').toLowerCase())) reason = 'rescore_low_score_confidence';
@@ -3845,42 +3929,74 @@ ${(description || '').slice(0, 6000)}`;
           }
         }
 
+        const candidateSelection = { required: requireExactCandidateIds,
+          ...ScoringFrontier.exactCandidateIdMembership(candidateIds, jobs) };
+        if (!dryRun && requireExactCandidateIds && !candidateSelection.exact) {
+          const report = writeApplyPlanningReport(planningDrops || null,
+            { status: 'exact_candidate_ids_blocked', jobs, unattemptedOnly,
+              requireExactCandidateIds, candidateSelection,
+              coverage: coverageMode, coverageCount, channelCoverage, strategyCoverage,
+              scoringPolicyVersion: ScoringEvidence.SCORING_POLICY_VERSION, scoringRounds,
+              scoringModelBatches, scoringModelBatchesSucceeded, scoringAvailability,
+              scoringEvidenceSummary, storage: control });
+          const planningFailure = PlanningDiagnostics.exactCandidateFailure({
+            code: PlanningDiagnostics.EXACT_CANDIDATE_CODE, candidateSelection,
+            scoringAvailability, planningDrops,
+          });
+          res.writeHead(409, CORS); res.end(JSON.stringify({ success: false, stage: 'planning',
+            ...planningFailure, runId: plannedRunId, requireExactCandidateIds, report,
+            next: 'restore current evidence for every approved candidate ID, then retry the same bounded admission' }));
+          return;
+        }
+
         const uncoveredChannels = requiredChannels.filter(channel => (channelCoverage[channel].qualified || 0) < coverageCount);
         if (uncoveredChannels.length) {
           const report = writeApplyPlanningReport(planningDrops || null,
             { status: 'channel_coverage_blocked', coverage: coverageMode, coverageCount, channelCoverage, strategyCoverage,
-              unattemptedOnly,
+              unattemptedOnly, requireExactCandidateIds, candidateSelection,
               scoringPolicyVersion: ScoringEvidence.SCORING_POLICY_VERSION, scoringRounds,
-              scoringModelBatches, scoringEvidenceSummary, storage: control });
+              scoringModelBatches, scoringModelBatchesSucceeded, scoringAvailability,
+              scoringEvidenceSummary, storage: control });
           res.writeHead(409, CORS); res.end(JSON.stringify({ success: false, stage: 'channel_coverage',
             error: 'required channel coverage is not ready', uncoveredChannels, coverageCount, channelCoverage,
-            planningDrops: planningDrops || null, report,
+            planningDrops: planningDrops || null, report, scoringAvailability,
             next: 'hydrate missing browser leads, then rescore before starting an apply run' })); return;
         }
         const uncoveredStrategies = requiredStrategies.filter(strategy => (strategyCoverage[strategy].qualified || 0) < coverageCount);
         if (uncoveredStrategies.length) {
           const report = writeApplyPlanningReport(planningDrops || null,
             { status: 'strategy_coverage_blocked', coverage: coverageMode, coverageCount, channelCoverage, strategyCoverage,
-              unattemptedOnly,
+              unattemptedOnly, requireExactCandidateIds, candidateSelection,
               scoringPolicyVersion: ScoringEvidence.SCORING_POLICY_VERSION, scoringRounds,
-              scoringModelBatches, scoringEvidenceSummary, storage: control });
+              scoringModelBatches, scoringModelBatchesSucceeded, scoringAvailability,
+              scoringEvidenceSummary, storage: control });
           res.writeHead(409, CORS); res.end(JSON.stringify({ success: false, stage: 'strategy_coverage',
             error: 'required apply strategy coverage is not ready', uncoveredStrategies, coverageCount, strategyCoverage,
-            planningDrops: planningDrops || null, report,
+            planningDrops: planningDrops || null, report, scoringAvailability,
             next: 'source/hydrate at least one qualified real posting per required ATS strategy, then rescore before starting an apply run' })); return;
         }
 
         if (!jobs.length) {
+          const scoringUnavailable = scoringAvailability.status === 'unavailable';
           const report = writeApplyPlanningReport(planningDrops || null,
-            { status: dryRun ? 'dry_run_nothing_eligible' : 'nothing_eligible',
-              unattemptedOnly,
+            { status: scoringUnavailable ? 'scoring_engine_unavailable' :
+                dryRun ? 'dry_run_nothing_eligible' : 'nothing_eligible',
+              unattemptedOnly, requireExactCandidateIds, candidateSelection,
               coverage: coverageMode, coverageCount, channelCoverage, strategyCoverage,
               scoringPolicyVersion: ScoringEvidence.SCORING_POLICY_VERSION, scoringRounds,
-              scoringModelBatches, scoringEvidenceSummary, storage: control });
-          res.writeHead(200, CORS); res.end(JSON.stringify({ success: true, planned: 0,
+              scoringModelBatches, scoringModelBatchesSucceeded, scoringAvailability,
+              scoringEvidenceSummary, storage: control });
+          const scoringFailure = scoringUnavailable ? PlanningDiagnostics.scoringEngineFailure({
+            code: 'ai_engine_unavailable', scoringAvailability, planningDrops,
+          }) : null;
+          res.writeHead(scoringUnavailable ? 503 : 200, CORS); res.end(JSON.stringify({
+          success: !scoringUnavailable, ...(scoringFailure || {}),
+          retryable: scoringUnavailable ? scoringAvailability.retryable : undefined, planned: 0,
           note: 'nothing eligible', corpusTotal: setResp.total, assistedExcluded, day, timeZone,
-          dailyTarget, alreadyConfirmedToday, remainingTarget, planningDrops: planningDrops || null,
-          report, scoringRounds, scoringModelBatches, scoringEvidenceSummary,
+          dailyTarget, alreadyConfirmedToday, remainingTarget,
+          planningDrops: scoringUnavailable ? scoringFailure.planningDrops : planningDrops || null,
+          report, scoringRounds, scoringModelBatches, scoringModelBatchesSucceeded, scoringAvailability,
+          scoringEvidenceSummary,
           scoringPolicyVersion: ScoringEvidence.SCORING_POLICY_VERSION })); return;
         }
 
@@ -3922,9 +4038,11 @@ ${(description || '').slice(0, 6000)}`;
             runId, category, runMode, applyAllAboveScore, targetConfirmed: dailyTarget, dailyTarget, attemptCap, threshold,
             targetScope, day: targetScope === 'day' ? day : '', calendarDay: day, timeZone,
             confirmedCount: alreadyConfirmedToday, remaining: remainingTarget,
-            stopBeforeSubmit, e2eSafe, unattemptedOnly,
+            stopBeforeSubmit, e2eSafe, unattemptedOnly, requireExactCandidateIds, candidateSelection,
             workdayAttemptTimeoutMs: o.workdayAttemptTimeoutMs != null ? Math.max(30000, Number(o.workdayAttemptTimeoutMs) || 0) : undefined,
             planningDrops: planningDrops || null,
+            scoringPolicyVersion: ScoringEvidence.SCORING_POLICY_VERSION, scoringRounds,
+            scoringModelBatches, scoringModelBatchesSucceeded, scoringAvailability, scoringEvidenceSummary,
             coverage: coverageMode, coverageCount, channelCoverage, strategyCoverage,
             startedAt: plannedAt, updatedAt: plannedAt, lastTransitionAt: plannedAt };
           const started = await wsAsk('startRankedApply', { master, force: !!o.force },
@@ -3948,16 +4066,19 @@ ${(description || '').slice(0, 6000)}`;
         const previewLimit = Math.max(1, Math.min(500, Number(o.previewLimit) || 12));
         const report = dryRun ? writeApplyPlanningReport(planningDrops || null,
           { status: 'dry_run_planned', jobs: queueJobs, coverage: coverageMode, coverageCount,
-            unattemptedOnly,
+            unattemptedOnly, requireExactCandidateIds, candidateSelection,
             channelCoverage, strategyCoverage, scoringPolicyVersion: ScoringEvidence.SCORING_POLICY_VERSION,
-            scoringRounds, scoringModelBatches, scoringEvidenceSummary, storage: control }) : null;
+            scoringRounds, scoringModelBatches, scoringModelBatchesSucceeded, scoringAvailability,
+            scoringEvidenceSummary, storage: control }) : null;
         res.end(JSON.stringify({ success: true, dryRun, planned: queueJobs.length,
           runMode, applyAllAboveScore, targetConfirmed: remainingTarget, dailyTarget,
           alreadyConfirmedToday, remainingTarget,
           day, timeZone, targetScope, category, assistedExcluded, includeAssisted, e2eSafe, unattemptedOnly,
+          requireExactCandidateIds, candidateSelection,
           reserveCount: applyAllAboveScore ? 0 : Math.max(0, queueJobs.length - remainingTarget), runId, byChannel,
           byStrategy, channelCoverage, strategyCoverage, coverage: coverageMode, coverageCount, corpusTotal: setResp.total,
           planningDrops: planningDrops || null, report, scoringRounds, scoringModelBatches,
+          scoringModelBatchesSucceeded, scoringAvailability,
           scoringEvidenceSummary,
           scoringPolicyVersion: ScoringEvidence.SCORING_POLICY_VERSION,
           top: jobs.slice(0, previewLimit).map(j => ({ fit: j.fitScore, company: j.company, title: j.title,
