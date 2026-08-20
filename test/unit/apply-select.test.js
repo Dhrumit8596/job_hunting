@@ -34,6 +34,9 @@ module.exports = (t) => {
   t.eq(applyUrlKey('https://www.linkedin.com/jobs/search-results/?currentJobId=4429434522&keywords=jobs&f_AL=true'),
     applyUrlKey('https://www.linkedin.com/jobs/view/4429434522/'),
     'LinkedIn identity: search-result and canonical view URLs de-duplicate to one key');
+  t.eq(applyUrlKey('https://bloomenergy.wd1.myworkdayjobs.com/en-US/BloomEnergyCareers/job/Fremont-California/Senior-Process-Engineer_JR-22717'),
+    applyUrlKey('https://bloomenergy.wd1.myworkdayjobs.com/BloomEnergyCareers/job/Fremont-California/Senior-Process-Engineer_JR-22717'),
+    'Workday identity: a leading locale is presentation-only and cannot create a retry alias');
   t.eq(destinationStrategy({ ats: 'linkedin', sourcePlatform: 'linkedin', channel: 'external',
     needsAtsResolution: true, applyUrl: 'https://careers.example.com/jobs/R1' }), '',
   'destination strategy: LinkedIn provenance never becomes an off-site application strategy');
@@ -152,6 +155,22 @@ module.exports = (t) => {
     attemptedRecords: [{ id: 'linkedin:4447770000', company: 'Alias Co', title: 'Process Quality Engineer',
       applyUrl: 'https://www.linkedin.com/jobs/view/4447770000/', status: 'failed' }] }).dropCounts.prior_attempted_record,
     1, 'first-attempt-only selection recognizes an attempted LinkedIn source alias after direct ATS resolution');
+  const workdayLocaleAlias = corpus([{ id: 'linkedin:4419995122', company: 'Bloom Energy',
+    title: 'Senior Process Engineer',
+    applyUrl: 'https://bloomenergy.wd1.myworkdayjobs.com/BloomEnergyCareers/job/Fremont-California/Senior-Process-Engineer_JR-22717',
+    fit: 86, ats: 'linkedin', channel: 'external' }]);
+  workdayLocaleAlias.index['linkedin:4419995122'].sourcePlatform = 'linkedin';
+  const localeAliasPlan = buildApplyPlan(workdayLocaleAlias, { threshold: 70,
+    unattemptedOnly: true, blockedRecords: [{ id: 'workday:JR-22717', company: 'Bloom Energy',
+      title: 'Senior Process Engineer', status: 'submitted', reason: 'submit_observation_timeout',
+      applyUrl: 'https://bloomenergy.wd1.myworkdayjobs.com/en-US/BloomEnergyCareers/job/Fremont-California/Senior-Process-Engineer_JR-22717' }],
+    attemptedRecords: [{ id: 'workday:JR-22717', company: 'Bloom Energy',
+      title: 'Senior Process Engineer', status: 'submitted', reason: 'submit_observation_timeout',
+      applyUrl: 'https://bloomenergy.wd1.myworkdayjobs.com/en-US/BloomEnergyCareers/job/Fremont-California/Senior-Process-Engineer_JR-22717' }] });
+  t.eq({ selected: localeAliasPlan.jobs.length,
+    blocked: localeAliasPlan.dropCounts.prior_blocked_record },
+  { selected: 0, blocked: 1 },
+  'first-attempt-only selection blocks a LinkedIn-origin Workday alias after locale normalization');
   const attemptedStateCorpus = corpus([
     { id: 'greenhouse:state-1', company: 'State Co', title: 'Process Engineer',
       applyUrl: 'https://boards.greenhouse.io/state/jobs/1', fit: 82, status: 'sourced', attempts: 1 },

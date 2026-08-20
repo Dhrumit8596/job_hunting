@@ -41,6 +41,13 @@
         u.pathname = '/jobs/view/' + linkedInId;
         u.search = '';
       }
+      // Workday emits the same requisition both with and without a leading locale segment
+      // (for example `/en-US/Site/job/...` and `/Site/job/...`). Treat that presentation-only
+      // variant as one identity so a browser-sourced alias cannot evade an earlier official-route
+      // attempt or submitted/unverified ledger record.
+      if (detectAts(u.toString()) === 'workday') {
+        u.pathname = u.pathname.replace(/^\/[a-z]{2}-[a-z]{2}(?=\/)/i, '');
+      }
       for (const k of Array.from(u.searchParams.keys())) if (/^(utm_.+|trk|trackingId|ref|refId|source|src|campaign|from)$/i.test(k)) u.searchParams.delete(k);
       u.searchParams.sort();
       return u.hostname.toLowerCase() + u.pathname.replace(/\/+$/, '') + u.search;
