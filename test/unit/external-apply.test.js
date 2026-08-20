@@ -25,6 +25,31 @@ const P = {
 module.exports = (t) => {
   const externalSource = fs.readFileSync(path.resolve(__dirname, '../../content/external-apply.js'), 'utf8');
   const backgroundSource = fs.readFileSync(path.resolve(__dirname, '../../background.js'), 'utf8');
+
+  const prompt = { tagName: 'DIV', textContent: 'Are you legally authorized to work in the United States?', matches: () => false, querySelector: () => null };
+  const ashbyGroup = {
+    parentElement: null,
+    textContent: `${prompt.textContent} Yes No`,
+    children: [],
+    matches: () => false,
+    getAttribute: () => '',
+    querySelectorAll: () => ashbyRadios,
+    querySelector: selector => selector.startsWith(':scope') ? prompt : null,
+  };
+  const option = () => ({
+    parentElement: ashbyGroup,
+    tagName: 'DIV',
+    matches: () => false,
+    querySelectorAll: () => [1],
+    querySelector: () => null,
+  });
+  const ashbyRadios = [0, 1].map(() => ({ parentElement: option(), closest: () => ashbyGroup }));
+  ashbyGroup.children = [prompt, ...ashbyRadios.map(r => r.parentElement)];
+  t.ok(w.pjaAshbyRadioGroupRoot(ashbyRadios[0]) === ashbyGroup,
+    'external-apply: Ashby radio grouping climbs past the per-option div');
+  t.eq(w.pjaAshbyRadioQuestionText(ashbyRadios),
+    'Are you legally authorized to work in the United States?',
+    'external-apply: Ashby repair resolves the parent question rather than the Yes/No option text');
   t.ok(externalSource.includes('window.PJAPreflight') &&
     externalSource.includes('pjaClassifyExternalPreflight') &&
     externalSource.includes("preflight.reason === 'chatbot_apply_manual'") &&

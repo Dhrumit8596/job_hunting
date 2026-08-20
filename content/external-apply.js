@@ -12,6 +12,41 @@
 
   function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
+  // Ashby commonly wraps each radio option in its own generic div.  Using the
+  // nearest div as the group makes the "question" read as only "Yes" or "No",
+  // so the storage-backed answer resolver cannot match authorization/location
+  // questions.  Walk to the nearest ancestor that actually owns multiple radio
+  // options and prefer an explicit prompt node from that container.
+  function pjaAshbyRadioGroupRoot(radio) {
+    let node = radio && radio.parentElement;
+    for (let depth = 0; node && depth < 8; depth++, node = node.parentElement) {
+      const radios = node.querySelectorAll ? node.querySelectorAll('input[type="radio"]') : [];
+      if (radios.length < 2) continue;
+      if (node.matches?.('fieldset,[role="group"],[data-testid*="question"],[class*="question"],[class*="field"]')) return node;
+      const prompt = node.querySelector?.(':scope > legend, :scope > [data-testid*="label"], :scope > [class*="label"], :scope > label, :scope > p, :scope > h2, :scope > h3, :scope > h4');
+      if (prompt) return node;
+    }
+    return radio?.closest?.('fieldset,[role="group"],[data-testid*="question"],[class*="question"],[class*="field"]') || radio?.parentElement || null;
+  }
+
+  function pjaAshbyRadioQuestionText(radios) {
+    const first = radios && radios[0];
+    const field = pjaAshbyRadioGroupRoot(first);
+    if (!field) return '';
+    let prompt = field.querySelector?.('legend,[data-testid*="label"],[class*="label"]');
+    if (!prompt) {
+      prompt = Array.from(field.children || []).find(el =>
+        !el.matches?.('input,[role="radio"]') &&
+        /^(LABEL|P|H2|H3|H4|DIV)$/.test(el.tagName || '') &&
+        !el.querySelector?.('input[type="radio"]')) || null;
+    }
+    const labelledBy = field.getAttribute?.('aria-labelledby');
+    if (!prompt && labelledBy) prompt = document.getElementById(labelledBy.split(/\s+/)[0]);
+    return String(prompt?.textContent || field.textContent || '').replace(/\s+/g, ' ').trim().slice(0, 240);
+  }
+  window.pjaAshbyRadioGroupRoot = pjaAshbyRadioGroupRoot;
+  window.pjaAshbyRadioQuestionText = pjaAshbyRadioQuestionText;
+
   function pjaClassifyExternalPreflight(signals) {
     const policy = window.PJAPreflight;
     if (!policy || typeof policy.classifyPreflight !== 'function') return null;
@@ -1902,12 +1937,7 @@
         txt = txt || radio.closest('label')?.textContent || radio.parentElement?.textContent || radio.value || '';
         return String(txt || '').replace(/\s+/g, ' ').trim();
       };
-      const groupText = radios => {
-        const first = radios[0];
-        const field = first.closest('fieldset,[role="group"],[class*="field"],[class*="question"],[data-testid*="question"],div');
-        const legend = field?.querySelector('legend,[class*="label"],label')?.textContent || '';
-        return String(legend || field?.textContent || '').replace(/\s+/g, ' ').trim().slice(0, 240);
-      };
+      const groupText = radios => pjaAshbyRadioQuestionText(radios);
       const answerFor = question => {
         const field = { label: question, type: 'radio', options: [] };
         const context = { profile, answers: answers || {}, prefs: job && job.prefs || {} };
@@ -1929,7 +1959,7 @@
       const groups = new Map();
       for (const radio of pjaQueryAllExt('input[type="radio"]')) {
         if (!visible(radio)) continue;
-        const key = radio.name || radio.closest('fieldset,[role="group"],[class*="field"],[class*="question"]')?.textContent?.slice(0, 120) || radio.id || Math.random();
+        const key = radio.name || pjaAshbyRadioGroupRoot(radio) || radio.id || Math.random();
         const arr = groups.get(key) || [];
         arr.push(radio);
         groups.set(key, arr);
